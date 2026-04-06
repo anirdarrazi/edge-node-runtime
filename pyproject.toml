@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autonomousc-node-agent"
+version = "0.1.0"
+description = "AUTONOMOUSc edge node agent for the Docker appliance"
+requires-python = ">=3.11"
+dependencies = [
+  "cryptography>=43.0.0",
+  "httpx>=0.27.0",
+  "pydantic>=2.8.0",
+  "pydantic-settings>=2.3.0"
+]
+
+[project.scripts]
+node-agent = "node_agent.main:run"
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
