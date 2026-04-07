@@ -14,6 +14,7 @@ class FakeControl:
         self.require_calls = 0
         self.attest_calls = 0
         self.clear_calls = 0
+        self.recovery_notes = []
         self.auth_fail_on_heartbeat = False
 
     def has_credentials(self) -> bool:
@@ -46,6 +47,9 @@ class FakeControl:
     def clear_credentials(self):
         self.clear_calls += 1
         self._has_credentials = False
+
+    def write_recovery_note(self, message: str):
+        self.recovery_notes.append(message)
 
     def is_auth_error(self, error: Exception) -> bool:
         return isinstance(error, httpx.HTTPStatusError) and error.response.status_code == 401
@@ -86,3 +90,4 @@ def test_run_worker_loop_clears_credentials_after_auth_failure():
         main_module.run_worker_loop(control, object(), attest_on_start=False)
 
     assert control.clear_calls == 1
+    assert control.recovery_notes

@@ -13,10 +13,13 @@ LOGGER = logging.getLogger("autonomousc-node-agent")
 
 
 def bootstrap_node(control: EdgeControlClient, interactive: bool) -> str:
+    print("Starting node bootstrap...")
     node_id, _node_key = control.bootstrap(interactive=interactive)
     LOGGER.info("node enrolled or restored: %s", node_id)
+    print("Claim completed. Running node attestation...")
     control.attest()
     LOGGER.info("node attested: %s", node_id)
+    print("Node attested and ready for runtime startup.")
     return node_id
 
 
@@ -24,8 +27,10 @@ def run_worker_loop(control: EdgeControlClient, runtime: VLLMRuntime, attest_on_
     node_id, _node_key = control.require_credentials()
     LOGGER.info("node enrolled or restored: %s", node_id)
     if attest_on_start:
+        print("Refreshing node attestation before entering the worker loop...")
         control.attest()
         LOGGER.info("node attested: %s", node_id)
+    print("Node agent is online. Polling the control plane for assignments...")
 
     while True:
         try:
@@ -46,6 +51,10 @@ def run_worker_loop(control: EdgeControlClient, runtime: VLLMRuntime, attest_on_
             if control.is_auth_error(error):
                 LOGGER.warning(
                     "node credentials were rejected by the control plane; clearing local credentials and requiring a new bootstrap"
+                )
+                control.write_recovery_note(
+                    "This node lost control-plane access because its credentials were rejected or revoked. "
+                    "Run `node-agent bootstrap` again from an interactive terminal to reclaim it."
                 )
                 control.clear_credentials()
                 raise RuntimeError(

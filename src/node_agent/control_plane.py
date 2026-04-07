@@ -4,6 +4,8 @@ import base64
 import json
 import sys
 import time
+import webbrowser
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +41,7 @@ class EdgeControlClient:
             json.dumps({"node_id": node_id, "node_key": node_key}, indent=2),
             encoding="utf-8",
         )
+        self.clear_recovery_note()
 
     def _interactive_terminal_available(self) -> bool:
         return sys.stdin.isatty() and sys.stdout.isatty()
@@ -66,6 +69,19 @@ class EdgeControlClient:
             },
         }
 
+    @staticmethod
+    def _format_remaining_time(expires_at: str) -> str:
+        remaining_seconds = max(
+            0,
+            int(datetime.fromisoformat(expires_at.replace("Z", "+00:00")).timestamp() - datetime.now(timezone.utc).timestamp()),
+        )
+        minutes, seconds = divmod(remaining_seconds, 60)
+        if minutes >= 10:
+            return f"{minutes} min remaining"
+        if minutes > 0:
+            return f"{minutes}m {seconds:02d}s"
+        return f"{seconds}s"
+
     def _print_claim_instructions(self, claim: NodeClaimSession) -> None:
         print()
         print("AUTONOMOUSc Edge Node Claim")
@@ -74,6 +90,14 @@ class EdgeControlClient:
         print(f"Claim code: {claim.claim_code}")
         print(f"Approval URL: {claim.approval_url}")
         print(f"Claim expires at: {claim.expires_at}")
+        try:
+            opened = webbrowser.open(claim.approval_url, new=2)
+        except Exception:
+            opened = False
+        if opened:
+            print("A browser tab was opened for you. If it did not appear, copy the approval URL above.")
+        else:
+            print("If your browser does not open automatically, copy the approval URL above into a browser on this device.")
         print("Waiting for browser approval...")
         print()
 
@@ -98,6 +122,16 @@ class EdgeControlClient:
         self.settings.node_key = None
         if credentials_path.exists():
             credentials_path.unlink()
+
+    def write_recovery_note(self, message: str) -> None:
+        note_path = Path(self.settings.recovery_note_path)
+        note_path.parent.mkdir(parents=True, exist_ok=True)
+        note_path.write_text(message + "\n", encoding="utf-8")
+
+    def clear_recovery_note(self) -> None:
+        note_path = Path(self.settings.recovery_note_path)
+        if note_path.exists():
+            note_path.unlink()
 
     @staticmethod
     def is_auth_error(error: Exception) -> bool:
@@ -155,13 +189,21 @@ class EdgeControlClient:
 
         claim = self.create_node_claim_session()
         self._print_claim_instructions(claim)
+        last_status: str | None = None
+        last_remaining: str | None = None
 
         while True:
             result = self.poll_node_claim_session(claim.claim_id, claim.poll_token)
             if result.node_id and result.node_key:
+                print("Claim approved. Storing node credentials and finishing bootstrap...")
                 return self._persist_from_response(result.model_dump())
             if result.status == "expired":
                 raise RuntimeError("Node claim expired before approval completed. Run `node-agent bootstrap` again.")
+            remaining = self._format_remaining_time(result.expires_at)
+            if result.status != last_status or remaining != last_remaining:
+                print(f"Status: waiting for operator login and claim approval. Time remaining: {remaining}.")
+                last_status = result.status
+                last_remaining = remaining
             time.sleep(claim.poll_interval_seconds)
 
     def attest(self) -> None:
@@ -193,6 +235,7 @@ class EdgeControlClient:
             },
         )
         response.raise_for_status()
+        self.clear_recovery_note()
 
     def pull_assignment(self) -> AssignmentEnvelope | None:
         response = self.client.post(

@@ -18,6 +18,7 @@ class NodeAgentSettings(BaseSettings):
     node_id: str | None = None
     node_key: str | None = None
     credentials_path: str = "/var/lib/autonomousc/credentials/node-credentials.json"
+    recovery_note_path: str = "/var/lib/autonomousc/credentials/recovery-note.txt"
     vllm_base_url: str = "http://vllm:8000"
     gpu_name: str = "Generic GPU"
     gpu_memory_gb: float = 24.0
