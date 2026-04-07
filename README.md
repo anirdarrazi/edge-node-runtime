@@ -40,6 +40,7 @@ Notes:
 - `node-agent-bootstrap` opens the terminal claim flow and waits for browser approval in `marketplace-console`.
 - `node-agent` runs headless after credentials have been stored in the shared `credentials` volume.
 - `OPERATOR_TOKEN` is now only a legacy fallback for development or controlled migrations.
+- `ATTESTATION_PROVIDER=simulated` is fine for local bring-up, but restricted work now requires hardware-backed attestation metadata before the control plane will schedule it.
 - `.env.example` defaults to the production control plane at `https://edge.autonomousc.com`. Override it only for local Worker development.
 
 Run tests with:

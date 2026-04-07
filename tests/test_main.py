@@ -16,6 +16,9 @@ class FakeControl:
         self.clear_calls = 0
         self.recovery_notes = []
         self.auth_fail_on_heartbeat = False
+        self.progress_updates = []
+        self.failures = []
+        self.completions = []
 
     def has_credentials(self) -> bool:
         return self._has_credentials
@@ -43,6 +46,18 @@ class FakeControl:
 
     def pull_assignment(self):
         return None
+
+    def accept_assignment(self, _assignment_id: str):
+        return None
+
+    def report_progress(self, assignment_id: str, progress):
+        self.progress_updates.append((assignment_id, progress))
+
+    def complete_assignment(self, assignment_id: str, results):
+        self.completions.append((assignment_id, results))
+
+    def fail_assignment(self, assignment_id: str, code: str, message: str, retryable: bool = True):
+        self.failures.append((assignment_id, code, message, retryable))
 
     def clear_credentials(self):
         self.clear_calls += 1
@@ -91,3 +106,38 @@ def test_run_worker_loop_clears_credentials_after_auth_failure():
 
     assert control.clear_calls == 1
     assert control.recovery_notes
+
+
+def test_run_worker_loop_reports_assignment_failure():
+    class AssignmentControl(FakeControl):
+        def __init__(self) -> None:
+            super().__init__(has_credentials=True)
+            self.pulled = False
+
+        def heartbeat(self):
+            return None
+
+        def pull_assignment(self):
+            if self.pulled:
+                raise KeyboardInterrupt()
+            self.pulled = True
+            return SimpleNamespace(
+                assignment_id="assign_123",
+                operation="responses",
+                model="meta-llama/Llama-3.1-8B-Instruct",
+            )
+
+        def fetch_artifact(self, _assignment):
+            raise ValueError("invalid payload")
+
+    class RuntimeStub:
+        def execute(self, _operation, _model, _items):
+            raise AssertionError("runtime should not run when payload fetch fails")
+
+    control = AssignmentControl()
+
+    with pytest.raises(KeyboardInterrupt):
+        main_module.run_worker_loop(control, RuntimeStub(), attest_on_start=False)
+
+    assert control.failures == [("assign_123", "invalid_assignment_payload", "invalid payload", False)]
+    assert control.progress_updates[-1][1]["state"] == "failed"

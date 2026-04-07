@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import httpx
 import pytest
 
 from node_agent.config import NodeAgentSettings
@@ -122,3 +123,34 @@ def test_bootstrap_requires_interactive_terminal_without_credentials(tmp_path: P
 
     with pytest.raises(RuntimeError):
         client.bootstrap(interactive=False)
+
+
+def test_attest_declares_attestation_provider(tmp_path: Path):
+    credentials_path = tmp_path / "credentials" / "node.json"
+    settings = build_settings(credentials_path, operator_token="operator_token")
+    settings.node_id = "node_123"
+    settings.node_key = "key_123456789012345678901234"
+    settings.attestation_provider = "simulated"
+    client = EdgeControlClient(settings)
+    recording_client = RecordingClient()
+    client.client = recording_client
+
+    client.attest()
+
+    path, payload = recording_client.calls[0]
+    assert path == "/nodes/attest"
+    assert payload["measurements"]["attestation_provider"] == "simulated"
+    assert payload["inventory"]["attestation_provider"] == "simulated"
+
+
+def test_is_auth_error_only_matches_control_plane_requests(tmp_path: Path):
+    credentials_path = tmp_path / "credentials" / "node.json"
+    client = EdgeControlClient(build_settings(credentials_path, operator_token="operator_token"))
+
+    control_request = httpx.Request("POST", "http://localhost:8787/nodes/heartbeat")
+    runtime_request = httpx.Request("POST", "http://localhost:8000/v1/chat/completions")
+    control_error = httpx.HTTPStatusError("unauthorized", request=control_request, response=httpx.Response(401, request=control_request))
+    runtime_error = httpx.HTTPStatusError("unauthorized", request=runtime_request, response=httpx.Response(401, request=runtime_request))
+
+    assert client.is_auth_error(control_error) is True
+    assert client.is_auth_error(runtime_error) is False

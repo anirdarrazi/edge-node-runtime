@@ -30,6 +30,7 @@ class NodeAgentSettings(BaseSettings):
     poll_interval_seconds: int = 10
     agent_version: str = "0.1.0"
     docker_image: str = "autonomousc/node-agent:local"
+    attestation_provider: Literal["simulated", "hardware"] = "simulated"
 
 
 class AssignmentEnvelope(BaseModel):

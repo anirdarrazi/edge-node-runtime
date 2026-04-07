@@ -133,9 +133,10 @@ class EdgeControlClient:
         if note_path.exists():
             note_path.unlink()
 
-    @staticmethod
-    def is_auth_error(error: Exception) -> bool:
-        return isinstance(error, httpx.HTTPStatusError) and error.response.status_code in {401, 403}
+    def is_auth_error(self, error: Exception) -> bool:
+        if not isinstance(error, httpx.HTTPStatusError) or error.response.status_code not in {401, 403}:
+            return False
+        return str(error.request.url).startswith(str(self.client.base_url))
 
     def _persist_from_response(self, payload: dict[str, Any]) -> tuple[str, str]:
         node_id = str(payload["node_id"])
@@ -209,14 +210,23 @@ class EdgeControlClient:
     def attest(self) -> None:
         if not self.settings.node_id or not self.settings.node_key:
             raise RuntimeError("node must be enrolled before attestation")
+        attestation_provider = self.settings.attestation_provider
         response = self.client.post(
             "/nodes/attest",
             json={
                 "node_id": self.settings.node_id,
                 "node_key": self.settings.node_key,
-                "tpm_quote": f"simulated-{self.settings.node_id}",
-                "measurements": {"pcr0": "simulated", "pcr7": "simulated"},
-                "inventory": {"gpu_name": self.settings.gpu_name, "driver": "simulated"},
+                "tpm_quote": f"{attestation_provider}-{self.settings.node_id}",
+                "measurements": {
+                    "pcr0": "simulated" if attestation_provider == "simulated" else "hardware",
+                    "pcr7": "simulated" if attestation_provider == "simulated" else "hardware",
+                    "attestation_provider": attestation_provider,
+                },
+                "inventory": {
+                    "gpu_name": self.settings.gpu_name,
+                    "driver": "simulated" if attestation_provider == "simulated" else "verified",
+                    "attestation_provider": attestation_provider,
+                },
                 "restricted_capable": self.settings.restricted_capable,
             },
         )
