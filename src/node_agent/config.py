@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -40,3 +42,19 @@ class AssignmentEnvelope(BaseModel):
     item_count: int
     input_artifact_url: str
     input_artifact_encryption: dict
+
+
+class NodeClaimSession(BaseModel):
+    claim_id: str
+    claim_code: str
+    approval_url: str
+    poll_token: str
+    expires_at: str
+    poll_interval_seconds: int
+
+
+class NodeClaimPollResult(BaseModel):
+    status: Literal["pending", "approved", "consumed", "expired"]
+    expires_at: str
+    node_id: str | None = None
+    node_key: str | None = None

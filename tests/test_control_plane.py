@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from node_agent.config import NodeAgentSettings
 from node_agent.control_plane import EdgeControlClient
 
@@ -61,3 +63,62 @@ def test_enroll_persists_and_restores_credentials(tmp_path: Path):
 
     assert restored_node_id == "node_123"
     assert restored_node_key == "key_123456789012345678901234"
+
+
+class ClaimClient:
+    def __init__(self):
+        self.poll_count = 0
+        self.calls = []
+
+    def post(self, path, json):
+        self.calls.append((path, json))
+        if path == "/node-claims":
+            return DummyResponse(
+                {
+                    "claim_id": "claim_123",
+                    "claim_code": "ABC123",
+                    "approval_url": "https://ai.autonomousc.com/?claim_id=claim_123&claim_token=approval-token",
+                    "poll_token": "poll-token",
+                    "expires_at": "2099-01-01T00:00:00Z",
+                    "poll_interval_seconds": 0,
+                }
+            )
+
+        self.poll_count += 1
+        if self.poll_count == 1:
+            return DummyResponse({"status": "pending", "expires_at": "2099-01-01T00:00:00Z"})
+
+        return DummyResponse(
+            {
+                "status": "consumed",
+                "expires_at": "2099-01-01T00:00:00Z",
+                "node_id": "node_claimed",
+                "node_key": "key_claimed_12345678901234567890",
+            }
+        )
+
+
+def test_bootstrap_claims_node_via_browser_flow(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    credentials_path = tmp_path / "credentials" / "node.json"
+    settings = build_settings(credentials_path, operator_token=None)
+    client = EdgeControlClient(settings)
+    client.client = ClaimClient()
+
+    monkeypatch.setattr("node_agent.control_plane.sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("node_agent.control_plane.sys.stdout.isatty", lambda: True)
+    monkeypatch.setattr("node_agent.control_plane.time.sleep", lambda _seconds: None)
+
+    node_id, node_key = client.bootstrap(interactive=True)
+
+    assert node_id == "node_claimed"
+    assert node_key == "key_claimed_12345678901234567890"
+    assert credentials_path.exists()
+
+
+def test_bootstrap_requires_interactive_terminal_without_credentials(tmp_path: Path):
+    credentials_path = tmp_path / "credentials" / "node.json"
+    settings = build_settings(credentials_path, operator_token=None)
+    client = EdgeControlClient(settings)
+
+    with pytest.raises(RuntimeError):
+        client.bootstrap(interactive=False)

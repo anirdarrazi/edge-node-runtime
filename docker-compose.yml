@@ -2,11 +2,29 @@ services:
   node-agent:
     build:
       context: .
+    command: ["node-agent", "run"]
     env_file:
       - .env
     depends_on:
       - vllm
     restart: unless-stopped
+    volumes:
+      - model-cache:/var/lib/autonomousc/model-cache
+      - scratch:/var/lib/autonomousc/scratch
+      - credentials:/var/lib/autonomousc/credentials
+
+  node-agent-bootstrap:
+    build:
+      context: .
+    command: ["node-agent", "bootstrap"]
+    env_file:
+      - .env
+    depends_on:
+      - vllm
+    profiles: ["bootstrap"]
+    restart: "no"
+    stdin_open: true
+    tty: true
     volumes:
       - model-cache:/var/lib/autonomousc/model-cache
       - scratch:/var/lib/autonomousc/scratch

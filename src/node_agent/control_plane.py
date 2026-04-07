@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import base64
 import json
+import sys
+import time
 from pathlib import Path
 from typing import Any
 
 import httpx
 
-from .config import AssignmentEnvelope, NodeAgentSettings
+from .config import AssignmentEnvelope, NodeAgentSettings, NodeClaimPollResult, NodeClaimSession
 
 
 class EdgeControlClient:
@@ -38,6 +40,58 @@ class EdgeControlClient:
             encoding="utf-8",
         )
 
+    def _interactive_terminal_available(self) -> bool:
+        return sys.stdin.isatty() and sys.stdout.isatty()
+
+    def _node_request_payload(self) -> dict[str, Any]:
+        return {
+            "label": self.settings.node_label,
+            "region": self.settings.node_region,
+            "trust_tier": self.settings.trust_tier,
+            "restricted_capable": self.settings.restricted_capable,
+            "capabilities": {
+                "supported_models": [model.strip() for model in self.settings.supported_models.split(",") if model.strip()],
+                "operations": ["responses", "embeddings"],
+                "gpu_name": self.settings.gpu_name,
+                "gpu_memory_gb": self.settings.gpu_memory_gb,
+                "max_context_tokens": self.settings.max_context_tokens,
+                "max_batch_tokens": self.settings.max_batch_tokens,
+                "max_concurrent_assignments": self.settings.max_concurrent_assignments,
+                "thermal_headroom": self.settings.thermal_headroom,
+            },
+            "runtime": {
+                "agent_version": self.settings.agent_version,
+                "vllm_base_url": self.settings.vllm_base_url,
+                "docker_image": self.settings.docker_image,
+            },
+        }
+
+    def _print_claim_instructions(self, claim: NodeClaimSession) -> None:
+        print()
+        print("AUTONOMOUSc Edge Node Claim")
+        print("---------------------------")
+        print("Open the approval URL in your browser, sign in as an existing operator, and claim this node.")
+        print(f"Claim code: {claim.claim_code}")
+        print(f"Approval URL: {claim.approval_url}")
+        print(f"Claim expires at: {claim.expires_at}")
+        print("Waiting for browser approval...")
+        print()
+
+    def has_credentials(self) -> bool:
+        if self.settings.node_id and self.settings.node_key:
+            return True
+        return self._load_persisted_credentials() is not None
+
+    def require_credentials(self) -> tuple[str, str]:
+        if self.settings.node_id and self.settings.node_key:
+            return self.settings.node_id, self.settings.node_key
+        persisted = self._load_persisted_credentials()
+        if persisted:
+            return persisted
+        raise RuntimeError(
+            "No stored node credentials were found. Run `node-agent bootstrap` from an interactive terminal to claim this node."
+        )
+
     def clear_credentials(self) -> None:
         credentials_path = Path(self.settings.credentials_path)
         self.settings.node_id = None
@@ -49,6 +103,14 @@ class EdgeControlClient:
     def is_auth_error(error: Exception) -> bool:
         return isinstance(error, httpx.HTTPStatusError) and error.response.status_code in {401, 403}
 
+    def _persist_from_response(self, payload: dict[str, Any]) -> tuple[str, str]:
+        node_id = str(payload["node_id"])
+        node_key = str(payload["node_key"])
+        self.settings.node_id = node_id
+        self.settings.node_key = node_key
+        self._persist_credentials(node_id, node_key)
+        return node_id, node_key
+
     def enroll_if_needed(self) -> tuple[str, str]:
         if self.settings.node_id and self.settings.node_key:
             return self.settings.node_id, self.settings.node_key
@@ -56,39 +118,51 @@ class EdgeControlClient:
         if persisted:
             return persisted
         if not self.settings.operator_token:
-            raise RuntimeError("operator_token is required for initial node enrollment")
+            raise RuntimeError("operator_token is required for legacy node enrollment")
 
         response = self.client.post(
             "/nodes/enroll",
             json={
                 "operator_token": self.settings.operator_token,
-                "label": self.settings.node_label,
-                "region": self.settings.node_region,
-                "trust_tier": self.settings.trust_tier,
-                "restricted_capable": self.settings.restricted_capable,
-                "capabilities": {
-                    "supported_models": [model.strip() for model in self.settings.supported_models.split(",") if model.strip()],
-                    "operations": ["responses", "embeddings"],
-                    "gpu_name": self.settings.gpu_name,
-                    "gpu_memory_gb": self.settings.gpu_memory_gb,
-                    "max_context_tokens": self.settings.max_context_tokens,
-                    "max_batch_tokens": self.settings.max_batch_tokens,
-                    "max_concurrent_assignments": self.settings.max_concurrent_assignments,
-                    "thermal_headroom": self.settings.thermal_headroom,
-                },
-                "runtime": {
-                    "agent_version": self.settings.agent_version,
-                    "vllm_base_url": self.settings.vllm_base_url,
-                    "docker_image": self.settings.docker_image,
-                },
+                **self._node_request_payload(),
             },
         )
         response.raise_for_status()
-        payload = response.json()
-        self.settings.node_id = payload["node_id"]
-        self.settings.node_key = payload["node_key"]
-        self._persist_credentials(self.settings.node_id, self.settings.node_key)
-        return self.settings.node_id, self.settings.node_key
+        return self._persist_from_response(response.json())
+
+    def create_node_claim_session(self) -> NodeClaimSession:
+        response = self.client.post("/node-claims", json=self._node_request_payload())
+        response.raise_for_status()
+        return NodeClaimSession.model_validate(response.json())
+
+    def poll_node_claim_session(self, claim_id: str, poll_token: str) -> NodeClaimPollResult:
+        response = self.client.post(f"/node-claims/{claim_id}/poll", json={"poll_token": poll_token})
+        response.raise_for_status()
+        return NodeClaimPollResult.model_validate(response.json())
+
+    def bootstrap(self, interactive: bool = True) -> tuple[str, str]:
+        if self.settings.node_id and self.settings.node_key:
+            return self.settings.node_id, self.settings.node_key
+        persisted = self._load_persisted_credentials()
+        if persisted:
+            return persisted
+        if self.settings.operator_token:
+            return self.enroll_if_needed()
+        if not interactive or not self._interactive_terminal_available():
+            raise RuntimeError(
+                "No stored node credentials were found. Run `node-agent bootstrap` from an interactive terminal to claim this node."
+            )
+
+        claim = self.create_node_claim_session()
+        self._print_claim_instructions(claim)
+
+        while True:
+            result = self.poll_node_claim_session(claim.claim_id, claim.poll_token)
+            if result.node_id and result.node_key:
+                return self._persist_from_response(result.model_dump())
+            if result.status == "expired":
+                raise RuntimeError("Node claim expired before approval completed. Run `node-agent bootstrap` again.")
+            time.sleep(claim.poll_interval_seconds)
 
     def attest(self) -> None:
         if not self.settings.node_id or not self.settings.node_key:

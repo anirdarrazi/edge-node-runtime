@@ -15,7 +15,8 @@ dependencies = [
 ]
 
 [project.scripts]
-node-agent = "node_agent.main:run"
+node-agent = "node_agent.main:main"
+node-agent-bootstrap = "node_agent.main:bootstrap_entrypoint"
 
 [tool.setuptools.package-dir]
 "" = "src"
