@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import time
 
 import httpx
 import pytest
@@ -123,6 +124,7 @@ def test_run_worker_loop_reports_assignment_failure():
             self.pulled = True
             return SimpleNamespace(
                 assignment_id="assign_123",
+                item_count=1,
                 operation="responses",
                 model="meta-llama/Llama-3.1-8B-Instruct",
             )
@@ -141,3 +143,51 @@ def test_run_worker_loop_reports_assignment_failure():
 
     assert control.failures == [("assign_123", "invalid_assignment_payload", "invalid payload", False)]
     assert control.progress_updates[-1][1]["state"] == "failed"
+
+
+def test_run_worker_loop_keeps_assignments_fresh_while_runtime_is_busy(monkeypatch: pytest.MonkeyPatch):
+    class AssignmentControl(FakeControl):
+        def __init__(self) -> None:
+            super().__init__(has_credentials=True)
+            self.pulled = False
+
+        def heartbeat(self):
+            return None
+
+        def pull_assignment(self):
+            if self.pulled:
+                raise KeyboardInterrupt()
+            self.pulled = True
+            return SimpleNamespace(
+                assignment_id="assign_keepalive",
+                item_count=1,
+                operation="responses",
+                model="meta-llama/Llama-3.1-8B-Instruct",
+            )
+
+        def fetch_artifact(self, _assignment):
+            return {
+                "items": [
+                    {
+                        "batch_item_id": "item_1",
+                        "customer_item_id": "cust_1",
+                        "input": {"messages": [{"role": "user", "content": "hello"}]},
+                    }
+                ]
+            }
+
+    class SlowRuntime:
+        def execute(self, _operation, _model, _items):
+            time.sleep(0.05)
+            return [{"status": "completed"}]
+
+    control = AssignmentControl()
+    monkeypatch.setattr(main_module, "assignment_progress_keepalive_seconds", 0.01)
+
+    with pytest.raises(KeyboardInterrupt):
+        main_module.run_worker_loop(control, SlowRuntime(), attest_on_start=False)
+
+    running_updates = [progress for _assignment_id, progress in control.progress_updates if progress["state"] == "running"]
+    assert len(running_updates) >= 2
+    assert any(progress.get("keepalive") is True for progress in running_updates[1:])
+    assert control.progress_updates[-1][1]["state"] == "completed"
