@@ -1,0 +1,508 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>AUTONOMOUSc Edge Node Installer</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f6efe2;
+        --panel: rgba(255, 252, 246, 0.94);
+        --ink: #192228;
+        --muted: #617077;
+        --line: rgba(25, 34, 40, 0.1);
+        --accent: #d1682f;
+        --accent-ink: #fff7f0;
+        --success: #256f4b;
+        --warning: #9b6107;
+        --danger: #a23629;
+        --radius: 24px;
+        --shadow: 0 24px 64px rgba(62, 43, 20, 0.12);
+        font-family: "Segoe UI", sans-serif;
+      }
+
+      * { box-sizing: border-box; }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background:
+          radial-gradient(circle at top left, rgba(209, 104, 47, 0.18), transparent 30%),
+          radial-gradient(circle at bottom right, rgba(25, 34, 40, 0.1), transparent 28%),
+          linear-gradient(180deg, rgba(255, 251, 245, 0.88), rgba(246, 239, 226, 0.98)),
+          var(--bg);
+        color: var(--ink);
+      }
+
+      main {
+        width: min(1180px, calc(100vw - 32px));
+        margin: 0 auto;
+        padding: 32px 0 48px;
+      }
+
+      .hero,
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: calc(var(--radius) + 4px);
+        box-shadow: var(--shadow);
+      }
+
+      .hero {
+        display: grid;
+        gap: 14px;
+        padding: 28px;
+        margin-bottom: 22px;
+      }
+
+      .eyebrow {
+        text-transform: uppercase;
+        letter-spacing: 0.14em;
+        color: var(--accent);
+        font-weight: 700;
+        font-size: 0.78rem;
+      }
+
+      h1, h2, h3, p { margin: 0; }
+
+      h1 {
+        font-family: Georgia, serif;
+        font-size: clamp(2rem, 4vw, 3.6rem);
+        line-height: 0.98;
+        max-width: 12ch;
+      }
+
+      h2, h3 {
+        font-family: Georgia, serif;
+      }
+
+      .lede,
+      .supporting,
+      .meta {
+        color: var(--muted);
+        line-height: 1.6;
+      }
+
+      .grid {
+        display: grid;
+        gap: 20px;
+        grid-template-columns: minmax(320px, 0.95fr) minmax(0, 1.4fr);
+        align-items: start;
+      }
+
+      .stack,
+      .status-grid {
+        display: grid;
+        gap: 14px;
+      }
+
+      .panel {
+        padding: 22px;
+      }
+
+      .status-grid {
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      }
+
+      .status-card,
+      .claim-card,
+      .log-shell {
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.42);
+        padding: 16px;
+      }
+
+      .status-card strong,
+      .claim-card strong {
+        display: block;
+        margin-bottom: 6px;
+      }
+
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 7px 11px;
+        border-radius: 999px;
+        font-size: 0.86rem;
+        font-weight: 600;
+        background: rgba(25, 34, 40, 0.08);
+      }
+
+      .pill.success { color: var(--success); background: rgba(37, 111, 75, 0.12); }
+      .pill.warning { color: var(--warning); background: rgba(155, 97, 7, 0.12); }
+      .pill.danger { color: var(--danger); background: rgba(162, 54, 41, 0.12); }
+
+      label {
+        display: grid;
+        gap: 8px;
+        font-size: 0.95rem;
+        font-weight: 600;
+      }
+
+      input,
+      select,
+      textarea,
+      button {
+        font: inherit;
+      }
+
+      input,
+      select,
+      textarea {
+        width: 100%;
+        border: 1px solid rgba(25, 34, 40, 0.12);
+        border-radius: 16px;
+        padding: 13px 14px;
+        background: rgba(255, 255, 255, 0.88);
+        color: var(--ink);
+      }
+
+      textarea {
+        min-height: 84px;
+        resize: vertical;
+      }
+
+      button {
+        border: none;
+        border-radius: 16px;
+        padding: 13px 18px;
+        background: var(--accent);
+        color: var(--accent-ink);
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      button.secondary {
+        background: rgba(255, 255, 255, 0.54);
+        color: var(--ink);
+        border: 1px solid var(--line);
+      }
+
+      button:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+
+      .button-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+      }
+
+      .checkbox {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-weight: 600;
+      }
+
+      .checkbox input {
+        width: 18px;
+        height: 18px;
+      }
+
+      details {
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.34);
+        padding: 14px 16px;
+      }
+
+      details summary {
+        cursor: pointer;
+        font-weight: 700;
+      }
+
+      .claim-card[hidden],
+      .error-banner[hidden] {
+        display: none;
+      }
+
+      .log-shell pre {
+        margin: 0;
+        white-space: pre-wrap;
+        word-break: break-word;
+        font-family: ui-monospace, Consolas, monospace;
+        font-size: 0.9rem;
+        line-height: 1.55;
+        color: var(--muted);
+      }
+
+      .error-banner {
+        border: 1px solid rgba(162, 54, 41, 0.18);
+        border-radius: 18px;
+        padding: 14px 16px;
+        background: rgba(255, 242, 239, 0.9);
+        color: var(--danger);
+      }
+
+      a {
+        color: var(--accent);
+      }
+
+      @media (max-width: 900px) {
+        .grid {
+          grid-template-columns: 1fr;
+        }
+
+        main {
+          width: min(100vw - 24px, 1180px);
+          padding-top: 24px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="hero">
+        <p class="eyebrow">AUTONOMOUSc Edge Node Installer</p>
+        <h1>Configure this node, approve it, and start the runtime.</h1>
+        <p class="lede">Phase 1 keeps Docker Compose and the current Python agent, but moves setup into a guided browser flow with preflight checks, claim approval, and startup progress in one place.</p>
+      </section>
+
+      <section class="grid">
+        <article class="panel stack">
+          <div class="stack">
+            <div>
+              <h2>Node Setup</h2>
+              <p class="supporting">Only the core settings are required. Hardware defaults and recommended runtime values are filled in automatically.</p>
+            </div>
+            <div id="error-banner" class="error-banner" hidden></div>
+          </div>
+
+          <form id="installer-form" class="stack">
+            <label>
+              Node label
+              <input id="node_label" name="node_label" placeholder="AUTONOMOUSc Nordic Node 01">
+            </label>
+
+            <label>
+              Region
+              <input id="node_region" name="node_region" placeholder="eu-se-1">
+            </label>
+
+            <label>
+              Trust tier
+              <select id="trust_tier" name="trust_tier">
+                <option value="standard">Standard</option>
+                <option value="confidential">Confidential</option>
+                <option value="restricted">Restricted</option>
+              </select>
+            </label>
+
+            <label class="checkbox">
+              <input id="restricted_capable" type="checkbox">
+              Restricted workloads capable
+            </label>
+
+            <details>
+              <summary>Advanced configuration</summary>
+              <div class="stack" style="margin-top: 14px;">
+                <label>
+                  Control plane URL
+                  <input id="edge_control_url" name="edge_control_url" placeholder="https://edge.autonomousc.com">
+                </label>
+
+                <label>
+                  vLLM startup model
+                  <input id="vllm_model" name="vllm_model" placeholder="meta-llama/Llama-3.1-8B-Instruct">
+                </label>
+
+                <label>
+                  Supported models
+                  <textarea id="supported_models" name="supported_models" placeholder="model-a,model-b"></textarea>
+                </label>
+
+                <label>
+                  Max concurrent assignments
+                  <input id="max_concurrent_assignments" name="max_concurrent_assignments" type="number" min="1" max="16">
+                </label>
+              </div>
+            </details>
+
+            <div class="button-row">
+              <button id="start-button" type="submit">Save and start guided install</button>
+              <button id="refresh-button" type="button" class="secondary">Refresh status</button>
+            </div>
+          </form>
+        </article>
+
+        <article class="panel stack">
+          <div>
+            <h2>Installer Status</h2>
+            <p id="status-message" class="supporting">Loading installer state...</p>
+          </div>
+
+          <div class="status-grid">
+            <div class="status-card">
+              <strong>Docker</strong>
+              <span id="docker-pill" class="pill">Checking</span>
+              <p id="docker-copy" class="meta"></p>
+            </div>
+            <div class="status-card">
+              <strong>GPU</strong>
+              <span id="gpu-pill" class="pill">Checking</span>
+              <p id="gpu-copy" class="meta"></p>
+            </div>
+            <div class="status-card">
+              <strong>Claim</strong>
+              <span id="claim-pill" class="pill">Idle</span>
+              <p id="claim-copy" class="meta"></p>
+            </div>
+            <div class="status-card">
+              <strong>Runtime</strong>
+              <span id="runtime-pill" class="pill">Idle</span>
+              <p id="runtime-copy" class="meta"></p>
+            </div>
+          </div>
+
+          <div id="claim-card" class="claim-card" hidden>
+            <strong>Node registration required</strong>
+            <p class="supporting">Open the claim approval page, sign in or create an operator account, then approve this node. The installer will continue automatically.</p>
+            <p class="meta"><strong>Claim code:</strong> <span id="claim-code"></span></p>
+            <p class="meta"><strong>Expires:</strong> <span id="claim-expiry"></span></p>
+            <div class="button-row" style="margin-top: 12px;">
+              <a id="claim-link" target="_blank" rel="noreferrer">
+                <button type="button">Open claim approval</button>
+              </a>
+            </div>
+          </div>
+
+          <div class="log-shell">
+            <h3>Progress log</h3>
+            <pre id="logs">Waiting for installer events...</pre>
+          </div>
+        </article>
+      </section>
+    </main>
+
+    <script>
+      const form = document.getElementById("installer-form");
+      const startButton = document.getElementById("start-button");
+      const refreshButton = document.getElementById("refresh-button");
+      const errorBanner = document.getElementById("error-banner");
+      const claimCard = document.getElementById("claim-card");
+      const claimLink = document.getElementById("claim-link");
+      let formHydrated = false;
+
+      function pillTone(ok, warning = false) {
+        if (ok) return "success";
+        if (warning) return "warning";
+        return "danger";
+      }
+
+      function setPill(element, label, tone) {
+        element.textContent = label;
+        element.className = `pill ${tone}`;
+      }
+
+      function formPayload() {
+        return {
+          edge_control_url: document.getElementById("edge_control_url").value.trim(),
+          node_label: document.getElementById("node_label").value.trim(),
+          node_region: document.getElementById("node_region").value.trim(),
+          trust_tier: document.getElementById("trust_tier").value,
+          restricted_capable: document.getElementById("restricted_capable").checked,
+          vllm_model: document.getElementById("vllm_model").value.trim(),
+          supported_models: document.getElementById("supported_models").value.trim(),
+          max_concurrent_assignments: document.getElementById("max_concurrent_assignments").value.trim()
+        };
+      }
+
+      function hydrateForm(config) {
+        if (formHydrated || !config) return;
+        document.getElementById("edge_control_url").value = config.edge_control_url || "";
+        document.getElementById("node_label").value = config.node_label || "";
+        document.getElementById("node_region").value = config.node_region || "";
+        document.getElementById("trust_tier").value = config.trust_tier || "restricted";
+        document.getElementById("restricted_capable").checked = Boolean(config.restricted_capable);
+        document.getElementById("vllm_model").value = config.vllm_model || "";
+        document.getElementById("supported_models").value = config.supported_models || "";
+        document.getElementById("max_concurrent_assignments").value = config.max_concurrent_assignments || "";
+        formHydrated = true;
+      }
+
+      function render(data) {
+        const preflight = data.preflight || {};
+        const state = data.state || {};
+        const claim = state.claim || null;
+        const runningServices = (preflight.running_services || []).join(", ") || "No services detected yet.";
+
+        document.getElementById("status-message").textContent = state.message || "Ready to configure this node.";
+        document.getElementById("logs").textContent = (state.logs || []).join("\\n") || "Waiting for installer events...";
+
+        const dockerOk = Boolean(preflight.docker_cli && preflight.docker_compose && preflight.docker_daemon);
+        setPill(document.getElementById("docker-pill"), dockerOk ? "Ready" : "Needs attention", pillTone(dockerOk, Boolean(preflight.docker_cli || preflight.docker_compose)));
+        document.getElementById("docker-copy").textContent =
+          preflight.docker_error || (dockerOk ? `Compose is available. Running services: ${runningServices}` : "Install Docker Desktop or start the Docker daemon before continuing.");
+
+        const gpu = preflight.gpu || {};
+        const gpuOk = Boolean(gpu.detected);
+        setPill(document.getElementById("gpu-pill"), gpuOk ? "Detected" : "Unknown", pillTone(gpuOk, true));
+        document.getElementById("gpu-copy").textContent =
+          gpuOk ? `${gpu.name} with ${gpu.memory_gb} GB VRAM.` : "nvidia-smi was not available. Defaults will stay editable in advanced settings.";
+
+        const claimTone = state.stage === "waiting_for_claim" ? "warning" : claim ? pillTone(claim.status === "consumed" || claim.status === "approved", true) : "warning";
+        setPill(document.getElementById("claim-pill"), claim ? claim.status : "Idle", claimTone);
+        document.getElementById("claim-copy").textContent =
+          claim ? `Claim code ${claim.claim_code}. The installer keeps polling until approval is complete.` : "A claim link will appear here when node registration starts.";
+
+        const runtimeReady = state.stage === "running";
+        setPill(document.getElementById("runtime-pill"), runtimeReady ? "Running" : state.stage || "Idle", pillTone(runtimeReady, Boolean(preflight.credentials_present)));
+        document.getElementById("runtime-copy").textContent =
+          runtimeReady ? "The node runtime is online and using persisted credentials." : (preflight.credentials_present ? "Existing credentials are present for this node." : "Services will start automatically after registration.");
+
+        if (claim && claim.approval_url) {
+          claimCard.hidden = false;
+          claimLink.href = claim.approval_url;
+          document.getElementById("claim-code").textContent = claim.claim_code || "";
+          document.getElementById("claim-expiry").textContent = claim.expires_at || "";
+        } else {
+          claimCard.hidden = true;
+        }
+
+        if (state.error) {
+          errorBanner.hidden = false;
+          errorBanner.textContent = state.error;
+        } else {
+          errorBanner.hidden = true;
+          errorBanner.textContent = "";
+        }
+
+        startButton.disabled = Boolean(state.busy);
+        startButton.textContent = state.busy ? "Installer is running..." : "Save and start guided install";
+      }
+
+      async function refreshStatus() {
+        const response = await fetch("/api/status");
+        const data = await response.json();
+        hydrateForm(data.config);
+        render(data);
+      }
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        errorBanner.hidden = true;
+        const response = await fetch("/api/install", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(formPayload())
+        });
+        const data = await response.json();
+        render(data);
+      });
+
+      refreshButton.addEventListener("click", () => {
+        void refreshStatus();
+      });
+
+      void refreshStatus();
+      window.setInterval(() => {
+        void refreshStatus();
+      }, 2000);
+    </script>
+  </body>
+</html>

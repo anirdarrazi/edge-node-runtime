@@ -21,6 +21,16 @@ Windows PowerShell:
 .\install.ps1
 ```
 
+The install scripts now launch the local node service in your browser. The service handles first-time setup and ongoing operations from one place. It:
+
+- checks Docker and GPU prerequisites
+- writes `.env` for you
+- starts `vllm`
+- creates the node claim and waits for browser approval
+- stores credentials locally in `./data/credentials`
+- starts `node-agent` and `vector` after the node is approved
+- gives you local start, stop, restart, update, and diagnostics controls without needing direct Docker commands
+
 Already installed and just want to start the runtime again:
 
 ```bash
@@ -33,12 +43,26 @@ Windows PowerShell:
 .\start.ps1
 ```
 
+Stop the background service:
+
+```bash
+bash stop.sh
+```
+
+Windows PowerShell:
+
+```powershell
+.\stop.ps1
+```
+
 Notes:
 
-- `install.sh` creates `.env` from `.env.example` if needed, starts `vllm`, launches the first-run terminal claim flow, and then starts the long-running services.
-- `install.ps1` and `start.ps1` provide the same flow for Windows-first setups.
-- `node-agent-bootstrap` opens the terminal claim flow and waits for browser approval in `marketplace-console`.
-- `node-agent` runs headless after credentials have been stored in the shared `credentials` volume.
+- `install.sh`, `install.ps1`, `start.sh`, and `start.ps1` create a local service virtual environment and open the background-service UI.
+- The local UI runs at `http://127.0.0.1:8765` by default and stays available while the background service is running.
+- Auto-update currently covers pulled runtime images such as `vllm` and `vector`. The local `node-agent` container still comes from the checked-out code in this repo.
+- Diagnostics bundles are written to `./data/diagnostics`.
+- `node-agent-bootstrap` is still available as a legacy fallback for direct terminal claim flows.
+- `node-agent` runs headless after credentials have been stored in `./data/credentials`.
 - `OPERATOR_TOKEN` is now only a legacy fallback for development or controlled migrations.
 - `ATTESTATION_PROVIDER=simulated` is fine for local bring-up, but restricted work now requires hardware-backed attestation metadata before the control plane will schedule it.
 - `.env.example` defaults to the production control plane at `https://edge.autonomousc.com`. Override it only for local Worker development.

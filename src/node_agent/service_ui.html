@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>AUTONOMOUSc Edge Node Service</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f6efe2;
+        --panel: rgba(255, 252, 246, 0.94);
+        --ink: #192228;
+        --muted: #617077;
+        --line: rgba(25, 34, 40, 0.1);
+        --accent: #d1682f;
+        --accent-ink: #fff7f0;
+        --success: #256f4b;
+        --warning: #9b6107;
+        --danger: #a23629;
+        --radius: 24px;
+        --shadow: 0 24px 64px rgba(62, 43, 20, 0.12);
+        font-family: "Segoe UI", sans-serif;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background:
+          radial-gradient(circle at top left, rgba(209, 104, 47, 0.18), transparent 30%),
+          radial-gradient(circle at bottom right, rgba(25, 34, 40, 0.1), transparent 28%),
+          linear-gradient(180deg, rgba(255, 251, 245, 0.88), rgba(246, 239, 226, 0.98)),
+          var(--bg);
+        color: var(--ink);
+      }
+      main {
+        width: min(1240px, calc(100vw - 28px));
+        margin: 0 auto;
+        padding: 28px 0 46px;
+      }
+      .hero, .panel {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: calc(var(--radius) + 4px);
+        box-shadow: var(--shadow);
+      }
+      .hero {
+        display: grid;
+        gap: 14px;
+        padding: 28px;
+        margin-bottom: 22px;
+      }
+      .eyebrow {
+        text-transform: uppercase;
+        letter-spacing: 0.14em;
+        color: var(--accent);
+        font-weight: 700;
+        font-size: 0.78rem;
+      }
+      h1, h2, h3, p { margin: 0; }
+      h1, h2, h3 { font-family: Georgia, serif; }
+      h1 { font-size: clamp(2rem, 4vw, 3.6rem); line-height: 0.98; max-width: 13ch; }
+      .lede, .supporting, .meta { color: var(--muted); line-height: 1.6; }
+      .layout { display: grid; gap: 20px; grid-template-columns: minmax(320px, 0.98fr) minmax(0, 1.4fr); align-items: start; }
+      .stack, .status-grid, .button-row, .dual { display: grid; gap: 14px; }
+      .panel { padding: 22px; }
+      .button-row { grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); }
+      .status-grid { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+      .status-card, .claim-card, .callout, .log-shell {
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.42);
+        padding: 16px;
+      }
+      .status-card strong, .claim-card strong, .callout strong { display: block; margin-bottom: 6px; }
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 7px 11px;
+        border-radius: 999px;
+        font-size: 0.86rem;
+        font-weight: 600;
+        background: rgba(25, 34, 40, 0.08);
+      }
+      .pill.success { color: var(--success); background: rgba(37, 111, 75, 0.12); }
+      .pill.warning { color: var(--warning); background: rgba(155, 97, 7, 0.12); }
+      .pill.danger { color: var(--danger); background: rgba(162, 54, 41, 0.12); }
+      label { display: grid; gap: 8px; font-size: 0.95rem; font-weight: 600; }
+      input, select, textarea, button { font: inherit; }
+      input, select, textarea {
+        width: 100%;
+        border: 1px solid rgba(25, 34, 40, 0.12);
+        border-radius: 16px;
+        padding: 13px 14px;
+        background: rgba(255, 255, 255, 0.88);
+        color: var(--ink);
+      }
+      textarea { min-height: 84px; resize: vertical; }
+      button {
+        border: none;
+        border-radius: 16px;
+        padding: 13px 18px;
+        background: var(--accent);
+        color: var(--accent-ink);
+        font-weight: 700;
+        cursor: pointer;
+      }
+      button.secondary {
+        background: rgba(255, 255, 255, 0.54);
+        color: var(--ink);
+        border: 1px solid var(--line);
+      }
+      button:disabled { opacity: 0.55; cursor: not-allowed; }
+      details {
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.34);
+        padding: 14px 16px;
+      }
+      details summary { cursor: pointer; font-weight: 700; }
+      .checkbox { display: flex; align-items: center; gap: 10px; font-weight: 600; }
+      .checkbox input { width: 18px; height: 18px; }
+      .log-shell pre {
+        margin: 0;
+        white-space: pre-wrap;
+        word-break: break-word;
+        font-family: ui-monospace, Consolas, monospace;
+        font-size: 0.88rem;
+        line-height: 1.55;
+        color: var(--muted);
+      }
+      .error-banner {
+        border: 1px solid rgba(162, 54, 41, 0.18);
+        border-radius: 18px;
+        padding: 14px 16px;
+        background: rgba(255, 242, 239, 0.9);
+        color: var(--danger);
+      }
+      .error-banner[hidden], .claim-card[hidden], .download-link[hidden] { display: none; }
+      a { color: var(--accent); }
+      @media (max-width: 960px) {
+        .layout { grid-template-columns: 1fr; }
+        .button-row { grid-auto-flow: row; }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="hero">
+        <p class="eyebrow">AUTONOMOUSc Local Node Service</p>
+        <h1>One local UI for setup, runtime control, updates, and diagnostics.</h1>
+        <p class="lede">This host-side service keeps Docker in the background, manages the edge runtime for you, and provides a stable local control surface on this machine.</p>
+      </section>
+
+      <section class="layout">
+        <article class="panel stack">
+          <div class="stack">
+            <div>
+              <h2>Node Setup</h2>
+              <p class="supporting">Use this once for first-time registration, then come back here whenever you need to update settings or re-register the node.</p>
+            </div>
+            <div id="error-banner" class="error-banner" hidden></div>
+          </div>
+
+          <form id="installer-form" class="stack">
+            <label>Node label<input id="node_label" placeholder="AUTONOMOUSc Nordic Node 01"></label>
+            <label>Region<input id="node_region" placeholder="eu-se-1"></label>
+            <label>Trust tier
+              <select id="trust_tier">
+                <option value="standard">Standard</option>
+                <option value="confidential">Confidential</option>
+                <option value="restricted">Restricted</option>
+              </select>
+            </label>
+            <label class="checkbox"><input id="restricted_capable" type="checkbox">Restricted workloads capable</label>
+            <details>
+              <summary>Advanced configuration</summary>
+              <div class="stack" style="margin-top: 14px;">
+                <label>Control plane URL<input id="edge_control_url" placeholder="https://edge.autonomousc.com"></label>
+                <label>vLLM startup model<input id="vllm_model" placeholder="meta-llama/Llama-3.1-8B-Instruct"></label>
+                <label>Supported models<textarea id="supported_models"></textarea></label>
+                <label>Max concurrent assignments<input id="max_concurrent_assignments" type="number" min="1" max="16"></label>
+              </div>
+            </details>
+            <div class="button-row">
+              <button id="setup-button" type="submit">Run guided setup</button>
+              <button id="refresh-button" type="button" class="secondary">Refresh status</button>
+            </div>
+          </form>
+
+          <div id="claim-card" class="claim-card" hidden>
+            <strong>Registration approval required</strong>
+            <p class="supporting">Open the claim page, sign in or create your operator account, then approve this machine. The local service will finish the rest automatically.</p>
+            <p class="meta"><strong>Claim code:</strong> <span id="claim-code"></span></p>
+            <p class="meta"><strong>Expires:</strong> <span id="claim-expiry"></span></p>
+            <div class="button-row">
+              <button id="open-claim" type="button">Open approval page</button>
+            </div>
+          </div>
+
+          <div class="callout">
+            <strong>Local service controls</strong>
+            <p class="supporting">These controls replace direct Docker Compose usage for normal operators.</p>
+            <div class="button-row">
+              <button id="start-runtime" type="button">Start runtime</button>
+              <button id="stop-runtime" type="button" class="secondary">Stop runtime</button>
+              <button id="restart-runtime" type="button" class="secondary">Restart runtime</button>
+            </div>
+          </div>
+        </article>
+
+        <article class="panel stack">
+          <div>
+            <h2>Service Status</h2>
+            <p id="status-message" class="supporting">Loading node service state...</p>
+          </div>
+
+          <div class="status-grid">
+            <div class="status-card">
+              <strong>Runtime engine</strong>
+              <span id="engine-pill" class="pill">Checking</span>
+              <p id="engine-copy" class="meta"></p>
+            </div>
+            <div class="status-card">
+              <strong>Registration</strong>
+              <span id="claim-pill" class="pill">Checking</span>
+              <p id="claim-copy" class="meta"></p>
+            </div>
+            <div class="status-card">
+              <strong>Runtime</strong>
+              <span id="runtime-pill" class="pill">Checking</span>
+              <p id="runtime-copy" class="meta"></p>
+            </div>
+            <div class="status-card">
+              <strong>Auto-update</strong>
+              <span id="update-pill" class="pill">Checking</span>
+              <p id="update-copy" class="meta"></p>
+            </div>
+          </div>
+
+          <div class="dual">
+            <div class="callout">
+              <strong>Update policy</strong>
+              <p class="supporting">The service can periodically fetch new runtime images and apply them for you.</p>
+              <label class="checkbox"><input id="auto_update_enabled" type="checkbox">Enable automatic runtime updates</label>
+              <label>Check interval (hours)<input id="auto_update_interval" type="number" min="1" max="168"></label>
+              <div class="button-row">
+                <button id="save-update-policy" type="button">Save update policy</button>
+                <button id="check-updates" type="button" class="secondary">Check now</button>
+                <button id="apply-updates" type="button" class="secondary">Download and apply</button>
+              </div>
+            </div>
+
+            <div class="callout">
+              <strong>Diagnostics bundle</strong>
+              <p class="supporting">Create a support bundle with status, logs, and a redacted config snapshot.</p>
+              <div class="button-row">
+                <button id="create-diagnostics" type="button">Create bundle</button>
+              </div>
+              <a id="download-link" class="download-link" hidden>Download latest diagnostics bundle</a>
+            </div>
+          </div>
+
+          <div class="log-shell">
+            <h3>Service log</h3>
+            <pre id="service-logs">Waiting for service events...</pre>
+          </div>
+
+          <div class="log-shell">
+            <h3>Installer log</h3>
+            <pre id="installer-logs">Waiting for installer events...</pre>
+          </div>
+        </article>
+      </section>
+    </main>
+
+    <script>
+      const setupForm = document.getElementById("installer-form");
+      const errorBanner = document.getElementById("error-banner");
+      const claimCard = document.getElementById("claim-card");
+      const openClaimButton = document.getElementById("open-claim");
+      const downloadLink = document.getElementById("download-link");
+      let formHydrated = false;
+      let claimUrl = "";
+
+      function setPill(element, label, tone) {
+        element.textContent = label;
+        element.className = `pill ${tone}`;
+      }
+
+      function tone(ok, warning = false) {
+        if (ok) return "success";
+        if (warning) return "warning";
+        return "danger";
+      }
+
+      function setupPayload() {
+        return {
+          edge_control_url: document.getElementById("edge_control_url").value.trim(),
+          node_label: document.getElementById("node_label").value.trim(),
+          node_region: document.getElementById("node_region").value.trim(),
+          trust_tier: document.getElementById("trust_tier").value,
+          restricted_capable: document.getElementById("restricted_capable").checked,
+          vllm_model: document.getElementById("vllm_model").value.trim(),
+          supported_models: document.getElementById("supported_models").value.trim(),
+          max_concurrent_assignments: document.getElementById("max_concurrent_assignments").value.trim()
+        };
+      }
+
+      function hydrateForm(config, updates) {
+        if (!formHydrated && config) {
+          document.getElementById("edge_control_url").value = config.edge_control_url || "";
+          document.getElementById("node_label").value = config.node_label || "";
+          document.getElementById("node_region").value = config.node_region || "";
+          document.getElementById("trust_tier").value = config.trust_tier || "restricted";
+          document.getElementById("restricted_capable").checked = Boolean(config.restricted_capable);
+          document.getElementById("vllm_model").value = config.vllm_model || "";
+          document.getElementById("supported_models").value = config.supported_models || "";
+          document.getElementById("max_concurrent_assignments").value = config.max_concurrent_assignments || "";
+          formHydrated = true;
+        }
+        if (updates) {
+          document.getElementById("auto_update_enabled").checked = Boolean(updates.auto_update_enabled);
+          document.getElementById("auto_update_interval").value = updates.interval_hours || 24;
+        }
+      }
+
+      function render(payload) {
+        const runtime = payload.runtime || {};
+        const installer = payload.installer || {};
+        const installerState = installer.state || {};
+        const preflight = runtime.preflight || {};
+        const updates = payload.updates || {};
+        const diagnostics = payload.diagnostics || {};
+        const claim = installerState.claim || null;
+
+        document.getElementById("status-message").textContent = runtime.message || "Local node service is ready.";
+        document.getElementById("service-logs").textContent = (payload.service?.logs || []).join("\\n") || "Waiting for service events...";
+        document.getElementById("installer-logs").textContent = (installerState.logs || []).join("\\n") || "Waiting for installer events...";
+
+        const engineReady = Boolean(preflight.docker_cli && preflight.docker_compose && preflight.docker_daemon);
+        setPill(document.getElementById("engine-pill"), engineReady ? "Ready" : "Needs attention", tone(engineReady, Boolean(preflight.docker_cli || preflight.docker_compose)));
+        document.getElementById("engine-copy").textContent =
+          preflight.docker_error || (engineReady ? "The local runtime engine is available to the service." : "Install Docker Desktop or start Docker before continuing.");
+
+        const registrationReady = Boolean(runtime.credentials_present);
+        setPill(document.getElementById("claim-pill"), registrationReady ? "Registered" : (claim ? claim.status : "Pending"), tone(registrationReady, true));
+        document.getElementById("claim-copy").textContent =
+          registrationReady ? "Credentials are stored locally for this node." : (claim ? `Claim code ${claim.claim_code}. Approval is still pending.` : "Run guided setup to create a claim and register this node.");
+
+        const runtimeOk = runtime.stage === "running";
+        setPill(document.getElementById("runtime-pill"), runtime.stage || "idle", tone(runtimeOk, runtime.stage === "ready" || runtime.stage === "registration_required"));
+        document.getElementById("runtime-copy").textContent =
+          runtimeOk ? "The node agent and supporting services are running." : (runtime.message || "Runtime is idle.");
+
+        const updateHealthy = !updates.pending_restart && !updates.last_error;
+        setPill(document.getElementById("update-pill"), updates.auto_update_enabled ? "Enabled" : "Manual", tone(updateHealthy, true));
+        document.getElementById("update-copy").textContent =
+          updates.last_error || updates.last_result || "No update checks have run yet.";
+
+        if (claim && claim.approval_url) {
+          claimCard.hidden = false;
+          claimUrl = claim.approval_url;
+          document.getElementById("claim-code").textContent = claim.claim_code || "";
+          document.getElementById("claim-expiry").textContent = claim.expires_at || "";
+        } else {
+          claimCard.hidden = true;
+          claimUrl = "";
+        }
+
+        if (installerState.error) {
+          errorBanner.hidden = false;
+          errorBanner.textContent = installerState.error;
+        } else {
+          errorBanner.hidden = true;
+          errorBanner.textContent = "";
+        }
+
+        if (diagnostics.last_bundle_name) {
+          downloadLink.hidden = false;
+          downloadLink.href = `/downloads/${encodeURIComponent(diagnostics.last_bundle_name)}`;
+          downloadLink.textContent = `Download ${diagnostics.last_bundle_name}`;
+        } else {
+          downloadLink.hidden = true;
+          downloadLink.removeAttribute("href");
+        }
+
+        hydrateForm(installer.config, updates);
+      }
+
+      async function postJson(path, payload = {}) {
+        const response = await fetch(path, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        return response.json();
+      }
+
+      async function refreshStatus() {
+        const response = await fetch("/api/status");
+        render(await response.json());
+      }
+
+      setupForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        render(await postJson("/api/install", setupPayload()));
+      });
+
+      document.getElementById("refresh-button").addEventListener("click", () => { void refreshStatus(); });
+      document.getElementById("start-runtime").addEventListener("click", async () => render(await postJson("/api/runtime/start")));
+      document.getElementById("stop-runtime").addEventListener("click", async () => render(await postJson("/api/runtime/stop")));
+      document.getElementById("restart-runtime").addEventListener("click", async () => render(await postJson("/api/runtime/restart")));
+      document.getElementById("save-update-policy").addEventListener("click", async () => {
+        render(await postJson("/api/updates/configure", {
+          enabled: document.getElementById("auto_update_enabled").checked,
+          interval_hours: Number(document.getElementById("auto_update_interval").value || "24")
+        }));
+      });
+      document.getElementById("check-updates").addEventListener("click", async () => render(await postJson("/api/updates/check", { apply: false })));
+      document.getElementById("apply-updates").addEventListener("click", async () => render(await postJson("/api/updates/check", { apply: true })));
+      document.getElementById("create-diagnostics").addEventListener("click", async () => render(await postJson("/api/diagnostics")));
+      openClaimButton.addEventListener("click", () => {
+        if (claimUrl) {
+          window.open(claimUrl, "_blank", "noopener,noreferrer");
+        }
+      });
+
+      void refreshStatus();
+      window.setInterval(() => { void refreshStatus(); }, 5000);
+    </script>
+  </body>
+</html>

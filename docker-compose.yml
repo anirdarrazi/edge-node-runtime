@@ -9,9 +9,9 @@ services:
       - vllm
     restart: unless-stopped
     volumes:
-      - model-cache:/var/lib/autonomousc/model-cache
-      - scratch:/var/lib/autonomousc/scratch
-      - credentials:/var/lib/autonomousc/credentials
+      - ./data/model-cache:/var/lib/autonomousc/model-cache
+      - ./data/scratch:/var/lib/autonomousc/scratch
+      - ./data/credentials:/var/lib/autonomousc/credentials
 
   node-agent-bootstrap:
     build:
@@ -26,9 +26,9 @@ services:
     stdin_open: true
     tty: true
     volumes:
-      - model-cache:/var/lib/autonomousc/model-cache
-      - scratch:/var/lib/autonomousc/scratch
-      - credentials:/var/lib/autonomousc/credentials
+      - ./data/model-cache:/var/lib/autonomousc/model-cache
+      - ./data/scratch:/var/lib/autonomousc/scratch
+      - ./data/credentials:/var/lib/autonomousc/credentials
 
   vllm:
     image: vllm/vllm-openai:latest
@@ -43,7 +43,7 @@ services:
       - "8000:8000"
     restart: unless-stopped
     volumes:
-      - model-cache:/root/.cache/huggingface
+      - ./data/model-cache:/root/.cache/huggingface
 
   vector:
     image: timberio/vector:0.39.0-debian
@@ -51,8 +51,3 @@ services:
     volumes:
       - ./vector.toml:/etc/vector/vector.toml:ro
     restart: unless-stopped
-
-volumes:
-  model-cache:
-  scratch:
-  credentials:

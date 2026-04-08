@@ -133,18 +133,19 @@ class EdgeControlClient:
         if note_path.exists():
             note_path.unlink()
 
+    def persist_credentials(self, node_id: str, node_key: str) -> tuple[str, str]:
+        self.settings.node_id = node_id
+        self.settings.node_key = node_key
+        self._persist_credentials(node_id, node_key)
+        return node_id, node_key
+
     def is_auth_error(self, error: Exception) -> bool:
         if not isinstance(error, httpx.HTTPStatusError) or error.response.status_code not in {401, 403}:
             return False
         return str(error.request.url).startswith(str(self.client.base_url))
 
     def _persist_from_response(self, payload: dict[str, Any]) -> tuple[str, str]:
-        node_id = str(payload["node_id"])
-        node_key = str(payload["node_key"])
-        self.settings.node_id = node_id
-        self.settings.node_key = node_key
-        self._persist_credentials(node_id, node_key)
-        return node_id, node_key
+        return self.persist_credentials(str(payload["node_id"]), str(payload["node_key"]))
 
     def enroll_if_needed(self) -> tuple[str, str]:
         if self.settings.node_id and self.settings.node_key:

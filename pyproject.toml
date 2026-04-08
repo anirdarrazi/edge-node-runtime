@@ -17,12 +17,17 @@ dependencies = [
 [project.scripts]
 node-agent = "node_agent.main:main"
 node-agent-bootstrap = "node_agent.main:bootstrap_entrypoint"
+node-agent-installer = "node_agent.installer:main"
+node-agent-service = "node_agent.service:main"
 
 [tool.setuptools.package-dir]
 "" = "src"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+node_agent = ["*.html"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

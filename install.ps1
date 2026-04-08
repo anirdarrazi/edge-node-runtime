@@ -3,24 +3,34 @@ $ErrorActionPreference = "Stop"
 
 Set-Location $PSScriptRoot
 
-if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
-  throw "Docker is required to install the edge node runtime."
+$pythonLauncher = $null
+if (Get-Command py -ErrorAction SilentlyContinue) {
+  $pythonLauncher = @{
+    Command = "py"
+    Args = @("-3")
+  }
+} elseif (Get-Command python -ErrorAction SilentlyContinue) {
+  $pythonLauncher = @{
+    Command = "python"
+    Args = @()
+  }
 }
 
-docker compose version | Out-Null
-
-if (-not (Test-Path ".env")) {
-  Copy-Item ".env.example" ".env"
-  Write-Host "Created .env from .env.example"
+if (-not $pythonLauncher) {
+  throw "Python 3.11 or newer is required to launch the guided installer."
 }
 
-Write-Host "Starting the local model runtime..."
-docker compose up -d vllm
+$venvPath = Join-Path $PSScriptRoot ".installer-venv"
+if (-not (Test-Path $venvPath)) {
+  Write-Host "Creating installer virtual environment..."
+  & $pythonLauncher.Command @($pythonLauncher.Args + @("-m", "venv", $venvPath))
+}
 
-Write-Host "Launching the interactive node claim flow..."
-docker compose run --rm node-agent-bootstrap
+$venvPython = Join-Path $venvPath "Scripts\\python.exe"
 
-Write-Host "Starting the long-running runtime services..."
-docker compose up -d node-agent vector
+Write-Host "Installing local node service dependencies..."
+& $venvPython -m pip install --upgrade pip
+& $venvPython -m pip install -e .
 
-Write-Host "Installation complete. Follow runtime logs with: docker compose logs -f node-agent"
+Write-Host "Starting the local node runtime service..."
+& $venvPython -m node_agent.service start --open

@@ -1,2 +1,1 @@
-__all__ = ["config", "control_plane", "runtime"]
-
+__all__ = ["config", "control_plane", "installer", "runtime", "service"]

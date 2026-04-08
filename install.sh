@@ -3,28 +3,26 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-if ! command -v docker >/dev/null 2>&1; then
-  echo "Docker is required to install the edge node runtime." >&2
+if command -v python3 >/dev/null 2>&1; then
+  PYTHON_BIN="python3"
+elif command -v python >/dev/null 2>&1; then
+  PYTHON_BIN="python"
+else
+  echo "Python 3.11 or newer is required to launch the guided installer." >&2
   exit 1
 fi
 
-if ! docker compose version >/dev/null 2>&1; then
-  echo "Docker Compose v2 is required to install the edge node runtime." >&2
-  exit 1
+VENV_PATH=".installer-venv"
+if [ ! -d "$VENV_PATH" ]; then
+  echo "Creating installer virtual environment..."
+  "$PYTHON_BIN" -m venv "$VENV_PATH"
 fi
 
-if [ ! -f .env ]; then
-  cp .env.example .env
-  echo "Created .env from .env.example"
-fi
+VENV_PYTHON="$VENV_PATH/bin/python"
 
-echo "Starting the local model runtime..."
-docker compose up -d vllm
+echo "Installing local node service dependencies..."
+"$VENV_PYTHON" -m pip install --upgrade pip
+"$VENV_PYTHON" -m pip install -e .
 
-echo "Launching the interactive node claim flow..."
-docker compose run --rm node-agent-bootstrap
-
-echo "Starting the long-running runtime services..."
-docker compose up -d node-agent vector
-
-echo "Installation complete. Follow runtime logs with: docker compose logs -f node-agent"
+echo "Starting the local node runtime service..."
+"$VENV_PYTHON" -m node_agent.service start --open
