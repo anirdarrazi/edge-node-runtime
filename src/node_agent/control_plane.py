@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
+import os
+import stat
 import sys
+import tempfile
 import time
 import webbrowser
 from datetime import datetime, timezone
@@ -23,6 +27,7 @@ class EdgeControlClient:
         credentials_path = Path(self.settings.credentials_path)
         if not credentials_path.exists():
             return None
+        self._tighten_credentials_permissions(credentials_path)
 
         payload = json.loads(credentials_path.read_text(encoding="utf-8"))
         node_id = payload.get("node_id")
@@ -37,11 +42,40 @@ class EdgeControlClient:
     def _persist_credentials(self, node_id: str, node_key: str) -> None:
         credentials_path = Path(self.settings.credentials_path)
         credentials_path.parent.mkdir(parents=True, exist_ok=True)
-        credentials_path.write_text(
-            json.dumps({"node_id": node_id, "node_key": node_key}, indent=2),
+        self._tighten_directory_permissions(credentials_path.parent)
+        serialized = json.dumps({"node_id": node_id, "node_key": node_key}, indent=2)
+        temp_handle = tempfile.NamedTemporaryFile(
+            "w",
             encoding="utf-8",
+            dir=credentials_path.parent,
+            prefix=f".{credentials_path.name}.",
+            suffix=".tmp",
+            delete=False,
         )
+        try:
+            with temp_handle as handle:
+                handle.write(serialized)
+                handle.flush()
+                os.fsync(handle.fileno())
+            temp_path = Path(temp_handle.name)
+            self._tighten_credentials_permissions(temp_path)
+            temp_path.replace(credentials_path)
+            self._tighten_credentials_permissions(credentials_path)
+        finally:
+            temp_path = Path(temp_handle.name)
+            if temp_path.exists():
+                temp_path.unlink()
         self.clear_recovery_note()
+
+    @staticmethod
+    def _tighten_directory_permissions(path: Path) -> None:
+        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+
+    @classmethod
+    def _tighten_credentials_permissions(cls, path: Path) -> None:
+        if path.parent.exists():
+            cls._tighten_directory_permissions(path.parent)
+        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
 
     def _interactive_terminal_available(self) -> bool:
         return sys.stdin.isatty() and sys.stdout.isatty()
@@ -303,6 +337,12 @@ class EdgeControlClient:
     def fetch_artifact(self, assignment: AssignmentEnvelope) -> dict[str, Any]:
         response = self.client.get(assignment.input_artifact_url)
         response.raise_for_status()
+        ciphertext_sha256 = hashlib.sha256(response.content).hexdigest()
+        if ciphertext_sha256 != assignment.input_artifact_sha256:
+            raise ValueError(
+                "input artifact integrity check failed: "
+                f"expected {assignment.input_artifact_sha256}, got {ciphertext_sha256}"
+            )
         return decrypt_artifact(response.content, assignment.input_artifact_encryption)
 
 

@@ -241,8 +241,8 @@
           <div class="dual">
             <div class="callout">
               <strong>Update policy</strong>
-              <p class="supporting">The service can periodically fetch new runtime images and apply them for you.</p>
-              <label class="checkbox"><input id="auto_update_enabled" type="checkbox">Enable automatic runtime updates</label>
+              <p class="supporting">The service can periodically fetch signed runtime releases and apply them for you.</p>
+              <label class="checkbox"><input id="auto_update_enabled" type="checkbox">Enable automatic signed runtime updates</label>
               <label>Check interval (hours)<input id="auto_update_interval" type="number" min="1" max="168"></label>
               <div class="button-row">
                 <button id="save-update-policy" type="button">Save update policy</button>
@@ -282,6 +282,16 @@
       const downloadLink = document.getElementById("download-link");
       let formHydrated = false;
       let claimUrl = "";
+
+      function showApiError(message) {
+        errorBanner.hidden = false;
+        errorBanner.textContent = message;
+      }
+
+      function clearApiError() {
+        errorBanner.hidden = true;
+        errorBanner.textContent = "";
+      }
 
       function setPill(element, label, tone) {
         element.textContent = label;
@@ -369,11 +379,9 @@
         }
 
         if (installerState.error) {
-          errorBanner.hidden = false;
-          errorBanner.textContent = installerState.error;
+          showApiError(installerState.error);
         } else {
-          errorBanner.hidden = true;
-          errorBanner.textContent = "";
+          clearApiError();
         }
 
         if (diagnostics.last_bundle_name) {
@@ -394,7 +402,12 @@
           headers: { "content-type": "application/json" },
           body: JSON.stringify(payload)
         });
-        return response.json();
+        const data = await response.json();
+        if (!response.ok || data.error) {
+          const details = data.error || {};
+          throw new Error(details.message || "The request could not be completed.");
+        }
+        return data;
       }
 
       async function refreshStatus() {
@@ -402,24 +415,35 @@
         render(await response.json());
       }
 
+      async function runAction(action) {
+        try {
+          clearApiError();
+          render(await action());
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "The request could not be completed.";
+          await refreshStatus();
+          showApiError(message);
+        }
+      }
+
       setupForm.addEventListener("submit", async (event) => {
         event.preventDefault();
-        render(await postJson("/api/install", setupPayload()));
+        await runAction(() => postJson("/api/install", setupPayload()));
       });
 
       document.getElementById("refresh-button").addEventListener("click", () => { void refreshStatus(); });
-      document.getElementById("start-runtime").addEventListener("click", async () => render(await postJson("/api/runtime/start")));
-      document.getElementById("stop-runtime").addEventListener("click", async () => render(await postJson("/api/runtime/stop")));
-      document.getElementById("restart-runtime").addEventListener("click", async () => render(await postJson("/api/runtime/restart")));
+      document.getElementById("start-runtime").addEventListener("click", async () => runAction(() => postJson("/api/runtime/start")));
+      document.getElementById("stop-runtime").addEventListener("click", async () => runAction(() => postJson("/api/runtime/stop")));
+      document.getElementById("restart-runtime").addEventListener("click", async () => runAction(() => postJson("/api/runtime/restart")));
       document.getElementById("save-update-policy").addEventListener("click", async () => {
-        render(await postJson("/api/updates/configure", {
+        await runAction(() => postJson("/api/updates/configure", {
           enabled: document.getElementById("auto_update_enabled").checked,
           interval_hours: Number(document.getElementById("auto_update_interval").value || "24")
         }));
       });
-      document.getElementById("check-updates").addEventListener("click", async () => render(await postJson("/api/updates/check", { apply: false })));
-      document.getElementById("apply-updates").addEventListener("click", async () => render(await postJson("/api/updates/check", { apply: true })));
-      document.getElementById("create-diagnostics").addEventListener("click", async () => render(await postJson("/api/diagnostics")));
+      document.getElementById("check-updates").addEventListener("click", async () => runAction(() => postJson("/api/updates/check", { apply: false })));
+      document.getElementById("apply-updates").addEventListener("click", async () => runAction(() => postJson("/api/updates/check", { apply: true })));
+      document.getElementById("create-diagnostics").addEventListener("click", async () => runAction(() => postJson("/api/diagnostics")));
       openClaimButton.addEventListener("click", () => {
         if (claimUrl) {
           window.open(claimUrl, "_blank", "noopener,noreferrer");

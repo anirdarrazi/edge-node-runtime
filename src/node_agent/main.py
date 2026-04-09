@@ -15,6 +15,7 @@ from .runtime import VLLMRuntime
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 LOGGER = logging.getLogger("autonomousc-node-agent")
 assignment_progress_keepalive_seconds = 30.0
+supported_operations = frozenset({"responses", "embeddings"})
 
 
 def is_transient_http_error(error: Exception) -> bool:
@@ -49,6 +50,96 @@ def assignment_progress(state: str, item_count: int, **details: object) -> dict[
     }
     payload.update(details)
     return payload
+
+
+def configured_supported_models(settings: NodeAgentSettings) -> set[str]:
+    return {model.strip() for model in str(settings.supported_models).split(",") if model.strip()}
+
+
+def validate_assignment_policy(settings: NodeAgentSettings, assignment: object) -> None:
+    if getattr(assignment, "operation", None) not in supported_operations:
+        raise ValueError(f"assignment operation {getattr(assignment, 'operation', None)!r} is not supported by this node")
+    if getattr(assignment, "model", None) not in configured_supported_models(settings):
+        raise ValueError(f"assignment model {getattr(assignment, 'model', None)!r} is not supported by this node")
+    allowed_regions = getattr(assignment, "allowed_regions", [])
+    if not isinstance(allowed_regions, list) or (
+        "global" not in allowed_regions and settings.node_region not in allowed_regions
+    ):
+        raise ValueError(f"assignment is not allowed to run in node region {settings.node_region!r}")
+
+    token_budget = getattr(assignment, "token_budget", {})
+    total_tokens = token_budget.get("total_tokens") if isinstance(token_budget, dict) else None
+    if not isinstance(total_tokens, int) or total_tokens < 0:
+        raise ValueError("assignment token budget is invalid")
+    if total_tokens > settings.max_batch_tokens:
+        raise ValueError(
+            f"assignment token budget {total_tokens} exceeds local batch limit {settings.max_batch_tokens}"
+        )
+
+    required_vram_gb = getattr(assignment, "required_vram_gb", None)
+    if not isinstance(required_vram_gb, (int, float)) or required_vram_gb <= 0:
+        raise ValueError("assignment required_vram_gb is invalid")
+    if float(required_vram_gb) > settings.gpu_memory_gb:
+        raise ValueError(
+            f"assignment requires {required_vram_gb} GiB of VRAM but this node only reports {settings.gpu_memory_gb}"
+        )
+
+    required_context_tokens = getattr(assignment, "required_context_tokens", None)
+    if not isinstance(required_context_tokens, int) or required_context_tokens <= 0:
+        raise ValueError("assignment required_context_tokens is invalid")
+    if required_context_tokens > settings.max_context_tokens:
+        raise ValueError(
+            "assignment context window requirement "
+            f"{required_context_tokens} exceeds local limit {settings.max_context_tokens}"
+        )
+
+    privacy_tier = getattr(assignment, "privacy_tier", None)
+    if privacy_tier == "restricted":
+        if not settings.restricted_capable:
+            raise ValueError("restricted assignment rejected because the node is not marked restricted_capable")
+        if settings.trust_tier != "restricted":
+            raise ValueError(
+                f"restricted assignment rejected because node trust tier is {settings.trust_tier!r}"
+            )
+        if settings.attestation_provider != "hardware":
+            raise ValueError(
+                "restricted assignment rejected because the current attestation provider is not hardware-backed"
+            )
+    if privacy_tier == "confidential" and settings.trust_tier == "standard":
+        raise ValueError("confidential assignment rejected because the node trust tier is only standard")
+
+
+def validate_assignment_items(assignment: object, items: object) -> list[dict[str, object]]:
+    if not isinstance(items, list) or not items:
+        raise ValueError("assignment payload must include a non-empty items list")
+    if len(items) != getattr(assignment, "item_count", None):
+        raise ValueError(
+            f"assignment item count mismatch: expected {getattr(assignment, 'item_count', None)}, got {len(items)}"
+        )
+
+    validated_items: list[dict[str, object]] = []
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise ValueError(f"assignment item {index} is not an object")
+        if item.get("operation") != getattr(assignment, "operation", None):
+            raise ValueError(
+                f"assignment item {index} operation {item.get('operation')!r} does not match envelope"
+            )
+        if item.get("model") != getattr(assignment, "model", None):
+            raise ValueError(f"assignment item {index} model {item.get('model')!r} does not match envelope")
+        if not isinstance(item.get("batch_item_id"), str) or not item["batch_item_id"]:
+            raise ValueError(f"assignment item {index} is missing batch_item_id")
+        if not isinstance(item.get("customer_item_id"), str) or not item["customer_item_id"]:
+            raise ValueError(f"assignment item {index} is missing customer_item_id")
+        if "input" not in item:
+            raise ValueError(f"assignment item {index} is missing input")
+        validated_items.append(item)
+    return validated_items
+
+
+def validate_assignment(control: EdgeControlClient, assignment: object, items: object) -> list[dict[str, object]]:
+    validate_assignment_policy(control.settings, assignment)
+    return validate_assignment_items(assignment, items)
 
 
 class AssignmentProgressKeepalive:
@@ -141,7 +232,7 @@ def run_worker_loop(control: EdgeControlClient, runtime: VLLMRuntime, attest_on_
                 control.accept_assignment(assignment.assignment_id)
                 assignment_claimed = True
                 payload = control.fetch_artifact(assignment)
-                items = payload.get("items", [])
+                items = validate_assignment(control, assignment, payload.get("items", []))
                 item_count = len(items)
                 control.report_progress(assignment.assignment_id, assignment_progress("running", item_count))
                 progress_keepalive = AssignmentProgressKeepalive(control, assignment.assignment_id, item_count)

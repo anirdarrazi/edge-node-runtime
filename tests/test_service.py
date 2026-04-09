@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 import node_agent.installer as installer_module
+import node_agent.release_manifest as release_manifest_module
 import node_agent.runtime_layout as layout_module
 import node_agent.service as service_module
 
@@ -52,19 +53,30 @@ def base_runner_factory(
     image_ids = dict(image_ids or {})
     update_on_pull = dict(update_on_pull or {})
 
+    def normalize(args: list[str]) -> list[str]:
+        if args[:2] != ["docker", "compose"]:
+            return args
+        normalized = ["docker", "compose"]
+        index = 2
+        while index + 1 < len(args) and args[index] == "--env-file":
+            index += 2
+        normalized.extend(args[index:])
+        return normalized
+
     def runner(args: list[str], _cwd: Path) -> subprocess.CompletedProcess[str]:
         commands.append(args)
-        if args[:3] == ["docker", "compose", "version"]:
+        normalized = normalize(args)
+        if normalized[:3] == ["docker", "compose", "version"]:
             return completed(args)
         if args[:2] == ["docker", "info"]:
             return completed(args)
-        if args[:4] == ["docker", "compose", "ps", "--services"]:
+        if normalized[:4] == ["docker", "compose", "ps", "--services"]:
             return completed(args, stdout=running_services)
-        if args[:3] == ["docker", "compose", "ps"]:
+        if normalized[:3] == ["docker", "compose", "ps"]:
             return completed(args, stdout="node-agent running\nvllm running\nvector running\n")
-        if args[:3] == ["docker", "compose", "logs"]:
+        if normalized[:3] == ["docker", "compose", "logs"]:
             return completed(args, stdout="node-agent ready\nvector healthy\n")
-        if args[:3] == ["docker", "compose", "up"]:
+        if normalized[:3] == ["docker", "compose", "up"]:
             return completed(args)
         if args[:3] == ["docker", "image", "inspect"]:
             image = args[3]
@@ -124,8 +136,8 @@ def test_create_diagnostics_bundle_redacts_sensitive_config(tmp_path: Path, monk
 def test_check_for_updates_marks_runtime_for_restart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     write_example_env(tmp_path)
     commands: list[list[str]] = []
-    original_id = "sha256:old"
-    updated_id = "sha256:new"
+    manifest = release_manifest_module.load_release_manifest()
+    updated_id = "sha256:new-node-agent"
 
     monkeypatch.setattr(installer_module.shutil, "which", lambda name: "docker" if name == "docker" else "nvidia-smi")
 
@@ -133,27 +145,35 @@ def test_check_for_updates_marks_runtime_for_restart(tmp_path: Path, monkeypatch
         runtime_dir=tmp_path,
         command_runner=base_runner_factory(
             commands,
-            image_ids={
-                service_module.UPDATE_IMAGES[0]: original_id,
-                service_module.UPDATE_IMAGES[1]: original_id,
-            },
-            update_on_pull={service_module.UPDATE_IMAGES[0]: updated_id},
+            update_on_pull={manifest.images["node-agent"].ref: updated_id},
         ),
+    )
+    service.release_env_path.write_text(
+        "\n".join(
+            [
+                "AUTONOMOUSC_RELEASE_VERSION=2026.04.01.1",
+                "AUTONOMOUSC_RELEASE_CHANNEL=stable",
+                "NODE_AGENT_IMAGE=anirdarrazi/autonomousc-ai-edge-runtime@sha256:old",
+                f"VLLM_IMAGE={manifest.images['vllm'].ref}",
+                f"VECTOR_IMAGE={manifest.images['vector'].ref}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
     )
 
     payload = service.check_for_updates(apply=False)
 
     assert payload["updates"]["pending_restart"] is True
-    assert payload["updates"]["updated_images"] == [service_module.UPDATE_IMAGES[0]]
-    assert ["docker", "pull", service_module.UPDATE_IMAGES[0]] in commands
-    assert ["docker", "pull", service_module.UPDATE_IMAGES[1]] in commands
+    assert payload["updates"]["updated_images"] == ["node-agent"]
+    assert ["docker", "pull", manifest.images["node-agent"].ref] in commands
 
 
 def test_check_for_updates_can_apply_and_restart_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     write_example_env(tmp_path)
     commands: list[list[str]] = []
-    original_id = "sha256:old"
-    updated_id = "sha256:new"
+    manifest = release_manifest_module.load_release_manifest()
+    updated_id = "sha256:new-node-agent"
 
     monkeypatch.setattr(installer_module.shutil, "which", lambda name: "docker" if name == "docker" else "nvidia-smi")
 
@@ -161,19 +181,33 @@ def test_check_for_updates_can_apply_and_restart_runtime(tmp_path: Path, monkeyp
         runtime_dir=tmp_path,
         command_runner=base_runner_factory(
             commands,
-            image_ids={
-                service_module.UPDATE_IMAGES[0]: original_id,
-                service_module.UPDATE_IMAGES[1]: original_id,
-            },
-            update_on_pull={service_module.UPDATE_IMAGES[0]: updated_id},
+            update_on_pull={manifest.images["node-agent"].ref: updated_id},
         ),
     )
+    service.release_env_path.write_text(
+        "\n".join(
+            [
+                "AUTONOMOUSC_RELEASE_VERSION=2026.04.01.1",
+                "AUTONOMOUSC_RELEASE_CHANNEL=stable",
+                "NODE_AGENT_IMAGE=anirdarrazi/autonomousc-ai-edge-runtime@sha256:old",
+                f"VLLM_IMAGE={manifest.images['vllm'].ref}",
+                f"VECTOR_IMAGE={manifest.images['vector'].ref}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(service, "wait_for_runtime_health", lambda timeout_seconds=90.0: None)
 
     payload = service.check_for_updates(apply=True)
 
     assert payload["updates"]["pending_restart"] is False
-    assert payload["updates"]["updated_images"] == [service_module.UPDATE_IMAGES[0]]
-    assert ["docker", "compose", "up", "-d", "--force-recreate", "vllm", "node-agent", "vector"] in commands
+    assert payload["updates"]["updated_images"] == ["node-agent"]
+    assert manifest.version in service.release_env_path.read_text(encoding="utf-8")
+    assert any(
+        command[-6:] == ["up", "-d", "--force-recreate", "vllm", "node-agent", "vector"]
+        for command in commands
+    )
 
 
 def test_runtime_service_populates_owner_bundle_when_runtime_dir_is_overridden(

@@ -5,6 +5,8 @@ from typing import Literal
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .release_manifest import DEFAULT_NODE_AGENT_IMAGE
+
 
 class NodeAgentSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -29,7 +31,7 @@ class NodeAgentSettings(BaseSettings):
     supported_models: str = "meta-llama/Llama-3.1-8B-Instruct,BAAI/bge-large-en-v1.5"
     poll_interval_seconds: int = 10
     agent_version: str = "0.1.0"
-    docker_image: str = "anirdarrazi/autonomousc-ai-edge-runtime:latest"
+    docker_image: str = DEFAULT_NODE_AGENT_IMAGE
     attestation_provider: Literal["simulated", "hardware"] = "simulated"
 
 
@@ -40,9 +42,12 @@ class AssignmentEnvelope(BaseModel):
     model: str
     privacy_tier: str
     allowed_regions: list[str]
+    required_vram_gb: float
+    required_context_tokens: int
     token_budget: dict
     item_count: int
     input_artifact_url: str
+    input_artifact_sha256: str
     input_artifact_encryption: dict
 
 

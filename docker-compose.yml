@@ -5,6 +5,8 @@ services:
     command: ["node-agent", "run"]
     env_file:
       - .env
+    environment:
+      DOCKER_IMAGE: ${DOCKER_IMAGE:-local-build}
     depends_on:
       - vllm
     restart: unless-stopped
@@ -19,6 +21,8 @@ services:
     command: ["node-agent", "bootstrap"]
     env_file:
       - .env
+    environment:
+      DOCKER_IMAGE: ${DOCKER_IMAGE:-local-build}
     depends_on:
       - vllm
     profiles: ["bootstrap"]
@@ -31,7 +35,7 @@ services:
       - ./data/credentials:/var/lib/autonomousc/credentials
 
   vllm:
-    image: vllm/vllm-openai:latest
+    image: ${VLLM_IMAGE:-vllm/vllm-openai@sha256:d9a5c1c1614c959fde8d2a4d68449db184572528a6055afdd0caf1e66fb51504}
     command:
       - --model
       - ${VLLM_MODEL:-meta-llama/Llama-3.1-8B-Instruct}
@@ -46,7 +50,7 @@ services:
       - ./data/model-cache:/root/.cache/huggingface
 
   vector:
-    image: timberio/vector:0.39.0-debian
+    image: ${VECTOR_IMAGE:-timberio/vector@sha256:f5704c730ea10e0d7272491f4293a596f5ebc695fec64e29d29f5364895ef997}
     command: ["--config", "/etc/vector/vector.toml"]
     volumes:
       - ./vector.toml:/etc/vector/vector.toml:ro

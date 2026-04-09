@@ -9,7 +9,17 @@ import node_agent.main as main_module
 
 class FakeControl:
     def __init__(self, has_credentials: bool = True) -> None:
-        self.settings = SimpleNamespace(poll_interval_seconds=0)
+        self.settings = SimpleNamespace(
+            poll_interval_seconds=0,
+            node_region="eu-se-1",
+            trust_tier="restricted",
+            restricted_capable=True,
+            supported_models="meta-llama/Llama-3.1-8B-Instruct,BAAI/bge-large-en-v1.5",
+            gpu_memory_gb=24.0,
+            max_context_tokens=32768,
+            max_batch_tokens=50000,
+            attestation_provider="hardware",
+        )
         self._has_credentials = has_credentials
         self.bootstrap_calls = 0
         self.require_calls = 0
@@ -124,9 +134,15 @@ def test_run_worker_loop_reports_assignment_failure():
             self.pulled = True
             return SimpleNamespace(
                 assignment_id="assign_123",
+                execution_id="pexec_123",
                 item_count=1,
                 operation="responses",
                 model="meta-llama/Llama-3.1-8B-Instruct",
+                privacy_tier="restricted",
+                allowed_regions=["eu-se-1"],
+                required_vram_gb=16.0,
+                required_context_tokens=8192,
+                token_budget={"total_tokens": 2048},
             )
 
         def fetch_artifact(self, _assignment):
@@ -160,9 +176,15 @@ def test_run_worker_loop_keeps_assignments_fresh_while_runtime_is_busy(monkeypat
             self.pulled = True
             return SimpleNamespace(
                 assignment_id="assign_keepalive",
+                execution_id="pexec_keepalive",
                 item_count=1,
                 operation="responses",
                 model="meta-llama/Llama-3.1-8B-Instruct",
+                privacy_tier="restricted",
+                allowed_regions=["eu-se-1"],
+                required_vram_gb=16.0,
+                required_context_tokens=8192,
+                token_budget={"total_tokens": 2048},
             )
 
         def fetch_artifact(self, _assignment):
@@ -171,6 +193,8 @@ def test_run_worker_loop_keeps_assignments_fresh_while_runtime_is_busy(monkeypat
                     {
                         "batch_item_id": "item_1",
                         "customer_item_id": "cust_1",
+                        "operation": "responses",
+                        "model": "meta-llama/Llama-3.1-8B-Instruct",
                         "input": {"messages": [{"role": "user", "content": "hello"}]},
                     }
                 ]
@@ -191,3 +215,66 @@ def test_run_worker_loop_keeps_assignments_fresh_while_runtime_is_busy(monkeypat
     assert len(running_updates) >= 2
     assert any(progress.get("keepalive") is True for progress in running_updates[1:])
     assert control.progress_updates[-1][1]["state"] == "completed"
+
+
+def test_validate_assignment_rejects_restricted_work_without_hardware_attestation():
+    control = FakeControl(has_credentials=True)
+    control.settings.attestation_provider = "simulated"
+    assignment = SimpleNamespace(
+        assignment_id="assign_restricted",
+        execution_id="pexec_restricted",
+        item_count=1,
+        operation="responses",
+        model="meta-llama/Llama-3.1-8B-Instruct",
+        privacy_tier="restricted",
+        allowed_regions=["eu-se-1"],
+        required_vram_gb=16.0,
+        required_context_tokens=8192,
+        token_budget={"total_tokens": 2048},
+    )
+
+    with pytest.raises(ValueError, match="not hardware-backed"):
+        main_module.validate_assignment(
+            control,
+            assignment,
+            [
+                {
+                    "batch_item_id": "item_1",
+                    "customer_item_id": "cust_1",
+                    "operation": "responses",
+                    "model": "meta-llama/Llama-3.1-8B-Instruct",
+                    "input": {"messages": [{"role": "user", "content": "hello"}]},
+                }
+            ],
+        )
+
+
+def test_validate_assignment_rejects_item_model_mismatch():
+    control = FakeControl(has_credentials=True)
+    assignment = SimpleNamespace(
+        assignment_id="assign_model_mismatch",
+        execution_id="pexec_model_mismatch",
+        item_count=1,
+        operation="responses",
+        model="meta-llama/Llama-3.1-8B-Instruct",
+        privacy_tier="restricted",
+        allowed_regions=["eu-se-1"],
+        required_vram_gb=16.0,
+        required_context_tokens=8192,
+        token_budget={"total_tokens": 2048},
+    )
+
+    with pytest.raises(ValueError, match="does not match envelope"):
+        main_module.validate_assignment(
+            control,
+            assignment,
+            [
+                {
+                    "batch_item_id": "item_1",
+                    "customer_item_id": "cust_1",
+                    "operation": "responses",
+                    "model": "BAAI/bge-large-en-v1.5",
+                    "input": {"messages": [{"role": "user", "content": "hello"}]},
+                }
+            ],
+        )

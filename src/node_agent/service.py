@@ -21,19 +21,27 @@ from urllib.parse import unquote, urlparse
 import httpx
 
 from .installer import CommandRunner, GuidedInstaller, parse_env_file, run_command
+from .release_manifest import (
+    RELEASE_ENV_CHANNEL_KEY,
+    RELEASE_ENV_VAR_BY_SERVICE,
+    RELEASE_ENV_VERSION_KEY,
+    ReleaseManifest,
+    ReleaseManifestError,
+    load_release_manifest,
+)
 from .runtime_layout import ensure_runtime_bundle, resolve_runtime_dir, service_access_host
 
-
-UPDATE_IMAGES = [
-    "vllm/vllm-openai:latest",
-    "timberio/vector:0.39.0-debian",
-]
+RUNTIME_SERVICES = ("vllm", "node-agent", "vector")
 
 SENSITIVE_ENV_MARKERS = ("TOKEN", "SECRET", "KEY", "PASSWORD", "COOKIE", "CERT")
 
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def request_id() -> str:
+    return os.urandom(8).hex()
 
 
 def service_html() -> str:
@@ -49,6 +57,8 @@ class UpdateState:
     last_error: str | None = None
     pending_restart: bool = False
     updated_images: list[str] = field(default_factory=list)
+    release_version: str | None = None
+    release_channel: str | None = None
 
 
 @dataclass
@@ -72,6 +82,7 @@ class NodeRuntimeService:
         self.pid_path = self.service_dir / "service.pid"
         self.meta_path = self.service_dir / "service-meta.json"
         self.state_path = self.service_dir / "service-state.json"
+        self.release_env_path = self.service_dir / "release.env"
         self.command_runner = command_runner
         self.guided_installer = GuidedInstaller(runtime_dir=self.runtime_dir, command_runner=command_runner)
         self.lock = threading.Lock()
@@ -111,8 +122,73 @@ class NodeRuntimeService:
             self.logs.append(stamped)
             self.logs = self.logs[-120:]
 
+    def compose_command(self, args: list[str]) -> list[str]:
+        command = ["docker", "compose"]
+        if self.guided_installer.env_path.exists():
+            command.extend(["--env-file", str(self.guided_installer.env_path)])
+        if self.release_env_path.exists():
+            command.extend(["--env-file", str(self.release_env_path)])
+        command.extend(args)
+        return command
+
     def compose(self, args: list[str]) -> subprocess.CompletedProcess[str]:
-        return self.command_runner(["docker", "compose", *args], self.runtime_dir)
+        return self.command_runner(self.compose_command(args), self.runtime_dir)
+
+    def signed_release_manifest(self) -> ReleaseManifest:
+        manifest = load_release_manifest()
+        self.update_state.release_version = manifest.version
+        self.update_state.release_channel = manifest.channel
+        return manifest
+
+    def current_release_env(self, manifest: ReleaseManifest) -> dict[str, str]:
+        values = parse_env_file(self.release_env_path)
+        return {
+            RELEASE_ENV_VERSION_KEY: values.get(RELEASE_ENV_VERSION_KEY, manifest.version),
+            RELEASE_ENV_CHANNEL_KEY: values.get(RELEASE_ENV_CHANNEL_KEY, manifest.channel),
+            **{
+                env_key: values.get(env_key, manifest.images[service].ref)
+                for service, env_key in RELEASE_ENV_VAR_BY_SERVICE.items()
+            },
+        }
+
+    def write_release_env(self, values: dict[str, str]) -> None:
+        lines = [
+            f"{RELEASE_ENV_VERSION_KEY}={values[RELEASE_ENV_VERSION_KEY]}",
+            f"{RELEASE_ENV_CHANNEL_KEY}={values[RELEASE_ENV_CHANNEL_KEY]}",
+        ]
+        for service in ("node-agent", "vllm", "vector"):
+            env_key = RELEASE_ENV_VAR_BY_SERVICE[service]
+            lines.append(f"{env_key}={values[env_key]}")
+        self.release_env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def restore_release_env(self, previous_content: str | None) -> None:
+        if previous_content is None:
+            if self.release_env_path.exists():
+                self.release_env_path.unlink()
+            return
+        self.release_env_path.write_text(previous_content, encoding="utf-8")
+
+    def wait_for_runtime_health(self, timeout_seconds: float = 90.0) -> None:
+        deadline = time.time() + timeout_seconds
+        required_services = set(RUNTIME_SERVICES)
+        last_failure = "Runtime services are still starting."
+        while time.time() < deadline:
+            try:
+                completed = self.compose(["ps", "--services", "--status", "running"])
+                running = {line.strip() for line in completed.stdout.splitlines() if line.strip()}
+                if not required_services.issubset(running):
+                    missing = ", ".join(sorted(required_services - running))
+                    last_failure = f"Runtime services are not healthy yet. Missing: {missing or 'unknown'}."
+                    time.sleep(2)
+                    continue
+                response = httpx.get(f"http://{service_access_host()}:8000/v1/models", timeout=4.0)
+                if response.status_code < 500:
+                    return
+                last_failure = f"vLLM health check returned HTTP {response.status_code}."
+            except (RuntimeError, httpx.HTTPError) as error:
+                last_failure = str(error) or "Runtime health check failed."
+            time.sleep(2)
+        raise RuntimeError(last_failure)
 
     def runtime_status(
         self,
@@ -162,6 +238,10 @@ class NodeRuntimeService:
         installer_snapshot = self.guided_installer.status_payload()
         preflight = installer_snapshot["preflight"]
         installer_state = installer_snapshot["state"]
+        try:
+            self.signed_release_manifest()
+        except ReleaseManifestError:
+            pass
         with self.lock:
             service_logs = list(self.logs)
         return {
@@ -209,35 +289,112 @@ class NodeRuntimeService:
         return value or None
 
     def check_for_updates(self, apply: bool = False) -> dict[str, Any]:
-        self.log("Checking for runtime image updates...")
-        updated: list[str] = []
-        for image in UPDATE_IMAGES:
-            before = self.docker_image_id(image)
-            self.command_runner(["docker", "pull", image], self.runtime_dir)
-            after = self.docker_image_id(image)
-            if after and before != after:
-                updated.append(image)
+        rollout_id = request_id()
+        try:
+            manifest = self.signed_release_manifest()
+            current_release = self.current_release_env(manifest)
+            target_release = manifest.release_env()
 
-        self.update_state.last_checked_at = now_iso()
-        self.update_state.updated_images = updated
-        self.update_state.last_error = None
+            self.log(
+                f"[request {rollout_id}] Checking signed runtime release "
+                f"{manifest.version} ({manifest.channel})..."
+            )
 
-        if not updated:
-            self.update_state.last_result = "No runtime image updates were found."
+            updated: list[str] = []
+            changed_services = [
+                service
+                for service, env_key in RELEASE_ENV_VAR_BY_SERVICE.items()
+                if current_release.get(env_key) != target_release[env_key]
+            ]
+
+            for service in ("node-agent", "vllm", "vector"):
+                target_ref = target_release[RELEASE_ENV_VAR_BY_SERVICE[service]]
+                before = self.docker_image_id(target_ref)
+                if service in changed_services or before is None:
+                    self.command_runner(["docker", "pull", target_ref], self.runtime_dir)
+                    after = self.docker_image_id(target_ref)
+                    if after and before != after:
+                        updated.append(service)
+
+            self.update_state.last_checked_at = now_iso()
+            self.update_state.updated_images = updated
+            self.update_state.release_version = manifest.version
+            self.update_state.release_channel = manifest.channel
+            self.update_state.last_error = None
+
+            if not changed_services:
+                self.update_state.last_result = f"Runtime already matches signed release {manifest.version}."
+                self.update_state.pending_restart = False
+                self.log(f"[request {rollout_id}] Signed runtime release {manifest.version} is already applied.")
+                self.save_state()
+                return self.status_payload()
+
+            if not apply:
+                self.update_state.last_result = (
+                    f"Signed release {manifest.version} was downloaded and is ready to apply."
+                )
+                self.update_state.pending_restart = True
+                self.log(
+                    f"[request {rollout_id}] Downloaded signed release {manifest.version} "
+                    f"for: {', '.join(changed_services)}."
+                )
+                self.save_state()
+                return self.status_payload()
+
+            previous_content = self.release_env_path.read_text(encoding="utf-8") if self.release_env_path.exists() else None
+            self.write_release_env(target_release)
+            try:
+                self.restart_runtime()
+                self.wait_for_runtime_health()
+            except Exception as error:
+                self.restore_release_env(previous_content)
+                rollback_id = request_id()
+                self.log(
+                    f"[request {rollout_id}] Signed release {manifest.version} failed health checks: {error}"
+                )
+                try:
+                    self.log(f"[request {rollback_id}] Rolling back to the previous signed release.")
+                    self.restart_runtime()
+                    self.wait_for_runtime_health()
+                except Exception as rollback_error:  # pragma: no cover - defensive fallback
+                    self.log(
+                        f"[request {rollback_id}] Rollback failed after signed release "
+                        f"{manifest.version}: {rollback_error}"
+                    )
+                self.update_state.last_error = (
+                    f"Signed release {manifest.version} could not be applied automatically. "
+                    f"Check the service log with request id {rollout_id}."
+                )
+                self.update_state.last_result = "The previous signed runtime release was restored."
+                self.update_state.pending_restart = False
+                self.save_state()
+                return self.status_payload()
+
+            self.update_state.last_result = f"Signed release {manifest.version} was applied successfully."
             self.update_state.pending_restart = False
-            self.log("No runtime image updates were found.")
-        elif apply:
-            self.update_state.last_result = "Updated runtime images were downloaded and will be applied now."
+            self.log(f"[request {rollout_id}] Signed runtime release {manifest.version} is now active.")
+            self.save_state()
+            return self.status_payload()
+        except ReleaseManifestError as error:
+            self.update_state.last_checked_at = now_iso()
+            self.update_state.updated_images = []
             self.update_state.pending_restart = False
-            self.log(f"Downloaded updates for: {', '.join(updated)}. Restarting runtime.")
-            self.restart_runtime()
-        else:
-            self.update_state.last_result = "Updated runtime images were downloaded. Restart the runtime to apply them."
-            self.update_state.pending_restart = True
-            self.log(f"Downloaded updates for: {', '.join(updated)}. Restart is pending.")
-
-        self.save_state()
-        return self.status_payload()
+            self.update_state.last_error = (
+                f"Signed runtime release verification failed. Check the service log with request id {rollout_id}."
+            )
+            self.log(f"[request {rollout_id}] Signed release verification failed: {error}")
+            self.save_state()
+            return self.status_payload()
+        except Exception as error:
+            self.update_state.last_checked_at = now_iso()
+            self.update_state.updated_images = []
+            self.update_state.pending_restart = False
+            self.update_state.last_error = (
+                f"Signed runtime release check failed. Check the service log with request id {rollout_id}."
+            )
+            self.log(f"[request {rollout_id}] Signed release check failed: {error}")
+            self.save_state()
+            return self.status_payload()
 
     def configure_updates(self, enabled: bool, interval_hours: int) -> dict[str, Any]:
         self.update_state.auto_update_enabled = enabled
@@ -267,7 +424,8 @@ class NodeRuntimeService:
 
     def command_output(self, args: list[str]) -> str:
         try:
-            completed = self.command_runner(args, self.runtime_dir)
+            command = self.compose_command(args[2:]) if args[:2] == ["docker", "compose"] else args
+            completed = self.command_runner(command, self.runtime_dir)
             output = completed.stdout.strip() or completed.stderr.strip()
             return output or "<no output>"
         except RuntimeError as error:
@@ -326,9 +484,13 @@ class NodeRuntimeService:
                     if due:
                         self.check_for_updates(apply=True)
             except Exception as error:  # pragma: no cover
-                self.update_state.last_error = str(error)
+                loop_request_id = request_id()
+                self.update_state.last_error = (
+                    f"Automatic signed runtime release check failed. "
+                    f"Check the service log with request id {loop_request_id}."
+                )
                 self.save_state()
-                self.log(f"Auto-update failed: {error}")
+                self.log(f"[request {loop_request_id}] Automatic signed runtime release check failed: {error}")
             self.shutdown_event.wait(60)
 
     def request_shutdown(self) -> dict[str, Any]:
@@ -354,11 +516,19 @@ def make_handler(service: NodeRuntimeService, server_ref: dict[str, ThreadingHTT
         def log_message(self, _format: str, *_args: Any) -> None:  # pragma: no cover
             return
 
-        def _send_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
+        def _send_json(
+            self,
+            payload: dict[str, Any],
+            status: HTTPStatus = HTTPStatus.OK,
+            *,
+            correlation_id: str | None = None,
+        ) -> None:
             body = json.dumps(payload).encode("utf-8")
             self.send_response(status.value)
             self.send_header("content-type", "application/json")
             self.send_header("content-length", str(len(body)))
+            if correlation_id:
+                self.send_header("x-correlation-id", correlation_id)
             self.end_headers()
             self.wfile.write(body)
 
@@ -438,7 +608,22 @@ def make_handler(service: NodeRuntimeService, server_ref: dict[str, ThreadingHTT
                     threading.Thread(target=server_ref["server"].shutdown, daemon=True).start()
                     return
             except Exception as error:
-                self._send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+                correlation_id = request_id()
+                service.log(f"[request {correlation_id}] {path} failed: {error}")
+                self._send_json(
+                    {
+                        "error": {
+                            "code": "request_failed",
+                            "message": (
+                                "The request could not be completed. "
+                                f"Check the local service log with request id {correlation_id}."
+                            ),
+                            "request_id": correlation_id,
+                        }
+                    },
+                    HTTPStatus.BAD_REQUEST,
+                    correlation_id=correlation_id,
+                )
                 return
             self._send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
 

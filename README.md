@@ -38,7 +38,7 @@ docker run -d \
   --add-host=host.docker.internal:host-gateway \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v autonomousc-edge-manager:/var/lib/autonomousc/manager \
-  anirdarrazi/autonomousc-ai-edge-runtime:latest
+  anirdarrazi/autonomousc-ai-edge-runtime@sha256:4662922dd7912bbd928f0703e27472829cacc0a858732a2d48caa167a96561db
 ```
 
 Then open `http://127.0.0.1:8765` and complete the guided setup.
@@ -102,9 +102,9 @@ Notes:
 
 - `install.sh`, `install.ps1`, `start.sh`, and `start.ps1` create a local service virtual environment and open the background-service UI.
 - The local UI runs at `http://127.0.0.1:8765` by default and stays available while the background service is running.
-- Auto-update currently covers pulled runtime images such as `vllm` and `vector`.
+- Automatic updates now follow the signed runtime release manifest and only pull digest-pinned images.
 - Repo-local installs still use the checked-out `docker-compose.yml`, which builds `node-agent` from source for development.
-- Manager-container installs use the bundled runtime assets and the published `anirdarrazi/autonomousc-ai-edge-runtime:latest` image instead of rebuilding from source.
+- Manager-container installs use the bundled runtime assets and the published digest-pinned `anirdarrazi/autonomousc-ai-edge-runtime` image instead of rebuilding from source.
 - Diagnostics bundles are written to `./data/diagnostics`.
 - `node-agent-bootstrap` is still available as a legacy fallback for direct terminal claim flows.
 - `node-agent` runs headless after credentials have been stored in `./data/credentials`.
