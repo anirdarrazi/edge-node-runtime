@@ -42,7 +42,7 @@ docker run -d \
   --add-host=host.docker.internal:host-gateway \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v autonomousc-edge-manager:/var/lib/autonomousc/manager \
-  autonomousc/node-runtime-manager:latest
+  anirdarrazi/autonomousc-ai-edge-runtime:latest
 ```
 
 Then open `http://127.0.0.1:8765` and complete the guided setup.
@@ -50,6 +50,7 @@ Then open `http://127.0.0.1:8765` and complete the guided setup.
 Notes:
 
 - The manager container bundles the runtime UI and owner compose assets.
+- The same published image is also used for the packaged `node-agent` service inside the owner bundle.
 - The actual runtime services still run as sibling containers on the host Docker engine.
 - The manager container talks to host-published services through `host.docker.internal`, which is why the `--add-host` flag is required on Linux.
 
@@ -127,7 +128,7 @@ Notes:
 - The local UI runs at `http://127.0.0.1:8765` by default and stays available while the background service is running.
 - Auto-update currently covers pulled runtime images such as `vllm` and `vector`.
 - Repo-local installs still use the checked-out `docker-compose.yml`, which builds `node-agent` from source for development.
-- Packaged installs use the bundled runtime assets and the published `autonomousc/node-agent:latest` image instead of rebuilding from source.
+- Packaged installs use the bundled runtime assets and the published `anirdarrazi/autonomousc-ai-edge-runtime:latest` image instead of rebuilding from source.
 - Diagnostics bundles are written to `./data/diagnostics`.
 - `node-agent-bootstrap` is still available as a legacy fallback for direct terminal claim flows.
 - `node-agent` runs headless after credentials have been stored in `./data/credentials`.

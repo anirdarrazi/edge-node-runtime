@@ -1,6 +1,6 @@
 services:
   node-agent:
-    image: autonomousc/node-agent:latest
+    image: anirdarrazi/autonomousc-ai-edge-runtime:latest
     command: ["node-agent", "run"]
     env_file:
       - .env
