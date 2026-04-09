@@ -18,6 +18,7 @@ import httpx
 
 from .config import NodeAgentSettings
 from .control_plane import EdgeControlClient
+from .runtime_layout import ensure_runtime_bundle, resolve_runtime_dir, service_access_host
 
 
 CommandRunner = Callable[[list[str], Path], subprocess.CompletedProcess[str]]
@@ -185,7 +186,7 @@ class GuidedInstaller:
         control_client_factory: ControlClientFactory = EdgeControlClient,
         sleep: SleepFn = time.sleep,
     ) -> None:
-        self.runtime_dir = runtime_dir or Path(__file__).resolve().parents[2]
+        self.runtime_dir = ensure_runtime_bundle(runtime_dir or resolve_runtime_dir())
         self.data_dir = self.runtime_dir / "data"
         self.credentials_dir = self.data_dir / "credentials"
         self.credentials_path = self.credentials_dir / "node-credentials.json"
@@ -371,10 +372,11 @@ class GuidedInstaller:
         self.command_runner(["docker", "compose", "up", "-d", *services], self.runtime_dir)
 
     def wait_for_vllm(self, timeout_seconds: float = 240.0) -> None:
+        vllm_url = f"http://{service_access_host()}:8000/v1/models"
         deadline = time.time() + timeout_seconds
         while time.time() < deadline:
             try:
-                response = httpx.get("http://127.0.0.1:8000/v1/models", timeout=5.0)
+                response = httpx.get(vllm_url, timeout=5.0)
                 if response.status_code < 500:
                     return
             except httpx.HTTPError:
@@ -391,7 +393,7 @@ class GuidedInstaller:
             trust_tier=env_values["TRUST_TIER"],
             restricted_capable=env_values["RESTRICTED_CAPABLE"].lower() == "true",
             credentials_path=str(self.credentials_path),
-            vllm_base_url="http://127.0.0.1:8000",
+            vllm_base_url=f"http://{service_access_host()}:8000",
             gpu_name=env_values["GPU_NAME"],
             gpu_memory_gb=float(env_values["GPU_MEMORY_GB"]),
             max_context_tokens=int(env_values["MAX_CONTEXT_TOKENS"]),

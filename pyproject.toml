@@ -19,6 +19,7 @@ node-agent = "node_agent.main:main"
 node-agent-bootstrap = "node_agent.main:bootstrap_entrypoint"
 node-agent-installer = "node_agent.installer:main"
 node-agent-service = "node_agent.service:main"
+node-agent-launcher = "node_agent.launcher:main"
 
 [tool.setuptools.package-dir]
 "" = "src"
@@ -27,7 +28,7 @@ node-agent-service = "node_agent.service:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-node_agent = ["*.html"]
+node_agent = ["*.html", "runtime_bundle/*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

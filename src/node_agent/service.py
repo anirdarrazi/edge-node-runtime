@@ -21,6 +21,7 @@ from urllib.parse import unquote, urlparse
 import httpx
 
 from .installer import CommandRunner, GuidedInstaller, parse_env_file, run_command
+from .runtime_layout import ensure_runtime_bundle, resolve_runtime_dir, service_access_host
 
 
 UPDATE_IMAGES = [
@@ -64,7 +65,7 @@ class NodeRuntimeService:
         *,
         command_runner: CommandRunner = run_command,
     ) -> None:
-        self.runtime_dir = runtime_dir or Path(__file__).resolve().parents[2]
+        self.runtime_dir = ensure_runtime_bundle(runtime_dir or resolve_runtime_dir())
         self.data_dir = self.runtime_dir / "data"
         self.service_dir = self.data_dir / "service"
         self.diagnostics_dir = self.data_dir / "diagnostics"
@@ -125,7 +126,7 @@ class NodeRuntimeService:
         vllm_ready = False
         if "vllm" in running_services:
             try:
-                response = httpx.get("http://127.0.0.1:8000/v1/models", timeout=4.0)
+                response = httpx.get(f"http://{service_access_host()}:8000/v1/models", timeout=4.0)
                 vllm_ready = response.status_code < 500
             except httpx.HTTPError:
                 vllm_ready = False
@@ -442,7 +443,10 @@ def make_handler(service: NodeRuntimeService, server_ref: dict[str, ThreadingHTT
 
 
 def spawn_background(runtime_dir: Path, host: str, port: int) -> None:
-    args = [sys.executable, "-m", "node_agent.service", "run", "--host", host, "--port", str(port)]
+    if getattr(sys, "frozen", False):
+        args = [sys.executable, "run", "--host", host, "--port", str(port)]
+    else:
+        args = [sys.executable, "-m", "node_agent.service", "run", "--host", host, "--port", str(port)]
     kwargs: dict[str, Any] = {
         "cwd": runtime_dir,
         "stdin": subprocess.DEVNULL,
@@ -606,7 +610,7 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     command = args.command or "run"
-    runtime_dir = Path(__file__).resolve().parents[2]
+    runtime_dir = ensure_runtime_bundle(resolve_runtime_dir())
 
     if command == "run":
         return command_run(args.host, args.port)

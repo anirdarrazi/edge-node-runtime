@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 import node_agent.installer as installer_module
+import node_agent.runtime_layout as layout_module
 import node_agent.service as service_module
 
 
@@ -173,3 +174,32 @@ def test_check_for_updates_can_apply_and_restart_runtime(tmp_path: Path, monkeyp
     assert payload["updates"]["pending_restart"] is False
     assert payload["updates"]["updated_images"] == [service_module.UPDATE_IMAGES[0]]
     assert ["docker", "compose", "up", "-d", "--force-recreate", "vllm", "node-agent", "vector"] in commands
+
+
+def test_runtime_service_populates_owner_bundle_when_runtime_dir_is_overridden(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(layout_module.RUNTIME_DIR_ENV, str(tmp_path))
+
+    service = service_module.NodeRuntimeService(command_runner=base_runner_factory([]))
+
+    assert service.runtime_dir == tmp_path.resolve()
+    assert (tmp_path / "docker-compose.yml").exists()
+    assert (tmp_path / ".env.example").exists()
+    assert (tmp_path / "vector.toml").exists()
+
+
+def test_spawn_background_uses_frozen_executable_arguments(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_popen(args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return object()
+
+    monkeypatch.setattr(service_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(service_module.sys, "frozen", True, raising=False)
+
+    service_module.spawn_background(tmp_path, "127.0.0.1", 8765)
+
+    assert captured["args"] == [service_module.sys.executable, "run", "--host", "127.0.0.1", "--port", "8765"]

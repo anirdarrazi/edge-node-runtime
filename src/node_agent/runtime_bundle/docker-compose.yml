@@ -1,0 +1,35 @@
+services:
+  node-agent:
+    image: autonomousc/node-agent:latest
+    command: ["node-agent", "run"]
+    env_file:
+      - .env
+    depends_on:
+      - vllm
+    restart: unless-stopped
+    volumes:
+      - ./data/model-cache:/var/lib/autonomousc/model-cache
+      - ./data/scratch:/var/lib/autonomousc/scratch
+      - ./data/credentials:/var/lib/autonomousc/credentials
+
+  vllm:
+    image: vllm/vllm-openai:latest
+    command:
+      - --model
+      - ${VLLM_MODEL:-meta-llama/Llama-3.1-8B-Instruct}
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    volumes:
+      - ./data/model-cache:/root/.cache/huggingface
+
+  vector:
+    image: timberio/vector:0.39.0-debian
+    command: ["--config", "/etc/vector/vector.toml"]
+    volumes:
+      - ./vector.toml:/etc/vector/vector.toml:ro
+    restart: unless-stopped
