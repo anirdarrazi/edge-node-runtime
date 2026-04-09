@@ -446,10 +446,7 @@ def make_handler(service: NodeRuntimeService, server_ref: dict[str, ThreadingHTT
 
 
 def spawn_background(runtime_dir: Path, host: str, port: int) -> None:
-    if getattr(sys, "frozen", False):
-        args = [sys.executable, "run", "--host", host, "--port", str(port)]
-    else:
-        args = [sys.executable, "-m", "node_agent.service", "run", "--host", host, "--port", str(port)]
+    args = [sys.executable, "-m", "node_agent.service", "run", "--host", host, "--port", str(port)]
     kwargs: dict[str, Any] = {
         "cwd": runtime_dir,
         "stdin": subprocess.DEVNULL,

@@ -189,7 +189,7 @@ def test_runtime_service_populates_owner_bundle_when_runtime_dir_is_overridden(
     assert (tmp_path / "vector.toml").exists()
 
 
-def test_spawn_background_uses_frozen_executable_arguments(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_spawn_background_uses_module_arguments(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     captured: dict[str, object] = {}
 
     def fake_popen(args, **kwargs):
@@ -198,11 +198,19 @@ def test_spawn_background_uses_frozen_executable_arguments(monkeypatch: pytest.M
         return object()
 
     monkeypatch.setattr(service_module.subprocess, "Popen", fake_popen)
-    monkeypatch.setattr(service_module.sys, "frozen", True, raising=False)
 
     service_module.spawn_background(tmp_path, "127.0.0.1", 8765)
 
-    assert captured["args"] == [service_module.sys.executable, "run", "--host", "127.0.0.1", "--port", "8765"]
+    assert captured["args"] == [
+        service_module.sys.executable,
+        "-m",
+        "node_agent.service",
+        "run",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8765",
+    ]
 
 
 def test_wait_for_service_uses_health_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
