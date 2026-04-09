@@ -2,12 +2,18 @@ FROM docker:27-cli
 
 RUN apk add --no-cache python3 py3-pip py3-setuptools py3-wheel
 
+ENV VIRTUAL_ENV=/opt/autonomousc-venv
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+
+RUN python3 -m venv "${VIRTUAL_ENV}"
+
 WORKDIR /app
 
 COPY pyproject.toml /app/pyproject.toml
 COPY src /app/src
 
-RUN python3 -m pip install --no-cache-dir .
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir .
 
 ENV AUTONOMOUSC_RUNTIME_DIR=/var/lib/autonomousc/manager
 ENV AUTONOMOUSC_RUNTIME_HOST=host.docker.internal

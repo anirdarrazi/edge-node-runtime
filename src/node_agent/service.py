@@ -379,6 +379,9 @@ def make_handler(service: NodeRuntimeService, server_ref: dict[str, ThreadingHTT
                 self.end_headers()
                 self.wfile.write(body)
                 return
+            if path == "/api/healthz":
+                self._send_json({"ok": True, "service": "node-runtime"})
+                return
             if path == "/api/status":
                 self._send_json(service.status_payload())
                 return
@@ -475,7 +478,7 @@ def wait_for_service(host: str, port: int, timeout_seconds: float = 20.0) -> Non
     deadline = time.time() + timeout_seconds
     while time.time() < deadline:
         try:
-            response = httpx.get(f"http://{host}:{port}/api/status", timeout=2.0)
+            response = httpx.get(f"http://{host}:{port}/api/healthz", timeout=2.0)
             if response.status_code == 200:
                 return
         except httpx.HTTPError:
@@ -580,10 +583,20 @@ def command_status(runtime_dir: Path) -> int:
     host = str(meta.get("host", "127.0.0.1"))
     port = int(meta.get("port", 8765))
     try:
-        response = httpx.get(f"http://{host}:{port}/api/status", timeout=3.0)
+        response = httpx.get(f"http://{host}:{port}/api/status", timeout=15.0)
         payload = response.json()
         print(json.dumps(payload["runtime"], indent=2))
     except httpx.HTTPError:
+        try:
+            health = httpx.get(f"http://{host}:{port}/api/healthz", timeout=2.0)
+            if health.status_code == 200:
+                print(
+                    f"Node runtime service is online at http://{host}:{port}, "
+                    "but full runtime status is still loading. Open the local UI or try again in a few seconds."
+                )
+                return 0
+        except httpx.HTTPError:
+            pass
         print("Node runtime service metadata exists, but the service did not respond.")
     return 0
 

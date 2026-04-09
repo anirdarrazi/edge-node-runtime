@@ -203,3 +203,54 @@ def test_spawn_background_uses_frozen_executable_arguments(monkeypatch: pytest.M
     service_module.spawn_background(tmp_path, "127.0.0.1", 8765)
 
     assert captured["args"] == [service_module.sys.executable, "run", "--host", "127.0.0.1", "--port", "8765"]
+
+
+def test_wait_for_service_uses_health_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    requested_urls: list[str] = []
+
+    class FakeResponse:
+        status_code = 200
+
+    def fake_get(url: str, timeout: float):
+        requested_urls.append(url)
+        assert timeout == 2.0
+        return FakeResponse()
+
+    monkeypatch.setattr(service_module.httpx, "get", fake_get)
+
+    service_module.wait_for_service("127.0.0.1", 8765, timeout_seconds=0.5)
+
+    assert requested_urls == ["http://127.0.0.1:8765/api/healthz"]
+
+
+def test_command_status_reports_online_when_health_endpoint_responds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    service_dir = tmp_path / "data" / "service"
+    service_dir.mkdir(parents=True)
+    (service_dir / "service-meta.json").write_text(
+        '{"host":"127.0.0.1","port":8765,"pid":123}',
+        encoding="utf-8",
+    )
+
+    class FakeResponse:
+        def __init__(self, status_code: int, payload: dict[str, object] | None = None) -> None:
+            self.status_code = status_code
+            self._payload = payload or {}
+
+        def json(self) -> dict[str, object]:
+            return self._payload
+
+    def fake_get(url: str, timeout: float):
+        if url.endswith("/api/status"):
+            raise service_module.httpx.ReadTimeout("timed out")
+        if url.endswith("/api/healthz"):
+            return FakeResponse(200, {"ok": True})
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    monkeypatch.setattr(service_module.httpx, "get", fake_get)
+
+    exit_code = service_module.command_status(tmp_path)
+
+    assert exit_code == 0
+    assert "Node runtime service is online" in capsys.readouterr().out
