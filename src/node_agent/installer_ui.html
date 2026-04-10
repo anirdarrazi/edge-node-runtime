@@ -387,7 +387,6 @@
       const errorBanner = document.getElementById("error-banner");
       const claimCard = document.getElementById("claim-card");
       const claimLink = document.getElementById("claim-link");
-      const adminToken = new URLSearchParams(window.location.search).get("token") || "";
       let formHydrated = false;
 
       function pillTone(ok, warning = false) {
@@ -480,7 +479,7 @@
 
       async function refreshStatus() {
         const response = await fetch("/api/status", {
-          headers: { "x-local-admin-token": adminToken }
+          credentials: "same-origin"
         });
         const data = await response.json();
         hydrateForm(data.config);
@@ -493,9 +492,9 @@
         const response = await fetch("/api/install", {
           method: "POST",
           headers: {
-            "content-type": "application/json",
-            "x-local-admin-token": adminToken
+            "content-type": "application/json"
           },
+          credentials: "same-origin",
           body: JSON.stringify(formPayload())
         });
         const data = await response.json();

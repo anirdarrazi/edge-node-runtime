@@ -1,7 +1,9 @@
 import subprocess
+import threading
 import zipfile
 from pathlib import Path
 
+import httpx
 import pytest
 
 import node_agent.installer as installer_module
@@ -247,9 +249,14 @@ def test_spawn_background_uses_module_arguments(monkeypatch: pytest.MonkeyPatch,
     ]
 
 
-def test_command_run_rejects_remote_bind_without_allow_remote() -> None:
+def test_command_run_rejects_remote_bind_even_if_remote_flag_is_requested() -> None:
     with pytest.raises(ValueError, match="non-loopback"):
-        service_module.require_secure_bind_host("0.0.0.0", False)
+        service_module.require_secure_bind_host("0.0.0.0", True)
+
+
+def test_service_cli_rejects_removed_allow_remote_flag() -> None:
+    with pytest.raises(SystemExit):
+        service_module.main(["run", "--allow-remote"])
 
 
 def test_wait_for_service_uses_health_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -305,3 +312,38 @@ def test_command_status_reports_online_when_health_endpoint_responds(
     assert exit_code == 0
     assert "Node runtime service is online" in capsys.readouterr().out
     assert observed_headers[0] == {service_module.ADMIN_TOKEN_HEADER: "local-admin-token"}
+
+
+def test_browser_bootstrap_exchanges_query_token_for_cookie_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_example_env(tmp_path)
+    monkeypatch.setattr(installer_module.shutil, "which", lambda _name: None)
+
+    service = service_module.NodeRuntimeService(runtime_dir=tmp_path)
+    service.admin_token = "local-admin-token"
+    server_ref: dict[str, service_module.ThreadingHTTPServer] = {}
+    server = service_module.ThreadingHTTPServer(("127.0.0.1", 0), service_module.make_handler(service, server_ref))
+    server_ref["server"] = server
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        with httpx.Client(follow_redirects=False, timeout=5.0) as client:
+            bootstrap = client.get(f"{base_url}/?token=local-admin-token")
+            assert bootstrap.status_code == 200
+            assert service_module.LOCAL_SESSION_COOKIE in bootstrap.headers.get("set-cookie", "")
+            assert "window.location.replace('/')" in bootstrap.text
+
+            ui = client.get(f"{base_url}/")
+            assert ui.status_code == 200
+            assert "AUTONOMOUSc Local Node Service" in ui.text
+
+            status = client.get(f"{base_url}/api/status")
+            assert status.status_code == 200
+            assert status.json()["service"]["url"] == f"http://{service.host}:{service.port}"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5.0)
+        server.server_close()

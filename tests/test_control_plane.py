@@ -134,6 +134,7 @@ def test_attest_declares_attestation_provider(tmp_path: Path):
     settings.node_id = "node_123"
     settings.node_key = "key_123456789012345678901234"
     settings.attestation_provider = "simulated"
+    settings.attestation_state_path = str(tmp_path / "credentials" / "attestation-state.json")
     client = EdgeControlClient(settings)
     recording_client = RecordingClient()
     client.client = recording_client
@@ -144,6 +145,12 @@ def test_attest_declares_attestation_provider(tmp_path: Path):
     assert path == "/nodes/attest"
     assert payload["measurements"]["attestation_provider"] == "simulated"
     assert payload["inventory"]["attestation_provider"] == "simulated"
+    assert Path(settings.attestation_state_path).exists()
+    persisted = client.load_attestation_state()
+    assert persisted is not None
+    assert persisted["node_id"] == "node_123"
+    assert persisted["attestation_provider"] == "simulated"
+    assert persisted["status"] == "verified"
 
 
 class ArtifactResponse:
@@ -213,6 +220,7 @@ def test_fetch_artifact_rejects_hash_mismatch_before_decrypt(monkeypatch: pytest
 def test_enroll_persists_credentials_with_owner_only_permissions(tmp_path: Path):
     credentials_path = tmp_path / "credentials" / "node.json"
     settings = build_settings(credentials_path, operator_token="operator_token")
+    settings.attestation_state_path = str(tmp_path / "credentials" / "attestation-state.json")
     client = EdgeControlClient(settings)
     client.client = RecordingClient()
 
@@ -221,6 +229,22 @@ def test_enroll_persists_credentials_with_owner_only_permissions(tmp_path: Path)
     if os.name != "nt":
         assert credentials_path.stat().st_mode & 0o777 == 0o600
         assert credentials_path.parent.stat().st_mode & 0o777 == 0o700
+
+
+def test_persist_credentials_clears_stale_attestation_state(tmp_path: Path):
+    credentials_path = tmp_path / "credentials" / "node.json"
+    settings = build_settings(credentials_path, operator_token="operator_token")
+    settings.attestation_state_path = str(tmp_path / "credentials" / "attestation-state.json")
+    client = EdgeControlClient(settings)
+    Path(settings.attestation_state_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(settings.attestation_state_path).write_text(
+        '{"node_id":"node_old","attestation_provider":"hardware","status":"verified","attested_at":"2026-04-10T00:00:00+00:00"}',
+        encoding="utf-8",
+    )
+
+    client.persist_credentials("node_123", "key_123456789012345678901234")
+
+    assert Path(settings.attestation_state_path).exists() is False
 
 
 def test_is_auth_error_only_matches_control_plane_requests(tmp_path: Path):

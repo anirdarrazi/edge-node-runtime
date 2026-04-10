@@ -23,11 +23,15 @@ import httpx
 from .installer import CommandRunner, GuidedInstaller, parse_env_file, run_command
 from .local_api_security import (
     ADMIN_TOKEN_HEADER,
+    LOCAL_SESSION_COOKIE,
+    LocalSessionStore,
     browser_access_host,
+    cookie_value,
     generate_admin_token,
     origin_matches_host,
     request_query_param,
     require_secure_bind_host,
+    serialize_cookie,
     tighten_private_path,
     token_matches,
 )
@@ -56,6 +60,17 @@ def request_id() -> str:
 
 def service_html() -> str:
     return Path(__file__).with_name("service_ui.html").read_text(encoding="utf-8")
+
+
+def session_bootstrap_html() -> bytes:
+    return (
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<meta name='referrer' content='no-referrer'>"
+        "<meta http-equiv='cache-control' content='no-store'>"
+        "<title>Opening local session...</title></head><body>"
+        "<script>history.replaceState(null,'','/');window.location.replace('/');</script>"
+        "</body></html>"
+    ).encode("utf-8")
 
 
 @dataclass
@@ -101,7 +116,7 @@ class NodeRuntimeService:
         self.update_state = UpdateState()
         self.diagnostics_state = DiagnosticsState()
         self.admin_token = generate_admin_token()
-        self.allow_remote = False
+        self.sessions = LocalSessionStore()
         self.host = "127.0.0.1"
         self.port = 8765
         self.ensure_dirs()
@@ -483,7 +498,7 @@ class NodeRuntimeService:
         return self.status_payload()
 
     def open_ui(self) -> None:
-        webbrowser.open(f"http://{self.host}:{self.port}", new=2)
+        open_browser(self.host, self.port, self.admin_token)
 
     def auto_update_loop(self) -> None:
         while not self.shutdown_event.is_set():
@@ -521,7 +536,6 @@ class NodeRuntimeService:
                     "host": self.host,
                     "port": self.port,
                     "admin_token": self.admin_token,
-                    "allow_remote": self.allow_remote,
                 },
                 indent=2,
             ),
@@ -567,6 +581,22 @@ def make_handler(service: NodeRuntimeService, server_ref: dict[str, ThreadingHTT
             self.end_headers()
             self.wfile.write(body)
 
+        def _send_session_bootstrap(self) -> None:
+            session_token = service.sessions.issue()
+            body = session_bootstrap_html()
+            self.send_response(HTTPStatus.OK.value)
+            self.send_header("content-type", "text/html; charset=utf-8")
+            self.send_header("content-length", str(len(body)))
+            self.send_header("cache-control", "no-store")
+            self.send_header("referrer-policy", "no-referrer")
+            self.send_header("x-frame-options", "DENY")
+            self.send_header(
+                "set-cookie",
+                serialize_cookie(LOCAL_SESSION_COOKIE, session_token, max_age=service.sessions.ttl_seconds),
+            )
+            self.end_headers()
+            self.wfile.write(body)
+
         def _read_json(self) -> dict[str, Any]:
             content_length = int(self.headers.get("content-length", "0"))
             raw = self.rfile.read(content_length) if content_length else b"{}"
@@ -582,8 +612,14 @@ def make_handler(service: NodeRuntimeService, server_ref: dict[str, ThreadingHTT
                 return None
             return request_query_param(self.path, "token")
 
-        def _authorized(self, *, allow_query: bool) -> bool:
+        def _authorized_via_admin_token(self, *, allow_query: bool) -> bool:
             return token_matches(self._request_token(allow_query=allow_query), service.admin_token)
+
+        def _authorized_via_session(self) -> bool:
+            return service.sessions.contains(cookie_value(self.headers, LOCAL_SESSION_COOKIE))
+
+        def _authorized(self, *, allow_query: bool) -> bool:
+            return self._authorized_via_session() or self._authorized_via_admin_token(allow_query=allow_query)
 
         def _origin_allowed(self) -> bool:
             return origin_matches_host(self.headers)
@@ -602,7 +638,14 @@ def make_handler(service: NodeRuntimeService, server_ref: dict[str, ThreadingHTT
         def do_GET(self) -> None:  # pragma: no cover
             path = urlparse(self.path).path
             if path == "/":
-                if not self._authorized(allow_query=True):
+                if self._authorized_via_session():
+                    body = service_html().encode("utf-8")
+                    self._send_html(body)
+                    return
+                if self._authorized_via_admin_token(allow_query=True):
+                    self._send_session_bootstrap()
+                    return
+                if not self._authorized(allow_query=False):
                     self._reject(HTTPStatus.UNAUTHORIZED, "unauthorized", "A local admin token is required.")
                     return
                 body = service_html().encode("utf-8")
@@ -612,13 +655,13 @@ def make_handler(service: NodeRuntimeService, server_ref: dict[str, ThreadingHTT
                 self._send_json({"ok": True, "service": "node-runtime"})
                 return
             if path == "/api/status":
-                if not self._authorized(allow_query=True):
+                if not self._authorized(allow_query=False):
                     self._reject(HTTPStatus.UNAUTHORIZED, "unauthorized", "A local admin token is required.")
                     return
                 self._send_json(service.status_payload())
                 return
             if path.startswith("/downloads/"):
-                if not self._authorized(allow_query=True):
+                if not self._authorized(allow_query=False):
                     self._reject(HTTPStatus.UNAUTHORIZED, "unauthorized", "A local admin token is required.")
                     return
                 requested = unquote(path.removeprefix("/downloads/"))
@@ -701,10 +744,8 @@ def make_handler(service: NodeRuntimeService, server_ref: dict[str, ThreadingHTT
     return ServiceHandler
 
 
-def spawn_background(runtime_dir: Path, host: str, port: int, allow_remote: bool = False) -> None:
+def spawn_background(runtime_dir: Path, host: str, port: int) -> None:
     args = [sys.executable, "-m", "node_agent.service", "run", "--host", host, "--port", str(port)]
-    if allow_remote:
-        args.append("--allow-remote")
     kwargs: dict[str, Any] = {
         "cwd": runtime_dir,
         "stdin": subprocess.DEVNULL,
@@ -757,10 +798,9 @@ def clear_service_meta(runtime_dir: Path) -> None:
             path.unlink()
 
 
-def command_run(host: str, port: int, allow_remote: bool = False) -> int:
-    require_secure_bind_host(host, allow_remote)
+def command_run(host: str, port: int) -> int:
+    require_secure_bind_host(host)
     service = NodeRuntimeService()
-    service.allow_remote = allow_remote
     service.host = host
     service.port = port
     service.write_meta()
@@ -794,8 +834,8 @@ def command_run(host: str, port: int, allow_remote: bool = False) -> int:
     return 0
 
 
-def command_start(runtime_dir: Path, host: str, port: int, open_ui_flag: bool, allow_remote: bool = False) -> int:
-    require_secure_bind_host(host, allow_remote)
+def command_start(runtime_dir: Path, host: str, port: int, open_ui_flag: bool) -> int:
+    require_secure_bind_host(host)
     meta = load_meta(runtime_dir)
     if meta:
         existing_host = str(meta.get("host", host))
@@ -809,7 +849,7 @@ def command_start(runtime_dir: Path, host: str, port: int, open_ui_flag: bool, a
         except RuntimeError:
             pass
 
-    spawn_background(runtime_dir, host, port, allow_remote=allow_remote)
+    spawn_background(runtime_dir, host, port)
     wait_for_service(host, port)
     if open_ui_flag:
         meta = load_meta(runtime_dir)
@@ -878,13 +918,11 @@ def main(argv: list[str] | None = None) -> int:
     run_parser = subparsers.add_parser("run", help="Run the node runtime service in the foreground.")
     run_parser.add_argument("--host", default="127.0.0.1")
     run_parser.add_argument("--port", type=int, default=8765)
-    run_parser.add_argument("--allow-remote", action="store_true")
 
     start_parser = subparsers.add_parser("start", help="Start the node runtime service in the background.")
     start_parser.add_argument("--host", default="127.0.0.1")
     start_parser.add_argument("--port", type=int, default=8765)
     start_parser.add_argument("--open", action="store_true")
-    start_parser.add_argument("--allow-remote", action="store_true")
 
     subparsers.add_parser("stop", help="Stop the node runtime service.")
     subparsers.add_parser("status", help="Print the current runtime status.")
@@ -898,9 +936,9 @@ def main(argv: list[str] | None = None) -> int:
     runtime_dir = ensure_runtime_bundle(resolve_runtime_dir())
 
     if command == "run":
-        return command_run(args.host, args.port, allow_remote=bool(args.allow_remote))
+        return command_run(args.host, args.port)
     if command == "start":
-        return command_start(runtime_dir, args.host, args.port, args.open, allow_remote=bool(args.allow_remote))
+        return command_start(runtime_dir, args.host, args.port, args.open)
     if command == "stop":
         return command_stop(runtime_dir)
     if command == "status":

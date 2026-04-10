@@ -67,6 +67,59 @@ class EdgeControlClient:
                 temp_path.unlink()
         self.clear_recovery_note()
 
+    def load_attestation_state(self) -> dict[str, Any] | None:
+        state_path = Path(self.settings.attestation_state_path)
+        if not state_path.exists():
+            return None
+        self._tighten_credentials_permissions(state_path)
+        try:
+            payload = json.loads(state_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _persist_attestation_state(self, *, attestation_provider: str) -> None:
+        if not self.settings.node_id:
+            raise RuntimeError("node id is required before persisting attestation state")
+        state_path = Path(self.settings.attestation_state_path)
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        self._tighten_directory_permissions(state_path.parent)
+        serialized = json.dumps(
+            {
+                "node_id": self.settings.node_id,
+                "attestation_provider": attestation_provider,
+                "status": "verified",
+                "attested_at": datetime.now(timezone.utc).isoformat(),
+            },
+            indent=2,
+        )
+        temp_handle = tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=state_path.parent,
+            prefix=f".{state_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        )
+        try:
+            with temp_handle as handle:
+                handle.write(serialized)
+                handle.flush()
+                os.fsync(handle.fileno())
+            temp_path = Path(temp_handle.name)
+            self._tighten_credentials_permissions(temp_path)
+            temp_path.replace(state_path)
+            self._tighten_credentials_permissions(state_path)
+        finally:
+            temp_path = Path(temp_handle.name)
+            if temp_path.exists():
+                temp_path.unlink()
+
+    def clear_attestation_state(self) -> None:
+        state_path = Path(self.settings.attestation_state_path)
+        if state_path.exists():
+            state_path.unlink()
+
     @staticmethod
     def _tighten_directory_permissions(path: Path) -> None:
         os.chmod(path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
@@ -156,6 +209,7 @@ class EdgeControlClient:
         self.settings.node_key = None
         if credentials_path.exists():
             credentials_path.unlink()
+        self.clear_attestation_state()
 
     def write_recovery_note(self, message: str) -> None:
         note_path = Path(self.settings.recovery_note_path)
@@ -171,6 +225,7 @@ class EdgeControlClient:
         self.settings.node_id = node_id
         self.settings.node_key = node_key
         self._persist_credentials(node_id, node_key)
+        self.clear_attestation_state()
         return node_id, node_key
 
     def is_auth_error(self, error: Exception) -> bool:
@@ -266,6 +321,7 @@ class EdgeControlClient:
             },
         )
         response.raise_for_status()
+        self._persist_attestation_state(attestation_provider=attestation_provider)
 
     def heartbeat(self, queue_depth: int = 0, active_assignments: int = 0) -> None:
         response = self.client.post(

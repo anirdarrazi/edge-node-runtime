@@ -20,11 +20,15 @@ from .config import NodeAgentSettings
 from .control_plane import EdgeControlClient
 from .local_api_security import (
     ADMIN_TOKEN_HEADER,
+    LOCAL_SESSION_COOKIE,
+    LocalSessionStore,
     browser_access_host,
+    cookie_value,
     generate_admin_token,
     origin_matches_host,
     request_query_param,
     require_secure_bind_host,
+    serialize_cookie,
     token_matches,
 )
 from .runtime_layout import ensure_runtime_bundle, resolve_runtime_dir, service_access_host
@@ -59,6 +63,17 @@ ENV_ORDER = [
 
 def installer_html() -> str:
     return Path(__file__).with_name("installer_ui.html").read_text(encoding="utf-8")
+
+
+def session_bootstrap_html() -> bytes:
+    return (
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<meta name='referrer' content='no-referrer'>"
+        "<meta http-equiv='cache-control' content='no-store'>"
+        "<title>Opening local session...</title></head><body>"
+        "<script>history.replaceState(null,'','/');window.location.replace('/');</script>"
+        "</body></html>"
+    ).encode("utf-8")
 
 
 def run_command(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -474,6 +489,8 @@ class GuidedInstaller:
 
 
 def make_handler(installer: GuidedInstaller, admin_token: str) -> type[BaseHTTPRequestHandler]:
+    sessions = LocalSessionStore()
+
     class InstallerHandler(BaseHTTPRequestHandler):
         def log_message(self, _format: str, *_args: Any) -> None:  # pragma: no cover
             return
@@ -496,11 +513,30 @@ def make_handler(installer: GuidedInstaller, admin_token: str) -> type[BaseHTTPR
             self.end_headers()
             self.wfile.write(body)
 
-        def _authorized(self, *, allow_query: bool) -> bool:
+        def _send_session_bootstrap(self) -> None:
+            session_token = sessions.issue()
+            body = session_bootstrap_html()
+            self.send_response(HTTPStatus.OK.value)
+            self.send_header("content-type", "text/html; charset=utf-8")
+            self.send_header("content-length", str(len(body)))
+            self.send_header("cache-control", "no-store")
+            self.send_header("referrer-policy", "no-referrer")
+            self.send_header("x-frame-options", "DENY")
+            self.send_header("set-cookie", serialize_cookie(LOCAL_SESSION_COOKIE, session_token, max_age=sessions.ttl_seconds))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _authorized_via_admin_token(self, *, allow_query: bool) -> bool:
             provided = self.headers.get(ADMIN_TOKEN_HEADER)
             if not provided and allow_query:
                 provided = request_query_param(self.path, "token")
             return token_matches(provided.strip() if isinstance(provided, str) else None, admin_token)
+
+        def _authorized_via_session(self) -> bool:
+            return sessions.contains(cookie_value(self.headers, LOCAL_SESSION_COOKIE))
+
+        def _authorized(self, *, allow_query: bool) -> bool:
+            return self._authorized_via_session() or self._authorized_via_admin_token(allow_query=allow_query)
 
         def _origin_allowed(self) -> bool:
             return origin_matches_host(self.headers)
@@ -508,14 +544,21 @@ def make_handler(installer: GuidedInstaller, admin_token: str) -> type[BaseHTTPR
         def do_GET(self) -> None:  # pragma: no cover
             path = urlparse(self.path).path
             if path == "/":
-                if not self._authorized(allow_query=True):
+                if self._authorized_via_session():
+                    body = installer_html().encode("utf-8")
+                    self._send_html(body)
+                    return
+                if self._authorized_via_admin_token(allow_query=True):
+                    self._send_session_bootstrap()
+                    return
+                if not self._authorized(allow_query=False):
                     self._send_json({"error": {"code": "unauthorized", "message": "A local admin token is required."}}, HTTPStatus.UNAUTHORIZED)
                     return
                 body = installer_html().encode("utf-8")
                 self._send_html(body)
                 return
             if path == "/api/status":
-                if not self._authorized(allow_query=True):
+                if not self._authorized(allow_query=False):
                     self._send_json({"error": {"code": "unauthorized", "message": "A local admin token is required."}}, HTTPStatus.UNAUTHORIZED)
                     return
                 self._send_json(installer.status_payload())
@@ -551,10 +594,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Launch the AUTONOMOUSc edge node guided installer.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--allow-remote", action="store_true")
     args = parser.parse_args(argv)
 
-    require_secure_bind_host(args.host, bool(args.allow_remote))
+    require_secure_bind_host(args.host)
     installer = GuidedInstaller()
     admin_token = generate_admin_token()
     server = ThreadingHTTPServer((args.host, args.port), make_handler(installer, admin_token))

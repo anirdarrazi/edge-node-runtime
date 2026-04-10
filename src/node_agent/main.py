@@ -56,7 +56,49 @@ def configured_supported_models(settings: NodeAgentSettings) -> set[str]:
     return {model.strip() for model in str(settings.supported_models).split(",") if model.strip()}
 
 
-def validate_assignment_policy(settings: NodeAgentSettings, assignment: object) -> None:
+def restricted_attestation_state(control: EdgeControlClient) -> dict[str, object] | None:
+    payload = control.load_attestation_state()
+    if payload is None:
+        return None
+    if payload.get("status") != "verified":
+        return None
+    if payload.get("attestation_provider") != "hardware":
+        return None
+    attested_at = payload.get("attested_at")
+    if not isinstance(attested_at, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(attested_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    node_id = payload.get("node_id")
+    if not isinstance(node_id, str) or node_id != control.settings.node_id:
+        return None
+    return {
+        "node_id": node_id,
+        "attested_at": parsed.astimezone(timezone.utc),
+    }
+
+
+def restricted_attestation_is_fresh(
+    control: EdgeControlClient,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    state = restricted_attestation_state(control)
+    if state is None:
+        return False
+    attested_at = state["attested_at"]
+    if not isinstance(attested_at, datetime):
+        return False
+    current_time = now or datetime.now(timezone.utc)
+    max_age_seconds = max(1, int(control.settings.restricted_attestation_max_age_seconds))
+    age_seconds = (current_time - attested_at).total_seconds()
+    return age_seconds >= 0 and age_seconds <= max_age_seconds
+
+
+def validate_assignment_policy(control: EdgeControlClient, assignment: object) -> None:
+    settings = control.settings
     if getattr(assignment, "operation", None) not in supported_operations:
         raise ValueError(f"assignment operation {getattr(assignment, 'operation', None)!r} is not supported by this node")
     if getattr(assignment, "model", None) not in configured_supported_models(settings):
@@ -105,6 +147,10 @@ def validate_assignment_policy(settings: NodeAgentSettings, assignment: object) 
             raise ValueError(
                 "restricted assignment rejected because the current attestation provider is not hardware-backed"
             )
+        if not restricted_attestation_is_fresh(control):
+            raise ValueError(
+                "restricted assignment rejected because no fresh local hardware attestation record is available"
+            )
     if privacy_tier == "confidential" and settings.trust_tier == "standard":
         raise ValueError("confidential assignment rejected because the node trust tier is only standard")
 
@@ -138,7 +184,7 @@ def validate_assignment_items(assignment: object, items: object) -> list[dict[st
 
 
 def validate_assignment(control: EdgeControlClient, assignment: object, items: object) -> list[dict[str, object]]:
-    validate_assignment_policy(control.settings, assignment)
+    validate_assignment_policy(control, assignment)
     return validate_assignment_items(assignment, items)
 
 
@@ -219,6 +265,14 @@ def run_worker_loop(control: EdgeControlClient, runtime: VLLMRuntime, attest_on_
 
     while True:
         try:
+            if (
+                control.settings.restricted_capable
+                and control.settings.trust_tier == "restricted"
+                and control.settings.attestation_provider == "hardware"
+                and not restricted_attestation_is_fresh(control)
+            ):
+                LOGGER.info("local restricted attestation is stale or missing; refreshing it before polling")
+                control.attest()
             control.heartbeat()
             assignment = control.pull_assignment()
             if not assignment:

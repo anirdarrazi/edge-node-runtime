@@ -281,7 +281,6 @@
       const claimCard = document.getElementById("claim-card");
       const openClaimButton = document.getElementById("open-claim");
       const downloadLink = document.getElementById("download-link");
-      const adminToken = new URLSearchParams(window.location.search).get("token") || "";
       let formHydrated = false;
       let claimUrl = "";
 
@@ -388,7 +387,7 @@
 
         if (diagnostics.last_bundle_name) {
           downloadLink.hidden = false;
-          downloadLink.href = `/downloads/${encodeURIComponent(diagnostics.last_bundle_name)}?token=${encodeURIComponent(adminToken)}`;
+          downloadLink.href = `/downloads/${encodeURIComponent(diagnostics.last_bundle_name)}`;
           downloadLink.textContent = `Download ${diagnostics.last_bundle_name}`;
         } else {
           downloadLink.hidden = true;
@@ -402,9 +401,9 @@
         const response = await fetch(path, {
           method: "POST",
           headers: {
-            "content-type": "application/json",
-            "x-local-admin-token": adminToken
+            "content-type": "application/json"
           },
+          credentials: "same-origin",
           body: JSON.stringify(payload)
         });
         const data = await response.json();
@@ -417,7 +416,7 @@
 
       async function refreshStatus() {
         const response = await fetch("/api/status", {
-          headers: { "x-local-admin-token": adminToken }
+          credentials: "same-origin"
         });
         render(await response.json());
       }

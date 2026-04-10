@@ -4,11 +4,15 @@ import ipaddress
 import os
 import secrets
 import stat
+import threading
+import time
 from pathlib import Path
 from typing import Mapping
 from urllib.parse import parse_qs, urlsplit
 
 ADMIN_TOKEN_HEADER = "x-local-admin-token"
+LOCAL_SESSION_COOKIE = "autonomousc_local_session"
+LOCAL_SESSION_TTL_SECONDS = 15 * 60
 
 
 def generate_admin_token() -> str:
@@ -38,13 +42,11 @@ def browser_access_host(host: str) -> str:
     return host
 
 
-def require_secure_bind_host(host: str, allow_remote: bool) -> None:
-    if allow_remote:
-        return
+def require_secure_bind_host(host: str, allow_remote: bool | None = None) -> None:
     if not is_loopback_host(host):
         raise ValueError(
-            "Refusing to bind the local control service to a non-loopback host "
-            "unless --allow-remote is explicitly enabled."
+            "Refusing to bind the local control service to a non-loopback host. "
+            "Remote mode has been removed; use an authenticated tunnel if you need remote access."
         )
 
 
@@ -54,6 +56,33 @@ def request_query_param(path: str, name: str) -> str | None:
         return None
     value = values[0].strip()
     return value or None
+
+
+def cookie_value(headers: Mapping[str, str], name: str) -> str | None:
+    cookie_header = headers.get("cookie")
+    if not cookie_header:
+        return None
+    for cookie in cookie_header.split(";"):
+        raw_name, _, raw_value = cookie.strip().partition("=")
+        if raw_name == name:
+            value = raw_value.strip()
+            return value or None
+    return None
+
+
+def serialize_cookie(
+    name: str,
+    value: str,
+    *,
+    max_age: int,
+    http_only: bool = True,
+    same_site: str = "Strict",
+    path: str = "/",
+) -> str:
+    parts = [f"{name}={value}", f"Max-Age={max(0, int(max_age))}", f"Path={path}", f"SameSite={same_site}"]
+    if http_only:
+        parts.append("HttpOnly")
+    return "; ".join(parts)
 
 
 def request_origin(headers: Mapping[str, str]) -> str | None:
@@ -85,3 +114,32 @@ def tighten_private_path(path: Path, *, directory: bool = False) -> None:
         os.chmod(path, mode)
     except OSError:
         return
+
+
+class LocalSessionStore:
+    def __init__(self, ttl_seconds: int = LOCAL_SESSION_TTL_SECONDS) -> None:
+        self.ttl_seconds = ttl_seconds
+        self._sessions: dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def issue(self) -> str:
+        token = secrets.token_urlsafe(32)
+        expires_at = time.time() + self.ttl_seconds
+        with self._lock:
+            self._prune_locked()
+            self._sessions[token] = expires_at
+        return token
+
+    def contains(self, token: str | None) -> bool:
+        if not token:
+            return False
+        with self._lock:
+            self._prune_locked()
+            expires_at = self._sessions.get(token)
+            return expires_at is not None and expires_at > time.time()
+
+    def _prune_locked(self) -> None:
+        now = time.time()
+        expired = [token for token, expires_at in self._sessions.items() if expires_at <= now]
+        for token in expired:
+            self._sessions.pop(token, None)

@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 import time
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -14,11 +15,13 @@ class FakeControl:
             node_region="eu-se-1",
             trust_tier="restricted",
             restricted_capable=True,
+            node_id="node_123",
             supported_models="meta-llama/Llama-3.1-8B-Instruct,BAAI/bge-large-en-v1.5",
             gpu_memory_gb=24.0,
             max_context_tokens=32768,
             max_batch_tokens=50000,
             attestation_provider="hardware",
+            restricted_attestation_max_age_seconds=3600,
         )
         self._has_credentials = has_credentials
         self.bootstrap_calls = 0
@@ -30,6 +33,12 @@ class FakeControl:
         self.progress_updates = []
         self.failures = []
         self.completions = []
+        self.attestation_state = {
+            "node_id": "node_123",
+            "attestation_provider": "hardware",
+            "status": "verified",
+            "attested_at": datetime.now(timezone.utc).isoformat(),
+        }
 
     def has_credentials(self) -> bool:
         return self._has_credentials
@@ -37,16 +46,24 @@ class FakeControl:
     def bootstrap(self, interactive: bool = True):
         self.bootstrap_calls += 1
         self._has_credentials = True
+        self.settings.node_id = "node_123"
         return "node_123", "key_123"
 
     def require_credentials(self):
         self.require_calls += 1
         if not self._has_credentials:
             raise RuntimeError("missing credentials")
+        self.settings.node_id = "node_123"
         return "node_123", "key_123"
 
     def attest(self):
         self.attest_calls += 1
+        self.attestation_state = {
+            "node_id": "node_123",
+            "attestation_provider": self.settings.attestation_provider,
+            "status": "verified",
+            "attested_at": datetime.now(timezone.utc).isoformat(),
+        }
 
     def heartbeat(self):
         if self.auth_fail_on_heartbeat:
@@ -79,6 +96,9 @@ class FakeControl:
 
     def is_auth_error(self, error: Exception) -> bool:
         return isinstance(error, httpx.HTTPStatusError) and error.response.status_code == 401
+
+    def load_attestation_state(self):
+        return self.attestation_state
 
 
 def test_command_bootstrap_runs_claim_bootstrap(monkeypatch: pytest.MonkeyPatch):
@@ -220,6 +240,7 @@ def test_run_worker_loop_keeps_assignments_fresh_while_runtime_is_busy(monkeypat
 def test_validate_assignment_rejects_restricted_work_without_hardware_attestation():
     control = FakeControl(has_credentials=True)
     control.settings.attestation_provider = "simulated"
+    control.attestation_state["attestation_provider"] = "simulated"
     assignment = SimpleNamespace(
         assignment_id="assign_restricted",
         execution_id="pexec_restricted",
@@ -247,6 +268,48 @@ def test_validate_assignment_rejects_restricted_work_without_hardware_attestatio
                 }
             ],
         )
+
+
+def test_validate_assignment_rejects_restricted_work_with_stale_local_attestation():
+    control = FakeControl(has_credentials=True)
+    control.attestation_state["attested_at"] = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    assignment = SimpleNamespace(
+        assignment_id="assign_restricted_stale",
+        execution_id="pexec_restricted_stale",
+        item_count=1,
+        operation="responses",
+        model="meta-llama/Llama-3.1-8B-Instruct",
+        privacy_tier="restricted",
+        allowed_regions=["eu-se-1"],
+        required_vram_gb=16.0,
+        required_context_tokens=8192,
+        token_budget={"total_tokens": 2048},
+    )
+
+    with pytest.raises(ValueError, match="fresh local hardware attestation record"):
+        main_module.validate_assignment(
+            control,
+            assignment,
+            [
+                {
+                    "batch_item_id": "item_1",
+                    "customer_item_id": "cust_1",
+                    "operation": "responses",
+                    "model": "meta-llama/Llama-3.1-8B-Instruct",
+                    "input": {"messages": [{"role": "user", "content": "hello"}]},
+                }
+            ],
+        )
+
+
+def test_run_worker_loop_refreshes_stale_restricted_attestation_before_polling():
+    control = FakeControl(has_credentials=True)
+    control.attestation_state["attested_at"] = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+
+    with pytest.raises(KeyboardInterrupt):
+        main_module.run_worker_loop(control, object(), attest_on_start=False)
+
+    assert control.attest_calls == 1
 
 
 def test_validate_assignment_rejects_item_model_mismatch():

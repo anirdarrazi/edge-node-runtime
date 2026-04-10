@@ -20,6 +20,7 @@ class NodeAgentSettings(BaseSettings):
     node_id: str | None = None
     node_key: str | None = None
     credentials_path: str = "/var/lib/autonomousc/credentials/node-credentials.json"
+    attestation_state_path: str = "/var/lib/autonomousc/credentials/attestation-state.json"
     recovery_note_path: str = "/var/lib/autonomousc/credentials/recovery-note.txt"
     vllm_base_url: str = "http://vllm:8000"
     gpu_name: str = "Generic GPU"
@@ -33,6 +34,7 @@ class NodeAgentSettings(BaseSettings):
     agent_version: str = "0.1.0"
     docker_image: str = DEFAULT_NODE_AGENT_IMAGE
     attestation_provider: Literal["simulated", "hardware"] = "simulated"
+    restricted_attestation_max_age_seconds: int = 3600
 
 
 class AssignmentEnvelope(BaseModel):

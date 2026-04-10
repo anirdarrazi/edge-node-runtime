@@ -1,8 +1,10 @@
 import json
 import subprocess
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 import node_agent.installer as installer_module
@@ -198,6 +200,46 @@ def test_run_install_skips_claim_when_credentials_exist(tmp_path: Path, monkeypa
     assert ["docker", "compose", "up", "-d", "vllm", "node-agent", "vector"] in commands
 
 
-def test_installer_rejects_remote_bind_without_allow_remote() -> None:
+def test_installer_rejects_remote_bind_even_if_remote_flag_is_requested() -> None:
     with pytest.raises(ValueError, match="non-loopback"):
-        installer_module.require_secure_bind_host("0.0.0.0", False)
+        installer_module.require_secure_bind_host("0.0.0.0", True)
+
+
+def test_installer_cli_rejects_removed_allow_remote_flag() -> None:
+    with pytest.raises(SystemExit):
+        installer_module.main(["--allow-remote"])
+
+
+def test_installer_bootstrap_exchanges_query_token_for_cookie_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_example_env(tmp_path)
+    monkeypatch.setattr(installer_module.shutil, "which", lambda _name: None)
+
+    installer = installer_module.GuidedInstaller(runtime_dir=tmp_path)
+    admin_token = "local-admin-token"
+    server = installer_module.ThreadingHTTPServer(
+        ("127.0.0.1", 0), installer_module.make_handler(installer, admin_token)
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        with httpx.Client(follow_redirects=False, timeout=5.0) as client:
+            bootstrap = client.get(f"{base_url}/?token={admin_token}")
+            assert bootstrap.status_code == 200
+            assert installer_module.LOCAL_SESSION_COOKIE in bootstrap.headers.get("set-cookie", "")
+            assert "window.location.replace('/')" in bootstrap.text
+
+            ui = client.get(f"{base_url}/")
+            assert ui.status_code == 200
+            assert "AUTONOMOUSc Edge Node Installer" in ui.text
+
+            status = client.get(f"{base_url}/api/status")
+            assert status.status_code == 200
+            assert status.json()["state"]["stage"] == "idle"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5.0)
+        server.server_close()
