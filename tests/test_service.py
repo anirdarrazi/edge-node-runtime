@@ -244,6 +244,7 @@ def test_status_payload_exposes_owner_setup_summary(tmp_path: Path, monkeypatch:
     assert payload["owner_setup"]["headline"] in {"Start Quick Start", "Start the runtime"}
     assert payload["owner_setup"]["steps"][0]["label"] == "Check this machine"
     assert "autostart" in payload
+    assert "desktop_launcher" in payload
 
 
 def test_spawn_background_uses_module_arguments(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

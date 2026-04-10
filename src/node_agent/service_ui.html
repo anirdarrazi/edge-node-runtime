@@ -468,6 +468,11 @@
               <span id="autostart-pill" class="pill">Checking</span>
               <p id="autostart-copy" class="meta"></p>
             </div>
+            <div class="status-card">
+              <strong>Desktop launcher</strong>
+              <span id="launcher-pill" class="pill">Checking</span>
+              <p id="launcher-copy" class="meta"></p>
+            </div>
           </div>
 
           <div class="dual">
@@ -477,6 +482,15 @@
               <div class="button-row">
                 <button id="enable-autostart" type="button">Enable</button>
                 <button id="disable-autostart" type="button" class="secondary">Disable</button>
+              </div>
+            </div>
+
+            <div class="callout">
+              <strong>Desktop launcher</strong>
+              <p class="supporting">Install a desktop launcher so the local node app can be reopened with one click.</p>
+              <div class="button-row">
+                <button id="install-launcher" type="button">Install launcher</button>
+                <button id="remove-launcher" type="button" class="secondary">Remove launcher</button>
               </div>
             </div>
 
@@ -614,6 +628,7 @@
         const diagnostics = payload.diagnostics || {};
         const ownerSetup = payload.owner_setup || installer.owner_setup || {};
         const autostart = payload.autostart || installer.autostart || {};
+        const launcher = payload.desktop_launcher || installer.desktop_launcher || {};
         const claim = installerState.claim || null;
         const gpu = preflight.gpu || {};
         const disk = preflight.disk || {};
@@ -664,6 +679,12 @@
           autostart.detail || "Automatic start status is unavailable.";
         document.getElementById("enable-autostart").disabled = !autostart.supported || Boolean(autostart.enabled);
         document.getElementById("disable-autostart").disabled = !autostart.supported || !autostart.enabled;
+
+        setPill(document.getElementById("launcher-pill"), launcher.label || "Unavailable", tone(Boolean(launcher.enabled), Boolean(launcher.supported)));
+        document.getElementById("launcher-copy").textContent =
+          launcher.detail || "Desktop launcher status is unavailable.";
+        document.getElementById("install-launcher").disabled = !launcher.supported || Boolean(launcher.enabled);
+        document.getElementById("remove-launcher").disabled = !launcher.supported || !launcher.enabled;
 
         if (claim && claim.approval_url) {
           claimCard.hidden = false;
@@ -758,6 +779,8 @@
       document.getElementById("apply-updates").addEventListener("click", async () => runAction(() => postJson("/api/updates/check", { apply: true })));
       document.getElementById("enable-autostart").addEventListener("click", async () => runAction(() => postJson("/api/autostart/enable")));
       document.getElementById("disable-autostart").addEventListener("click", async () => runAction(() => postJson("/api/autostart/disable")));
+      document.getElementById("install-launcher").addEventListener("click", async () => runAction(() => postJson("/api/launcher/install")));
+      document.getElementById("remove-launcher").addEventListener("click", async () => runAction(() => postJson("/api/launcher/remove")));
       document.getElementById("create-diagnostics").addEventListener("click", async () => runAction(() => postJson("/api/diagnostics")));
       openClaimButton.addEventListener("click", () => {
         if (claimUrl) {

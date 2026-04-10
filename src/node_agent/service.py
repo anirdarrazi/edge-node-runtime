@@ -21,6 +21,7 @@ from urllib.parse import quote, unquote, urlparse
 import httpx
 
 from .autostart import AutoStartManager
+from .desktop_launcher import DesktopLauncherManager
 from .installer import CommandRunner, GuidedInstaller, parse_env_file, run_command
 from .local_api_security import (
     ADMIN_TOKEN_HEADER,
@@ -101,6 +102,7 @@ class NodeRuntimeService:
         *,
         command_runner: CommandRunner = run_command,
         autostart_manager: AutoStartManager | None = None,
+        desktop_launcher_manager: DesktopLauncherManager | None = None,
     ) -> None:
         self.runtime_dir = ensure_runtime_bundle(runtime_dir or resolve_runtime_dir())
         self.data_dir = self.runtime_dir / "data"
@@ -115,10 +117,15 @@ class NodeRuntimeService:
             self.runtime_dir,
             command_runner=command_runner,
         )
+        self.desktop_launcher_manager = desktop_launcher_manager or DesktopLauncherManager(
+            self.runtime_dir,
+            command_runner=command_runner,
+        )
         self.guided_installer = GuidedInstaller(
             runtime_dir=self.runtime_dir,
             command_runner=command_runner,
             autostart_manager=self.autostart_manager,
+            desktop_launcher_manager=self.desktop_launcher_manager,
         )
         self.lock = threading.Lock()
         self.shutdown_event = threading.Event()
@@ -294,6 +301,7 @@ class NodeRuntimeService:
             "installer": installer_snapshot,
             "owner_setup": installer_snapshot.get("owner_setup", {}),
             "autostart": self.autostart_manager.status(),
+            "desktop_launcher": self.desktop_launcher_manager.status(),
             "updates": asdict(self.update_state),
             "diagnostics": asdict(self.diagnostics_state),
         }
@@ -522,6 +530,16 @@ class NodeRuntimeService:
         self.log(str(status.get("detail") or "Automatic start is disabled."))
         return self.status_payload()
 
+    def install_desktop_launcher(self) -> dict[str, Any]:
+        status = self.desktop_launcher_manager.enable()
+        self.log(str(status.get("detail") or "The desktop launcher is installed."))
+        return self.status_payload()
+
+    def remove_desktop_launcher(self) -> dict[str, Any]:
+        status = self.desktop_launcher_manager.disable()
+        self.log(str(status.get("detail") or "The desktop launcher was removed."))
+        return self.status_payload()
+
     def auto_update_loop(self) -> None:
         while not self.shutdown_event.is_set():
             try:
@@ -741,6 +759,12 @@ def make_handler(service: NodeRuntimeService, server_ref: dict[str, ThreadingHTT
                     return
                 if path == "/api/autostart/disable":
                     self._send_json(service.disable_autostart())
+                    return
+                if path == "/api/launcher/install":
+                    self._send_json(service.install_desktop_launcher())
+                    return
+                if path == "/api/launcher/remove":
+                    self._send_json(service.remove_desktop_launcher())
                     return
                 if path == "/api/diagnostics":
                     self._send_json(service.create_diagnostics_bundle())

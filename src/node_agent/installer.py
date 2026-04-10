@@ -19,6 +19,7 @@ import httpx
 from .autostart import AutoStartManager
 from .config import NodeAgentSettings
 from .control_plane import EdgeControlClient
+from .desktop_launcher import DesktopLauncherManager
 from .local_api_security import (
     ADMIN_TOKEN_HEADER,
     LOCAL_SESSION_COOKIE,
@@ -302,6 +303,7 @@ class GuidedInstaller:
         command_runner: CommandRunner = run_command,
         control_client_factory: ControlClientFactory = EdgeControlClient,
         autostart_manager: AutoStartManager | None = None,
+        desktop_launcher_manager: DesktopLauncherManager | None = None,
         sleep: SleepFn = time.sleep,
     ) -> None:
         self.runtime_dir = ensure_runtime_bundle(runtime_dir or resolve_runtime_dir())
@@ -313,6 +315,10 @@ class GuidedInstaller:
         self.command_runner = command_runner
         self.control_client_factory = control_client_factory
         self.autostart_manager = autostart_manager or AutoStartManager(
+            self.runtime_dir,
+            command_runner=command_runner,
+        )
+        self.desktop_launcher_manager = desktop_launcher_manager or DesktopLauncherManager(
             self.runtime_dir,
             command_runner=command_runner,
         )
@@ -423,6 +429,7 @@ class GuidedInstaller:
             "state": state,
             "owner_setup": self.owner_setup_payload(config=config, preflight=preflight, state=state),
             "autostart": self.autostart_manager.status(),
+            "desktop_launcher": self.desktop_launcher_manager.status(),
         }
 
     def owner_setup_payload(
@@ -622,6 +629,17 @@ class GuidedInstaller:
             return
         self.log(str(status.get("detail") or "Automatic start is unavailable on this machine."))
 
+    def maybe_install_desktop_launcher(self) -> None:
+        try:
+            status = self.desktop_launcher_manager.ensure_enabled()
+        except Exception as error:
+            self.log(f"The desktop launcher could not be installed automatically: {error}")
+            return
+        if status.get("enabled"):
+            self.log("A desktop launcher is installed so this node app can be reopened with one click.")
+            return
+        self.log(str(status.get("detail") or "Desktop launcher installation is unavailable on this machine."))
+
     def wait_for_vllm(self, timeout_seconds: float = 240.0) -> None:
         vllm_url = f"http://{service_access_host()}:8000/v1/models"
         deadline = time.time() + timeout_seconds
@@ -673,6 +691,7 @@ class GuidedInstaller:
                 self.log("Existing node credentials were found. Starting the runtime directly.")
                 self.compose_up(["vllm", "node-agent", "vector"])
                 self.maybe_enable_autostart()
+                self.maybe_install_desktop_launcher()
                 self.complete("Runtime started with existing node credentials.")
                 return
 
@@ -711,6 +730,7 @@ class GuidedInstaller:
             self.log("Starting node-agent and vector services...")
             self.compose_up(["node-agent", "vector"])
             self.maybe_enable_autostart()
+            self.maybe_install_desktop_launcher()
             self.complete("Runtime started. The node agent will attest and begin polling the control plane automatically.")
         except Exception as error:  # pragma: no cover - exercised through tests
             self.log(f"Installer failed: {error}")

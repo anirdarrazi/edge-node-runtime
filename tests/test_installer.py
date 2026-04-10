@@ -183,13 +183,36 @@ def test_run_install_creates_claim_and_starts_runtime(tmp_path: Path, monkeypatc
                 "detail": "Automatic start is enabled.",
             }
 
+    class FakeDesktopLauncherManager:
+        def __init__(self) -> None:
+            self.ensure_calls = 0
+
+        def ensure_enabled(self):
+            self.ensure_calls += 1
+            return {
+                "supported": True,
+                "enabled": True,
+                "label": "Installed",
+                "detail": "The desktop launcher is installed.",
+            }
+
+        def status(self):
+            return {
+                "supported": True,
+                "enabled": True,
+                "label": "Installed",
+                "detail": "The desktop launcher is installed.",
+            }
+
     autostart = FakeAutoStartManager()
+    launcher = FakeDesktopLauncherManager()
 
     installer = installer_module.GuidedInstaller(
         runtime_dir=runtime_dir,
         command_runner=runner,
         control_client_factory=FakeControlClient,
         autostart_manager=autostart,
+        desktop_launcher_manager=launcher,
         sleep=lambda _seconds: None,
     )
     installer.wait_for_vllm = lambda timeout_seconds=240.0: None  # type: ignore[method-assign]
@@ -214,6 +237,7 @@ def test_run_install_creates_claim_and_starts_runtime(tmp_path: Path, monkeypatc
     assert "Nordic Heat Compute" in (runtime_dir / ".env").read_text(encoding="utf-8")
     assert "SETUP_PROFILE=balanced" in (runtime_dir / ".env").read_text(encoding="utf-8")
     assert autostart.ensure_calls == 1
+    assert launcher.ensure_calls == 1
 
 
 def test_run_install_skips_claim_when_credentials_exist(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -310,3 +334,4 @@ def test_status_payload_includes_owner_setup_guidance(tmp_path: Path, monkeypatc
 
     assert payload["owner_setup"]["headline"] == "Start Docker Desktop"
     assert payload["owner_setup"]["steps"][0]["label"] == "Check this machine"
+    assert "desktop_launcher" in payload

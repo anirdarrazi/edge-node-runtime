@@ -466,6 +466,11 @@
               <span id="autostart-pill" class="pill">Checking</span>
               <p id="autostart-copy" class="meta"></p>
             </div>
+            <div class="status-card">
+              <strong>Desktop launcher</strong>
+              <span id="launcher-pill" class="pill">Checking</span>
+              <p id="launcher-copy" class="meta"></p>
+            </div>
           </div>
 
           <div id="claim-card" class="claim-card" hidden>
@@ -568,6 +573,7 @@
         const config = data.config || {};
         const ownerSetup = data.owner_setup || {};
         const autostart = data.autostart || {};
+        const launcher = data.desktop_launcher || {};
         const claim = state.claim || null;
         const gpu = preflight.gpu || {};
         const disk = preflight.disk || {};
@@ -605,6 +611,10 @@
         setPill(document.getElementById("autostart-pill"), autostart.label || "Unavailable", pillTone(Boolean(autostart.enabled), Boolean(autostart.supported)));
         document.getElementById("autostart-copy").textContent =
           autostart.detail || "Automatic start status is unavailable.";
+
+        setPill(document.getElementById("launcher-pill"), launcher.label || "Unavailable", pillTone(Boolean(launcher.enabled), Boolean(launcher.supported)));
+        document.getElementById("launcher-copy").textContent =
+          launcher.detail || "Desktop launcher status is unavailable.";
 
         if (claim && claim.approval_url) {
           claimCard.hidden = false;
