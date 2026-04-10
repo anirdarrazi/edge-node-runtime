@@ -306,6 +306,69 @@ class NodeRuntimeService:
             "diagnostics": asdict(self.diagnostics_state),
         }
 
+    def repair_runtime(self) -> dict[str, Any]:
+        self.log("Starting local repair for this machine...")
+        self.ensure_dirs()
+        self.guided_installer.ensure_data_dirs()
+
+        if not self.guided_installer.env_path.exists():
+            env_values = self.guided_installer.build_env({"setup_mode": "quickstart"})
+            self.guided_installer.write_env_file(env_values)
+            self.log("Recreated the missing .env using Quick Start defaults and detected hardware.")
+
+        try:
+            autostart = self.autostart_manager.ensure_enabled()
+            self.log(str(autostart.get("detail") or "Automatic start status is unavailable."))
+        except Exception as error:
+            self.log(f"Automatic start could not be repaired automatically: {error}")
+
+        try:
+            launcher = self.desktop_launcher_manager.ensure_enabled()
+            self.log(str(launcher.get("detail") or "Desktop launcher status is unavailable."))
+        except Exception as error:
+            self.log(f"The desktop launcher could not be repaired automatically: {error}")
+
+        installer_state = self.guided_installer.state_payload()
+        if installer_state.get("busy"):
+            self.log("Quick Start is already running. Waiting for the current setup flow to finish.")
+            return self.status_payload()
+
+        preflight = self.guided_installer.collect_preflight()
+        if not (preflight.get("docker_cli") and preflight.get("docker_compose") and preflight.get("docker_daemon")):
+            self.log(preflight.get("docker_error") or "Docker needs attention before repair can continue.")
+            return self.status_payload()
+
+        runtime = self.runtime_status(preflight=preflight, installer_state=installer_state)
+        running_services = set(preflight.get("running_services", []))
+        runtime_healthy = (
+            runtime.get("stage") == "running"
+            and set(RUNTIME_SERVICES).issubset(running_services)
+            and bool(runtime.get("vllm_ready"))
+        )
+        if runtime_healthy:
+            self.log("Repair finished. The local runtime is already healthy.")
+            return self.status_payload()
+
+        if preflight.get("credentials_present"):
+            if running_services:
+                self.log("Repair is recreating the runtime services using stored node credentials.")
+                payload = self.restart_runtime()
+            else:
+                self.log("Repair is starting the runtime with stored node credentials.")
+                payload = self.start_runtime()
+            self.log("Repair finished. The runtime should be back online shortly.")
+            return payload
+
+        repair_config = self.guided_installer.current_config()
+        repair_config["setup_mode"] = "quickstart"
+        repair_config["setup_profile"] = str(
+            repair_config.get("setup_profile")
+            or repair_config.get("recommended_setup_profile")
+            or "balanced"
+        )
+        self.log("Repair is resuming Quick Start so this machine can be approved again.")
+        return self.guided_installer.start_install(repair_config)
+
     def start_runtime(self) -> dict[str, Any]:
         self.log("Starting runtime services...")
         self.compose(["up", "-d", "vllm", "node-agent", "vector"])
@@ -766,6 +829,9 @@ def make_handler(service: NodeRuntimeService, server_ref: dict[str, ThreadingHTT
                 if path == "/api/launcher/remove":
                     self._send_json(service.remove_desktop_launcher())
                     return
+                if path == "/api/repair":
+                    self._send_json(service.repair_runtime())
+                    return
                 if path == "/api/diagnostics":
                     self._send_json(service.create_diagnostics_bundle())
                     return
@@ -963,6 +1029,32 @@ def command_status(runtime_dir: Path) -> int:
     return 0
 
 
+def command_repair(runtime_dir: Path, host: str, port: int, open_ui_flag: bool) -> int:
+    command_start(runtime_dir, host, port, False)
+    meta = load_meta(runtime_dir)
+    if not meta:
+        raise RuntimeError("The local node runtime service could not be reached for repair.")
+
+    target_host = str(meta.get("host", host))
+    target_port = int(meta.get("port", port))
+    admin_token = str(meta.get("admin_token", "") or "")
+    headers = {ADMIN_TOKEN_HEADER: admin_token} if admin_token else None
+    response = httpx.post(f"http://{target_host}:{target_port}/api/repair", timeout=20.0, headers=headers)
+    payload = response.json()
+    if response.status_code >= 400 or payload.get("error"):
+        detail = payload.get("error", {})
+        message = (
+            detail.get("message")
+            if isinstance(detail, dict)
+            else None
+        ) or "The local repair request could not be completed."
+        raise RuntimeError(str(message))
+    if open_ui_flag:
+        open_browser(target_host, target_port, admin_token or None)
+    print(payload.get("runtime", {}).get("message", "Local repair started."))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="AUTONOMOUSc local node runtime service.")
     subparsers = parser.add_subparsers(dest="command", required=False)
@@ -982,6 +1074,11 @@ def main(argv: list[str] | None = None) -> int:
     open_parser = subparsers.add_parser("open", help="Open the local runtime UI in your browser.")
     open_parser.add_argument("--host", default="127.0.0.1")
     open_parser.add_argument("--port", type=int, default=8765)
+
+    repair_parser = subparsers.add_parser("repair", help="Repair local owner setup and restart the runtime when safe.")
+    repair_parser.add_argument("--host", default="127.0.0.1")
+    repair_parser.add_argument("--port", type=int, default=8765)
+    repair_parser.add_argument("--open", action="store_true")
 
     args = parser.parse_args(argv)
     command = args.command or "run"
@@ -1006,6 +1103,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         open_browser(args.host, args.port)
         return 0
+    if command == "repair":
+        return command_repair(runtime_dir, args.host, args.port, args.open)
     raise SystemExit(f"Unknown command: {command}")
 
 

@@ -12,6 +12,11 @@ else
   exit 1
 fi
 
+if ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
+  echo "Python 3.11 or newer is required to stop the local node service." >&2
+  exit 1
+fi
+
 VENV_PATH=".installer-venv"
 if [ ! -d "$VENV_PATH" ]; then
   echo "The local node service virtual environment does not exist yet." >&2

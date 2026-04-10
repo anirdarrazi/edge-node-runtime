@@ -495,6 +495,14 @@
             </div>
 
             <div class="callout">
+              <strong>Repair this machine</strong>
+              <p id="repair-copy" class="supporting">Restore local launchers, rebuild missing config, and restart the runtime when it is safe.</p>
+              <div class="button-row">
+                <button id="repair-machine" type="button">Repair now</button>
+              </div>
+            </div>
+
+            <div class="callout">
               <strong>Update policy</strong>
               <p class="supporting">The service can periodically fetch signed runtime releases and apply them for you.</p>
               <label class="checkbox"><input id="auto_update_enabled" type="checkbox">Enable automatic signed runtime updates</label>
@@ -685,6 +693,13 @@
           launcher.detail || "Desktop launcher status is unavailable.";
         document.getElementById("install-launcher").disabled = !launcher.supported || Boolean(launcher.enabled);
         document.getElementById("remove-launcher").disabled = !launcher.supported || !launcher.enabled;
+        document.getElementById("repair-copy").textContent =
+          !engineReady
+            ? "Repair will restore local setup files, but Docker still needs to be installed and running before the node can come online."
+            : registrationReady
+              ? "Repair will reuse the stored node credentials, restore the launch conveniences, and restart the runtime if anything is stuck."
+              : "Repair will restore local setup files and resume Quick Start so this machine can be approved again.";
+        document.getElementById("repair-machine").disabled = Boolean(installerState.busy);
 
         if (claim && claim.approval_url) {
           claimCard.hidden = false;
@@ -781,6 +796,7 @@
       document.getElementById("disable-autostart").addEventListener("click", async () => runAction(() => postJson("/api/autostart/disable")));
       document.getElementById("install-launcher").addEventListener("click", async () => runAction(() => postJson("/api/launcher/install")));
       document.getElementById("remove-launcher").addEventListener("click", async () => runAction(() => postJson("/api/launcher/remove")));
+      document.getElementById("repair-machine").addEventListener("click", async () => runAction(() => postJson("/api/repair")));
       document.getElementById("create-diagnostics").addEventListener("click", async () => runAction(() => postJson("/api/diagnostics")));
       openClaimButton.addEventListener("click", () => {
         if (claimUrl) {

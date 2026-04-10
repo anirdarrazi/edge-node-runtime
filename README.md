@@ -110,11 +110,28 @@ Windows double-click launcher:
 
 `Stop AUTONOMOUSc Edge Node.cmd`
 
+Repair the local app and reopen the owner UI:
+
+```bash
+bash repair.sh
+```
+
+Windows PowerShell:
+
+```powershell
+.\repair.ps1
+```
+
+Windows double-click launcher:
+
+`Repair AUTONOMOUSc Edge Node.cmd`
+
 Notes:
 
 - `install.sh`, `install.ps1`, `start.sh`, and `start.ps1` create a local service virtual environment and open the background-service UI.
+- `repair.sh` and `repair.ps1` restore the owner conveniences, recreate a missing `.env` when possible, and restart the runtime when the node is already claimed.
 - On Windows, the friendly `.cmd` launchers bypass PowerShell execution-policy friction so owners can just double-click into setup or reopen the app later.
-- The Windows scripts now require Python 3.11 or newer explicitly and guide owners toward reinstalling cleanly if the local environment is incomplete.
+- The repo-local launch scripts now require Python 3.11 or newer explicitly and guide owners toward reinstalling cleanly if the local environment is incomplete.
 - The local UI runs at `http://127.0.0.1:8765` by default and stays available while the background service is running.
 - Automatic updates now follow the signed runtime release manifest and only pull digest-pinned images.
 - Repo-local installs still use the checked-out `docker-compose.yml`, which builds `node-agent` from source for development.

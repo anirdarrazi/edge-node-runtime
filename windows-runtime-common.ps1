@@ -104,3 +104,17 @@ function Stop-NodeApp {
   Write-Host "Stopping the AUTONOMOUSc Edge Node app..."
   & $venvPython -m node_agent.service stop
 }
+
+function Repair-NodeApp {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$RootPath,
+
+    [switch]$RefreshDependencies
+  )
+
+  Set-Location $RootPath
+  $venvPython = Get-NodeServiceVenvPython -RootPath $RootPath -Create -RefreshDependencies:$RefreshDependencies
+  Write-Host "Repairing the AUTONOMOUSc Edge Node app..."
+  & $venvPython -m node_agent.service repair --open
+}

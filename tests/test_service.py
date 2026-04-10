@@ -247,6 +247,124 @@ def test_status_payload_exposes_owner_setup_summary(tmp_path: Path, monkeypatch:
     assert "desktop_launcher" in payload
 
 
+def test_repair_runtime_recreates_env_and_restarts_claimed_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_example_env(tmp_path)
+    commands: list[list[str]] = []
+
+    class FakeAutoStartManager:
+        def __init__(self) -> None:
+            self.ensure_calls = 0
+
+        def ensure_enabled(self) -> dict[str, object]:
+            self.ensure_calls += 1
+            return {
+                "supported": True,
+                "enabled": True,
+                "label": "Enabled",
+                "detail": "Automatic start is enabled.",
+            }
+
+        def status(self) -> dict[str, object]:
+            return {
+                "supported": True,
+                "enabled": True,
+                "label": "Enabled",
+                "detail": "Automatic start is enabled.",
+            }
+
+    class FakeDesktopLauncherManager:
+        def __init__(self) -> None:
+            self.ensure_calls = 0
+
+        def ensure_enabled(self) -> dict[str, object]:
+            self.ensure_calls += 1
+            return {
+                "supported": True,
+                "enabled": True,
+                "label": "Installed",
+                "detail": "The desktop launcher is installed.",
+            }
+
+        def status(self) -> dict[str, object]:
+            return {
+                "supported": True,
+                "enabled": True,
+                "label": "Installed",
+                "detail": "The desktop launcher is installed.",
+            }
+
+    autostart = FakeAutoStartManager()
+    launcher = FakeDesktopLauncherManager()
+
+    monkeypatch.setattr(installer_module.shutil, "which", lambda name: "docker" if name == "docker" else "nvidia-smi")
+
+    service = service_module.NodeRuntimeService(
+        runtime_dir=tmp_path,
+        command_runner=base_runner_factory(commands, running_services=""),
+        autostart_manager=autostart,
+        desktop_launcher_manager=launcher,
+    )
+    service.guided_installer.credentials_path.parent.mkdir(parents=True, exist_ok=True)
+    service.guided_installer.credentials_path.write_text("{}", encoding="utf-8")
+
+    payload = service.repair_runtime()
+
+    assert service.guided_installer.env_path.exists()
+    assert "SETUP_PROFILE=" in service.guided_installer.env_path.read_text(encoding="utf-8")
+    assert ["docker", "compose", "up", "-d", "vllm", "node-agent", "vector"] in commands
+    assert autostart.ensure_calls == 1
+    assert launcher.ensure_calls == 1
+    assert payload["runtime"]["config_present"] is True
+
+
+def test_repair_runtime_resumes_quick_start_for_unclaimed_machine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_example_env(tmp_path)
+    commands: list[list[str]] = []
+    captured: dict[str, object] = {}
+
+    class FakeManager:
+        def ensure_enabled(self) -> dict[str, object]:
+            return {
+                "supported": True,
+                "enabled": True,
+                "label": "Ready",
+                "detail": "Ready.",
+            }
+
+        def status(self) -> dict[str, object]:
+            return {
+                "supported": True,
+                "enabled": True,
+                "label": "Ready",
+                "detail": "Ready.",
+            }
+
+    monkeypatch.setattr(installer_module.shutil, "which", lambda name: "docker" if name == "docker" else "nvidia-smi")
+
+    service = service_module.NodeRuntimeService(
+        runtime_dir=tmp_path,
+        command_runner=base_runner_factory(commands, running_services=""),
+        autostart_manager=FakeManager(),
+        desktop_launcher_manager=FakeManager(),
+    )
+
+    def fake_start_install(config: dict[str, object]) -> dict[str, object]:
+        captured["config"] = dict(config)
+        return {"repair": "started"}
+
+    service.guided_installer.start_install = fake_start_install  # type: ignore[method-assign]
+
+    payload = service.repair_runtime()
+
+    assert payload == {"repair": "started"}
+    assert captured["config"]["setup_mode"] == "quickstart"
+    assert captured["config"]["setup_profile"] == "balanced"
+
+
 def test_spawn_background_uses_module_arguments(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     captured: dict[str, object] = {}
 
@@ -297,6 +415,53 @@ def test_wait_for_service_uses_health_endpoint(monkeypatch: pytest.MonkeyPatch) 
     service_module.wait_for_service("127.0.0.1", 8765, timeout_seconds=0.5)
 
     assert requested_urls == ["http://127.0.0.1:8765/api/healthz"]
+
+
+def test_command_repair_calls_local_service_endpoint_and_opens_ui(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_command_start(runtime_dir: Path, host: str, port: int, open_ui_flag: bool) -> int:
+        captured["start"] = (runtime_dir, host, port, open_ui_flag)
+        return 0
+
+    def fake_load_meta(_runtime_dir: Path) -> dict[str, object]:
+        return {
+            "host": "127.0.0.1",
+            "port": 8765,
+            "admin_token": "local-admin-token",
+        }
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self) -> dict[str, object]:
+            return {"runtime": {"message": "Repair started."}}
+
+    def fake_post(url: str, timeout: float, headers=None):
+        captured["post"] = (url, timeout, headers)
+        return FakeResponse()
+
+    def fake_open_browser(host: str, port: int, admin_token: str | None = None) -> None:
+        captured["open"] = (host, port, admin_token)
+
+    monkeypatch.setattr(service_module, "command_start", fake_command_start)
+    monkeypatch.setattr(service_module, "load_meta", fake_load_meta)
+    monkeypatch.setattr(service_module.httpx, "post", fake_post)
+    monkeypatch.setattr(service_module, "open_browser", fake_open_browser)
+
+    exit_code = service_module.command_repair(tmp_path, "127.0.0.1", 8765, True)
+
+    assert exit_code == 0
+    assert captured["start"] == (tmp_path, "127.0.0.1", 8765, False)
+    assert captured["post"] == (
+        "http://127.0.0.1:8765/api/repair",
+        20.0,
+        {service_module.ADMIN_TOKEN_HEADER: "local-admin-token"},
+    )
+    assert captured["open"] == ("127.0.0.1", 8765, "local-admin-token")
+    assert "Repair started." in capsys.readouterr().out
 
 
 def test_command_status_reports_online_when_health_endpoint_responds(
