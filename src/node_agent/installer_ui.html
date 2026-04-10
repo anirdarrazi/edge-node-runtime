@@ -9,7 +9,8 @@
       :root {
         color-scheme: light;
         --bg: #f6efe2;
-        --panel: rgba(255, 252, 246, 0.94);
+        --panel: rgba(255, 252, 246, 0.95);
+        --card: rgba(255, 255, 255, 0.5);
         --ink: #192228;
         --muted: #617077;
         --line: rgba(25, 34, 40, 0.1);
@@ -18,8 +19,8 @@
         --success: #256f4b;
         --warning: #9b6107;
         --danger: #a23629;
-        --radius: 24px;
         --shadow: 0 24px 64px rgba(62, 43, 20, 0.12);
+        --radius: 24px;
         font-family: "Segoe UI", sans-serif;
       }
 
@@ -37,9 +38,9 @@
       }
 
       main {
-        width: min(1180px, calc(100vw - 32px));
+        width: min(1200px, calc(100vw - 28px));
         margin: 0 auto;
-        padding: 32px 0 48px;
+        padding: 28px 0 48px;
       }
 
       .hero,
@@ -51,51 +52,57 @@
       }
 
       .hero {
+        padding: 28px;
         display: grid;
         gap: 14px;
-        padding: 28px;
         margin-bottom: 22px;
       }
 
       .eyebrow {
+        margin: 0;
         text-transform: uppercase;
         letter-spacing: 0.14em;
         color: var(--accent);
-        font-weight: 700;
         font-size: 0.78rem;
+        font-weight: 700;
       }
 
       h1, h2, h3, p { margin: 0; }
 
-      h1 {
+      h1, h2, h3 {
         font-family: Georgia, serif;
-        font-size: clamp(2rem, 4vw, 3.6rem);
+      }
+
+      h1 {
+        font-size: clamp(2rem, 4vw, 3.7rem);
         line-height: 0.98;
         max-width: 12ch;
       }
 
-      h2, h3 {
-        font-family: Georgia, serif;
-      }
-
       .lede,
-      .supporting,
-      .meta {
+      .meta,
+      .supporting {
         color: var(--muted);
-        line-height: 1.6;
+        line-height: 1.65;
       }
 
-      .grid {
-        display: grid;
-        gap: 20px;
-        grid-template-columns: minmax(320px, 0.95fr) minmax(0, 1.4fr);
-        align-items: start;
-      }
-
+      .hero-steps,
+      .layout,
       .stack,
-      .status-grid {
+      .status-grid,
+      .button-row,
+      .profile-grid {
         display: grid;
         gap: 14px;
+      }
+
+      .hero-steps {
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      }
+
+      .layout {
+        grid-template-columns: minmax(330px, 0.95fr) minmax(0, 1.4fr);
+        align-items: start;
       }
 
       .panel {
@@ -103,19 +110,24 @@
       }
 
       .status-grid {
-        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
       }
 
+      .step-chip,
       .status-card,
+      .callout,
       .claim-card,
+      .journey,
       .log-shell {
         border: 1px solid var(--line);
         border-radius: 18px;
-        background: rgba(255, 255, 255, 0.42);
+        background: var(--card);
         padding: 16px;
       }
 
+      .step-chip strong,
       .status-card strong,
+      .callout strong,
       .claim-card strong {
         display: block;
         margin-bottom: 6px;
@@ -128,7 +140,7 @@
         padding: 7px 11px;
         border-radius: 999px;
         font-size: 0.86rem;
-        font-weight: 600;
+        font-weight: 700;
         background: rgba(25, 34, 40, 0.08);
       }
 
@@ -188,10 +200,51 @@
       }
 
       .button-row {
-        display: flex;
-        flex-wrap: wrap;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      }
+
+      .profile-grid {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .profile-option {
+        text-align: left;
+        background: rgba(255, 255, 255, 0.52);
+        color: var(--ink);
+        border: 1px solid var(--line);
+        min-height: 112px;
+      }
+
+      .profile-option.active {
+        background: var(--accent);
+        color: var(--accent-ink);
+        border-color: transparent;
+      }
+
+      .profile-option span {
+        display: block;
+        margin-top: 6px;
+        font-size: 0.88rem;
+        line-height: 1.45;
+        opacity: 0.88;
+      }
+
+      .journey-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: grid;
         gap: 12px;
       }
+
+      .journey-item {
+        border-left: 4px solid rgba(25, 34, 40, 0.12);
+        padding-left: 12px;
+      }
+
+      .journey-item.complete { border-left-color: var(--success); }
+      .journey-item.active { border-left-color: var(--accent); }
+      .journey-item.pending { border-left-color: rgba(25, 34, 40, 0.16); }
 
       .checkbox {
         display: flex;
@@ -208,7 +261,7 @@
       details {
         border: 1px solid var(--line);
         border-radius: 18px;
-        background: rgba(255, 255, 255, 0.34);
+        background: rgba(255, 255, 255, 0.36);
         padding: 14px 16px;
       }
 
@@ -217,8 +270,16 @@
         font-weight: 700;
       }
 
-      .claim-card[hidden],
-      .error-banner[hidden] {
+      .error-banner {
+        border: 1px solid rgba(162, 54, 41, 0.18);
+        border-radius: 18px;
+        padding: 14px 16px;
+        background: rgba(255, 242, 239, 0.9);
+        color: var(--danger);
+      }
+
+      .error-banner[hidden],
+      .claim-card[hidden] {
         display: none;
       }
 
@@ -232,26 +293,17 @@
         color: var(--muted);
       }
 
-      .error-banner {
-        border: 1px solid rgba(162, 54, 41, 0.18);
-        border-radius: 18px;
-        padding: 14px 16px;
-        background: rgba(255, 242, 239, 0.9);
-        color: var(--danger);
-      }
-
       a {
         color: var(--accent);
       }
 
-      @media (max-width: 900px) {
-        .grid {
+      @media (max-width: 960px) {
+        .layout {
           grid-template-columns: 1fr;
         }
 
-        main {
-          width: min(100vw - 24px, 1180px);
-          padding-top: 24px;
+        .profile-grid {
+          grid-template-columns: 1fr;
         }
       }
     </style>
@@ -260,51 +312,102 @@
     <main>
       <section class="hero">
         <p class="eyebrow">AUTONOMOUSc Edge Node Installer</p>
-        <h1>Configure this node, approve it, and start the runtime.</h1>
-        <p class="lede">Phase 1 keeps Docker Compose and the current Python agent, but moves setup into a guided browser flow with preflight checks, claim approval, and startup progress in one place.</p>
+        <h1>Plug in, approve this machine, and let the runtime finish the rest.</h1>
+        <p class="lede">Quick Start hides the operator knobs. Pick a node name, keep the recommended profile, approve the claim in your browser, and this machine will bring itself online.</p>
+        <div class="hero-steps">
+          <div class="step-chip">
+            <strong>1. Check machine</strong>
+            <p class="meta">Docker, GPU detection, and disk space are verified before setup starts.</p>
+          </div>
+          <div class="step-chip">
+            <strong>2. Quick Start</strong>
+            <p class="meta">Use the recommended profile or switch to Quiet or Performance in one click.</p>
+          </div>
+          <div class="step-chip">
+            <strong>3. Approve node</strong>
+            <p class="meta">The installer creates a browser claim and waits for approval automatically.</p>
+          </div>
+          <div class="step-chip">
+            <strong>4. Go live</strong>
+            <p class="meta">The runtime starts itself and begins polling the control plane.</p>
+          </div>
+        </div>
       </section>
 
-      <section class="grid">
+      <section class="layout">
         <article class="panel stack">
           <div class="stack">
             <div>
-              <h2>Node Setup</h2>
-              <p class="supporting">Only the core settings are required. Hardware defaults and recommended runtime values are filled in automatically.</p>
+              <h2>Quick Start</h2>
+              <p class="supporting">This is the owner-friendly path. Advanced settings are still available, but most machines only need a name and a profile.</p>
             </div>
             <div id="error-banner" class="error-banner" hidden></div>
           </div>
 
           <form id="installer-form" class="stack">
-            <label>
-              Node label
-              <input id="node_label" name="node_label" placeholder="AUTONOMOUSc Nordic Node 01">
-            </label>
+            <input id="setup_profile" type="hidden" value="balanced">
 
             <label>
-              Region
-              <input id="node_region" name="node_region" placeholder="eu-se-1">
+              Node name
+              <input id="node_label" name="node_label" placeholder="AUTONOMOUSc Edge Node">
             </label>
 
-            <label>
-              Trust tier
-              <select id="trust_tier" name="trust_tier">
-                <option value="standard">Standard</option>
-                <option value="confidential">Confidential</option>
-                <option value="restricted">Restricted</option>
-              </select>
-            </label>
+            <div class="stack">
+              <div>
+                <h3>Performance profile</h3>
+                <p class="meta">The installer auto-tunes concurrency and runtime limits around this choice.</p>
+              </div>
+              <div class="profile-grid">
+                <button class="profile-option" data-profile="quiet" type="button">
+                  Quiet
+                  <span>Lowest heat and noise, one workload at a time.</span>
+                </button>
+                <button class="profile-option" data-profile="balanced" type="button">
+                  Balanced
+                  <span>Recommended for most machines. Good throughput without aggressive tuning.</span>
+                </button>
+                <button class="profile-option" data-profile="performance" type="button">
+                  Performance
+                  <span>Higher throughput when you want this machine working harder.</span>
+                </button>
+              </div>
+            </div>
 
-            <label class="checkbox">
-              <input id="restricted_capable" type="checkbox">
-              Restricted workloads capable
-            </label>
+            <div class="callout">
+              <strong id="machine-summary">Checking local hardware...</strong>
+              <p id="profile-summary" class="supporting">The installer will choose a safe runtime profile for this machine.</p>
+            </div>
+
+            <div class="button-row">
+              <button id="start-button" type="submit">Start Quick Start</button>
+              <button id="refresh-button" type="button" class="secondary">Refresh status</button>
+            </div>
 
             <details>
-              <summary>Advanced configuration</summary>
+              <summary>Advanced settings</summary>
               <div class="stack" style="margin-top: 14px;">
                 <label>
                   Control plane URL
                   <input id="edge_control_url" name="edge_control_url" placeholder="https://edge.autonomousc.com">
+                </label>
+
+                <label>
+                  Region
+                  <input id="node_region" name="node_region" placeholder="eu-se-1">
+                </label>
+
+                <label>
+                  Trust tier
+                  <select id="trust_tier" name="trust_tier">
+                    <option value="standard">Standard</option>
+                    <option value="confidential">Confidential</option>
+                    <option value="restricted">Restricted</option>
+                  </select>
+                </label>
+
+                <label class="checkbox">
+                  <input id="restricted_capable" type="checkbox">
+                  Restricted workloads capable
                 </label>
 
                 <label>
@@ -323,18 +426,18 @@
                 </label>
               </div>
             </details>
-
-            <div class="button-row">
-              <button id="start-button" type="submit">Save and start guided install</button>
-              <button id="refresh-button" type="button" class="secondary">Refresh status</button>
-            </div>
           </form>
         </article>
 
         <article class="panel stack">
-          <div>
-            <h2>Installer Status</h2>
-            <p id="status-message" class="supporting">Loading installer state...</p>
+          <div class="callout">
+            <strong id="next-headline">Loading setup status...</strong>
+            <p id="next-detail" class="supporting">Checking this machine and preparing the next step.</p>
+          </div>
+
+          <div class="journey">
+            <h3>Setup journey</h3>
+            <ul id="journey-list" class="journey-list"></ul>
           </div>
 
           <div class="status-grid">
@@ -349,31 +452,36 @@
               <p id="gpu-copy" class="meta"></p>
             </div>
             <div class="status-card">
-              <strong>Claim</strong>
-              <span id="claim-pill" class="pill">Idle</span>
+              <strong>Disk</strong>
+              <span id="disk-pill" class="pill">Checking</span>
+              <p id="disk-copy" class="meta"></p>
+            </div>
+            <div class="status-card">
+              <strong>Approval</strong>
+              <span id="claim-pill" class="pill">Checking</span>
               <p id="claim-copy" class="meta"></p>
             </div>
             <div class="status-card">
-              <strong>Runtime</strong>
-              <span id="runtime-pill" class="pill">Idle</span>
-              <p id="runtime-copy" class="meta"></p>
+              <strong>Launch on sign-in</strong>
+              <span id="autostart-pill" class="pill">Checking</span>
+              <p id="autostart-copy" class="meta"></p>
             </div>
           </div>
 
           <div id="claim-card" class="claim-card" hidden>
-            <strong>Node registration required</strong>
-            <p class="supporting">Open the claim approval page, sign in or create an operator account, then approve this node. The installer will continue automatically.</p>
+            <strong>Approve this node</strong>
+            <p class="supporting">Open the approval page, sign in or create your operator account, then approve this machine. The installer keeps polling and will finish automatically.</p>
             <p class="meta"><strong>Claim code:</strong> <span id="claim-code"></span></p>
             <p class="meta"><strong>Expires:</strong> <span id="claim-expiry"></span></p>
             <div class="button-row" style="margin-top: 12px;">
               <a id="claim-link" target="_blank" rel="noreferrer">
-                <button type="button">Open claim approval</button>
+                <button type="button">Open approval page</button>
               </a>
             </div>
           </div>
 
           <div class="log-shell">
-            <h3>Progress log</h3>
+            <h3>Installer log</h3>
             <pre id="logs">Waiting for installer events...</pre>
           </div>
         </article>
@@ -387,6 +495,8 @@
       const errorBanner = document.getElementById("error-banner");
       const claimCard = document.getElementById("claim-card");
       const claimLink = document.getElementById("claim-link");
+      const profileInput = document.getElementById("setup_profile");
+      const profileButtons = Array.from(document.querySelectorAll(".profile-option"));
       let formHydrated = false;
 
       function pillTone(ok, warning = false) {
@@ -400,8 +510,17 @@
         element.className = `pill ${tone}`;
       }
 
+      function selectProfile(profile) {
+        profileInput.value = profile;
+        profileButtons.forEach((button) => {
+          button.classList.toggle("active", button.dataset.profile === profile);
+        });
+      }
+
       function formPayload() {
         return {
+          setup_mode: "quickstart",
+          setup_profile: profileInput.value,
           edge_control_url: document.getElementById("edge_control_url").value.trim(),
           node_label: document.getElementById("node_label").value.trim(),
           node_region: document.getElementById("node_region").value.trim(),
@@ -423,38 +542,69 @@
         document.getElementById("vllm_model").value = config.vllm_model || "";
         document.getElementById("supported_models").value = config.supported_models || "";
         document.getElementById("max_concurrent_assignments").value = config.max_concurrent_assignments || "";
+        selectProfile(config.setup_profile || config.recommended_setup_profile || "balanced");
         formHydrated = true;
+      }
+
+      function renderJourney(ownerSetup) {
+        const journey = document.getElementById("journey-list");
+        const steps = ownerSetup?.steps || [];
+        journey.innerHTML = "";
+        if (!steps.length) {
+          journey.innerHTML = "<li class='journey-item pending'><strong>Preparing</strong><div class='meta'>Waiting for setup data.</div></li>";
+          return;
+        }
+        steps.forEach((step) => {
+          const item = document.createElement("li");
+          item.className = `journey-item ${step.status || "pending"}`;
+          item.innerHTML = `<strong>${step.label || "Step"}</strong><div class="meta">${step.detail || ""}</div>`;
+          journey.appendChild(item);
+        });
       }
 
       function render(data) {
         const preflight = data.preflight || {};
         const state = data.state || {};
+        const config = data.config || {};
+        const ownerSetup = data.owner_setup || {};
+        const autostart = data.autostart || {};
         const claim = state.claim || null;
+        const gpu = preflight.gpu || {};
+        const disk = preflight.disk || {};
         const runningServices = (preflight.running_services || []).join(", ") || "No services detected yet.";
 
-        document.getElementById("status-message").textContent = state.message || "Ready to configure this node.";
-        document.getElementById("logs").textContent = (state.logs || []).join("\\n") || "Waiting for installer events...";
+        document.getElementById("next-headline").textContent = ownerSetup.headline || "Ready to set up this machine";
+        document.getElementById("next-detail").textContent = ownerSetup.detail || state.message || "Quick Start will guide this machine into service.";
+        document.getElementById("logs").textContent = (state.logs || []).join("\n") || "Waiting for installer events...";
+        document.getElementById("machine-summary").textContent =
+          gpu.detected ? `${gpu.name} detected with ${gpu.memory_gb} GB VRAM` : "GPU detection is optional for Quick Start";
+        document.getElementById("profile-summary").textContent =
+          ownerSetup.profile_summary || config.profile_summary || "The installer will auto-tune this machine for the selected profile.";
+        renderJourney(ownerSetup);
 
         const dockerOk = Boolean(preflight.docker_cli && preflight.docker_compose && preflight.docker_daemon);
         setPill(document.getElementById("docker-pill"), dockerOk ? "Ready" : "Needs attention", pillTone(dockerOk, Boolean(preflight.docker_cli || preflight.docker_compose)));
         document.getElementById("docker-copy").textContent =
-          preflight.docker_error || (dockerOk ? `Compose is available. Running services: ${runningServices}` : "Install Docker Desktop or start the Docker daemon before continuing.");
+          preflight.docker_error || (dockerOk ? `Compose is available. Running services: ${runningServices}` : "Install Docker Desktop or start Docker before continuing.");
 
-        const gpu = preflight.gpu || {};
         const gpuOk = Boolean(gpu.detected);
-        setPill(document.getElementById("gpu-pill"), gpuOk ? "Detected" : "Unknown", pillTone(gpuOk, true));
+        setPill(document.getElementById("gpu-pill"), gpuOk ? "Detected" : "Optional", pillTone(gpuOk, true));
         document.getElementById("gpu-copy").textContent =
-          gpuOk ? `${gpu.name} with ${gpu.memory_gb} GB VRAM.` : "nvidia-smi was not available. Defaults will stay editable in advanced settings.";
+          gpuOk ? `${gpu.name} with ${gpu.memory_gb} GB VRAM.` : "GPU detection is unavailable. Quick Start will still use safe defaults.";
 
-        const claimTone = state.stage === "waiting_for_claim" ? "warning" : claim ? pillTone(claim.status === "consumed" || claim.status === "approved", true) : "warning";
-        setPill(document.getElementById("claim-pill"), claim ? claim.status : "Idle", claimTone);
+        const diskOk = Boolean(disk.ok);
+        setPill(document.getElementById("disk-pill"), diskOk ? "Ready" : "Low space", pillTone(diskOk, true));
+        document.getElementById("disk-copy").textContent =
+          disk.total_gb ? `${disk.free_gb} GB free of ${disk.total_gb} GB total.` : "Disk space has not been measured yet.";
+
+        const claimReady = Boolean(preflight.credentials_present);
+        setPill(document.getElementById("claim-pill"), claimReady ? "Approved" : (claim ? claim.status : "Waiting"), pillTone(claimReady, true));
         document.getElementById("claim-copy").textContent =
-          claim ? `Claim code ${claim.claim_code}. The installer keeps polling until approval is complete.` : "A claim link will appear here when node registration starts.";
+          claimReady ? "Credentials are stored locally for this machine." : (claim ? `Claim code ${claim.claim_code}. Waiting for approval.` : "Quick Start will create a browser approval link.");
 
-        const runtimeReady = state.stage === "running";
-        setPill(document.getElementById("runtime-pill"), runtimeReady ? "Running" : state.stage || "Idle", pillTone(runtimeReady, Boolean(preflight.credentials_present)));
-        document.getElementById("runtime-copy").textContent =
-          runtimeReady ? "The node runtime is online and using persisted credentials." : (preflight.credentials_present ? "Existing credentials are present for this node." : "Services will start automatically after registration.");
+        setPill(document.getElementById("autostart-pill"), autostart.label || "Unavailable", pillTone(Boolean(autostart.enabled), Boolean(autostart.supported)));
+        document.getElementById("autostart-copy").textContent =
+          autostart.detail || "Automatic start status is unavailable.";
 
         if (claim && claim.approval_url) {
           claimCard.hidden = false;
@@ -473,32 +623,49 @@
           errorBanner.textContent = "";
         }
 
+        if (!state.busy && config.setup_profile) {
+          selectProfile(config.setup_profile);
+        }
         startButton.disabled = Boolean(state.busy);
-        startButton.textContent = state.busy ? "Installer is running..." : "Save and start guided install";
+        startButton.textContent = state.busy ? "Quick Start is running..." : "Start Quick Start";
       }
 
       async function refreshStatus() {
-        const response = await fetch("/api/status", {
-          credentials: "same-origin"
-        });
+        const response = await fetch("/api/status", { credentials: "same-origin" });
         const data = await response.json();
         hydrateForm(data.config);
         render(data);
       }
 
-      form.addEventListener("submit", async (event) => {
-        event.preventDefault();
-        errorBanner.hidden = true;
+      async function submitInstall() {
         const response = await fetch("/api/install", {
           method: "POST",
-          headers: {
-            "content-type": "application/json"
-          },
+          headers: { "content-type": "application/json" },
           credentials: "same-origin",
           body: JSON.stringify(formPayload())
         });
         const data = await response.json();
+        if (!response.ok || data.error) {
+          throw new Error(data?.error?.message || "The installer request could not be completed.");
+        }
         render(data);
+      }
+
+      profileButtons.forEach((button) => {
+        button.addEventListener("click", () => {
+          selectProfile(button.dataset.profile || "balanced");
+        });
+      });
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        errorBanner.hidden = true;
+        try {
+          await submitInstall();
+        } catch (error) {
+          errorBanner.hidden = false;
+          errorBanner.textContent = error instanceof Error ? error.message : "The installer request could not be completed.";
+        }
       });
 
       refreshButton.addEventListener("click", () => {

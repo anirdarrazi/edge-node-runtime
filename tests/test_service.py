@@ -88,6 +88,10 @@ def base_runner_factory(
             if image in update_on_pull:
                 image_ids[image] = update_on_pull[image]
             return completed(args, stdout=f"Pulled {image}\n")
+        if args[:2] == ["schtasks", "/Query"]:
+            raise RuntimeError("ERROR: The system cannot find the file specified.")
+        if args[:2] == ["schtasks", "/Create"] or args[:2] == ["schtasks", "/Delete"]:
+            return completed(args)
         if args[0] == "nvidia-smi":
             if "--query-gpu=name,memory.total" in args:
                 return completed(args, stdout="RTX 4090, 24564\n")
@@ -223,6 +227,23 @@ def test_runtime_service_populates_owner_bundle_when_runtime_dir_is_overridden(
     assert (tmp_path / "docker-compose.yml").exists()
     assert (tmp_path / ".env.example").exists()
     assert (tmp_path / "vector.toml").exists()
+
+
+def test_status_payload_exposes_owner_setup_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    write_example_env(tmp_path)
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(installer_module.shutil, "which", lambda name: "docker" if name == "docker" else "nvidia-smi")
+
+    service = service_module.NodeRuntimeService(
+        runtime_dir=tmp_path,
+        command_runner=base_runner_factory(commands, running_services=""),
+    )
+    payload = service.status_payload()
+
+    assert payload["owner_setup"]["headline"] in {"Start Quick Start", "Start the runtime"}
+    assert payload["owner_setup"]["steps"][0]["label"] == "Check this machine"
+    assert "autostart" in payload
 
 
 def test_spawn_background_uses_module_arguments(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

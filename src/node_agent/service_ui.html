@@ -4,12 +4,13 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="referrer" content="no-referrer">
-    <title>AUTONOMOUSc Edge Node Service</title>
+    <title>AUTONOMOUSc Local Node Service</title>
     <style>
       :root {
         color-scheme: light;
         --bg: #f6efe2;
-        --panel: rgba(255, 252, 246, 0.94);
+        --panel: rgba(255, 252, 246, 0.95);
+        --card: rgba(255, 255, 255, 0.5);
         --ink: #192228;
         --muted: #617077;
         --line: rgba(25, 34, 40, 0.1);
@@ -18,11 +19,13 @@
         --success: #256f4b;
         --warning: #9b6107;
         --danger: #a23629;
-        --radius: 24px;
         --shadow: 0 24px 64px rgba(62, 43, 20, 0.12);
+        --radius: 24px;
         font-family: "Segoe UI", sans-serif;
       }
+
       * { box-sizing: border-box; }
+
       body {
         margin: 0;
         min-height: 100vh;
@@ -33,46 +36,110 @@
           var(--bg);
         color: var(--ink);
       }
+
       main {
         width: min(1240px, calc(100vw - 28px));
         margin: 0 auto;
         padding: 28px 0 46px;
       }
-      .hero, .panel {
+
+      .hero,
+      .panel {
         background: var(--panel);
         border: 1px solid var(--line);
         border-radius: calc(var(--radius) + 4px);
         box-shadow: var(--shadow);
       }
+
       .hero {
         display: grid;
         gap: 14px;
         padding: 28px;
         margin-bottom: 22px;
       }
+
       .eyebrow {
         text-transform: uppercase;
         letter-spacing: 0.14em;
         color: var(--accent);
         font-weight: 700;
         font-size: 0.78rem;
+        margin: 0;
       }
+
       h1, h2, h3, p { margin: 0; }
+
       h1, h2, h3 { font-family: Georgia, serif; }
-      h1 { font-size: clamp(2rem, 4vw, 3.6rem); line-height: 0.98; max-width: 13ch; }
-      .lede, .supporting, .meta { color: var(--muted); line-height: 1.6; }
-      .layout { display: grid; gap: 20px; grid-template-columns: minmax(320px, 0.98fr) minmax(0, 1.4fr); align-items: start; }
-      .stack, .status-grid, .button-row, .dual { display: grid; gap: 14px; }
-      .panel { padding: 22px; }
-      .button-row { grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); }
-      .status-grid { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
-      .status-card, .claim-card, .callout, .log-shell {
+
+      h1 {
+        font-size: clamp(2rem, 4vw, 3.6rem);
+        line-height: 0.98;
+        max-width: 13ch;
+      }
+
+      .lede,
+      .supporting,
+      .meta {
+        color: var(--muted);
+        line-height: 1.65;
+      }
+
+      .hero-grid,
+      .layout,
+      .stack,
+      .status-grid,
+      .button-row,
+      .profile-grid,
+      .dual {
+        display: grid;
+        gap: 14px;
+      }
+
+      .hero-grid {
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      }
+
+      .layout {
+        grid-template-columns: minmax(340px, 0.96fr) minmax(0, 1.42fr);
+        align-items: start;
+      }
+
+      .panel {
+        padding: 22px;
+      }
+
+      .status-grid {
+        grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      }
+
+      .button-row {
+        grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      }
+
+      .profile-grid {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .step-chip,
+      .status-card,
+      .callout,
+      .claim-card,
+      .journey,
+      .log-shell {
         border: 1px solid var(--line);
         border-radius: 18px;
-        background: rgba(255, 255, 255, 0.42);
+        background: var(--card);
         padding: 16px;
       }
-      .status-card strong, .claim-card strong, .callout strong { display: block; margin-bottom: 6px; }
+
+      .step-chip strong,
+      .status-card strong,
+      .callout strong,
+      .claim-card strong {
+        display: block;
+        margin-bottom: 6px;
+      }
+
       .pill {
         display: inline-flex;
         align-items: center;
@@ -80,15 +147,31 @@
         padding: 7px 11px;
         border-radius: 999px;
         font-size: 0.86rem;
-        font-weight: 600;
+        font-weight: 700;
         background: rgba(25, 34, 40, 0.08);
       }
+
       .pill.success { color: var(--success); background: rgba(37, 111, 75, 0.12); }
       .pill.warning { color: var(--warning); background: rgba(155, 97, 7, 0.12); }
       .pill.danger { color: var(--danger); background: rgba(162, 54, 41, 0.12); }
-      label { display: grid; gap: 8px; font-size: 0.95rem; font-weight: 600; }
-      input, select, textarea, button { font: inherit; }
-      input, select, textarea {
+
+      label {
+        display: grid;
+        gap: 8px;
+        font-size: 0.95rem;
+        font-weight: 600;
+      }
+
+      input,
+      select,
+      textarea,
+      button {
+        font: inherit;
+      }
+
+      input,
+      select,
+      textarea {
         width: 100%;
         border: 1px solid rgba(25, 34, 40, 0.12);
         border-radius: 16px;
@@ -96,7 +179,12 @@
         background: rgba(255, 255, 255, 0.88);
         color: var(--ink);
       }
-      textarea { min-height: 84px; resize: vertical; }
+
+      textarea {
+        min-height: 84px;
+        resize: vertical;
+      }
+
       button {
         border: none;
         border-radius: 16px;
@@ -106,21 +194,95 @@
         font-weight: 700;
         cursor: pointer;
       }
+
       button.secondary {
         background: rgba(255, 255, 255, 0.54);
         color: var(--ink);
         border: 1px solid var(--line);
       }
-      button:disabled { opacity: 0.55; cursor: not-allowed; }
+
+      button:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+
+      .profile-option {
+        text-align: left;
+        background: rgba(255, 255, 255, 0.52);
+        color: var(--ink);
+        border: 1px solid var(--line);
+        min-height: 110px;
+      }
+
+      .profile-option.active {
+        background: var(--accent);
+        color: var(--accent-ink);
+        border-color: transparent;
+      }
+
+      .profile-option span {
+        display: block;
+        margin-top: 6px;
+        font-size: 0.88rem;
+        line-height: 1.45;
+        opacity: 0.88;
+      }
+
+      .journey-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: grid;
+        gap: 12px;
+      }
+
+      .journey-item {
+        border-left: 4px solid rgba(25, 34, 40, 0.12);
+        padding-left: 12px;
+      }
+
+      .journey-item.complete { border-left-color: var(--success); }
+      .journey-item.active { border-left-color: var(--accent); }
+      .journey-item.pending { border-left-color: rgba(25, 34, 40, 0.16); }
+
+      .checkbox {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-weight: 600;
+      }
+
+      .checkbox input {
+        width: 18px;
+        height: 18px;
+      }
+
       details {
         border: 1px solid var(--line);
         border-radius: 18px;
-        background: rgba(255, 255, 255, 0.34);
+        background: rgba(255, 255, 255, 0.36);
         padding: 14px 16px;
       }
-      details summary { cursor: pointer; font-weight: 700; }
-      .checkbox { display: flex; align-items: center; gap: 10px; font-weight: 600; }
-      .checkbox input { width: 18px; height: 18px; }
+
+      details summary {
+        cursor: pointer;
+        font-weight: 700;
+      }
+
+      .error-banner {
+        border: 1px solid rgba(162, 54, 41, 0.18);
+        border-radius: 18px;
+        padding: 14px 16px;
+        background: rgba(255, 242, 239, 0.9);
+        color: var(--danger);
+      }
+
+      .error-banner[hidden],
+      .claim-card[hidden],
+      .download-link[hidden] {
+        display: none;
+      }
+
       .log-shell pre {
         margin: 0;
         white-space: pre-wrap;
@@ -130,18 +292,16 @@
         line-height: 1.55;
         color: var(--muted);
       }
-      .error-banner {
-        border: 1px solid rgba(162, 54, 41, 0.18);
-        border-radius: 18px;
-        padding: 14px 16px;
-        background: rgba(255, 242, 239, 0.9);
-        color: var(--danger);
+
+      a {
+        color: var(--accent);
       }
-      .error-banner[hidden], .claim-card[hidden], .download-link[hidden] { display: none; }
-      a { color: var(--accent); }
-      @media (max-width: 960px) {
-        .layout { grid-template-columns: 1fr; }
-        .button-row { grid-auto-flow: row; }
+
+      @media (max-width: 980px) {
+        .layout,
+        .profile-grid {
+          grid-template-columns: 1fr;
+        }
       }
     </style>
   </head>
@@ -149,49 +309,100 @@
     <main>
       <section class="hero">
         <p class="eyebrow">AUTONOMOUSc Local Node Service</p>
-        <h1>One local UI for setup, runtime control, updates, and diagnostics.</h1>
-        <p class="lede">This host-side service keeps Docker in the background, manages the edge runtime for you, and provides a stable local control surface on this machine.</p>
+        <h1>One local app for Quick Start, runtime health, updates, and support.</h1>
+        <p class="lede">This is the owner view. Start with Quick Start, approve the machine once, and then use the same local app to keep the node healthy and online.</p>
+        <div class="hero-grid">
+          <div class="step-chip">
+            <strong>Quick Start</strong>
+            <p class="meta">Name the machine, keep the recommended profile, and let the service auto-tune the rest.</p>
+          </div>
+          <div class="step-chip">
+            <strong>Approval</strong>
+            <p class="meta">The local service opens a claim flow and waits for approval in the background.</p>
+          </div>
+          <div class="step-chip">
+            <strong>Healthy runtime</strong>
+            <p class="meta">Runtime status, updates, and recovery actions stay in one place.</p>
+          </div>
+          <div class="step-chip">
+            <strong>Support</strong>
+            <p class="meta">Create a diagnostics bundle without touching Docker commands or terminals.</p>
+          </div>
+        </div>
       </section>
 
       <section class="layout">
         <article class="panel stack">
           <div class="stack">
             <div>
-              <h2>Node Setup</h2>
-              <p class="supporting">Use this once for first-time registration, then come back here whenever you need to update settings or re-register the node.</p>
+              <h2>Quick Start</h2>
+              <p class="supporting">Use this for first-time setup or to retune the machine. Advanced settings are hidden by default so normal owners can stay on the happy path.</p>
             </div>
             <div id="error-banner" class="error-banner" hidden></div>
           </div>
 
           <form id="installer-form" class="stack">
-            <label>Node label<input id="node_label" placeholder="AUTONOMOUSc Nordic Node 01"></label>
-            <label>Region<input id="node_region" placeholder="eu-se-1"></label>
-            <label>Trust tier
-              <select id="trust_tier">
-                <option value="standard">Standard</option>
-                <option value="confidential">Confidential</option>
-                <option value="restricted">Restricted</option>
-              </select>
+            <input id="setup_profile" type="hidden" value="balanced">
+
+            <label>
+              Node name
+              <input id="node_label" placeholder="AUTONOMOUSc Edge Node">
             </label>
-            <label class="checkbox"><input id="restricted_capable" type="checkbox">Restricted workloads capable</label>
+
+            <div class="stack">
+              <div>
+                <h3>Performance profile</h3>
+                <p class="meta">The local service uses this to auto-tune concurrency and runtime limits.</p>
+              </div>
+              <div class="profile-grid">
+                <button class="profile-option" data-profile="quiet" type="button">
+                  Quiet
+                  <span>Lowest heat and noise, best for always-on background operation.</span>
+                </button>
+                <button class="profile-option" data-profile="balanced" type="button">
+                  Balanced
+                  <span>Recommended for most owners. Stable throughput with conservative tuning.</span>
+                </button>
+                <button class="profile-option" data-profile="performance" type="button">
+                  Performance
+                  <span>Higher throughput when you want the machine working harder.</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="callout">
+              <strong id="machine-summary">Checking local hardware...</strong>
+              <p id="profile-summary" class="supporting">The service will choose safe defaults for this machine.</p>
+            </div>
+
+            <div class="button-row">
+              <button id="setup-button" type="submit">Run Quick Start</button>
+              <button id="refresh-button" type="button" class="secondary">Refresh status</button>
+            </div>
+
             <details>
-              <summary>Advanced configuration</summary>
+              <summary>Advanced settings</summary>
               <div class="stack" style="margin-top: 14px;">
                 <label>Control plane URL<input id="edge_control_url" placeholder="https://edge.autonomousc.com"></label>
+                <label>Region<input id="node_region" placeholder="eu-se-1"></label>
+                <label>Trust tier
+                  <select id="trust_tier">
+                    <option value="standard">Standard</option>
+                    <option value="confidential">Confidential</option>
+                    <option value="restricted">Restricted</option>
+                  </select>
+                </label>
+                <label class="checkbox"><input id="restricted_capable" type="checkbox">Restricted workloads capable</label>
                 <label>vLLM startup model<input id="vllm_model" placeholder="meta-llama/Llama-3.1-8B-Instruct"></label>
                 <label>Supported models<textarea id="supported_models"></textarea></label>
                 <label>Max concurrent assignments<input id="max_concurrent_assignments" type="number" min="1" max="16"></label>
               </div>
             </details>
-            <div class="button-row">
-              <button id="setup-button" type="submit">Run guided setup</button>
-              <button id="refresh-button" type="button" class="secondary">Refresh status</button>
-            </div>
           </form>
 
           <div id="claim-card" class="claim-card" hidden>
-            <strong>Registration approval required</strong>
-            <p class="supporting">Open the claim page, sign in or create your operator account, then approve this machine. The local service will finish the rest automatically.</p>
+            <strong>Approve this node</strong>
+            <p class="supporting">Open the approval page, sign in or create your operator account, then approve this machine. The service will finish the rest automatically.</p>
             <p class="meta"><strong>Claim code:</strong> <span id="claim-code"></span></p>
             <p class="meta"><strong>Expires:</strong> <span id="claim-expiry"></span></p>
             <div class="button-row">
@@ -200,8 +411,8 @@
           </div>
 
           <div class="callout">
-            <strong>Local service controls</strong>
-            <p class="supporting">These controls replace direct Docker Compose usage for normal operators.</p>
+            <strong>Runtime controls</strong>
+            <p class="supporting">You should not need Docker Compose for normal operation.</p>
             <div class="button-row">
               <button id="start-runtime" type="button">Start runtime</button>
               <button id="stop-runtime" type="button" class="secondary">Stop runtime</button>
@@ -211,16 +422,31 @@
         </article>
 
         <article class="panel stack">
-          <div>
-            <h2>Service Status</h2>
-            <p id="status-message" class="supporting">Loading node service state...</p>
+          <div class="callout">
+            <strong id="next-headline">Loading node status...</strong>
+            <p id="next-detail" class="supporting">Checking this machine and preparing the next action.</p>
+          </div>
+
+          <div class="journey">
+            <h3>Owner journey</h3>
+            <ul id="journey-list" class="journey-list"></ul>
           </div>
 
           <div class="status-grid">
             <div class="status-card">
-              <strong>Runtime engine</strong>
+              <strong>Docker</strong>
               <span id="engine-pill" class="pill">Checking</span>
               <p id="engine-copy" class="meta"></p>
+            </div>
+            <div class="status-card">
+              <strong>GPU</strong>
+              <span id="gpu-pill" class="pill">Checking</span>
+              <p id="gpu-copy" class="meta"></p>
+            </div>
+            <div class="status-card">
+              <strong>Disk</strong>
+              <span id="disk-pill" class="pill">Checking</span>
+              <p id="disk-copy" class="meta"></p>
             </div>
             <div class="status-card">
               <strong>Registration</strong>
@@ -237,9 +463,23 @@
               <span id="update-pill" class="pill">Checking</span>
               <p id="update-copy" class="meta"></p>
             </div>
+            <div class="status-card">
+              <strong>Launch on sign-in</strong>
+              <span id="autostart-pill" class="pill">Checking</span>
+              <p id="autostart-copy" class="meta"></p>
+            </div>
           </div>
 
           <div class="dual">
+            <div class="callout">
+              <strong>Start automatically</strong>
+              <p class="supporting">Quick Start enables this for you when possible so the local node service comes back when you sign in.</p>
+              <div class="button-row">
+                <button id="enable-autostart" type="button">Enable</button>
+                <button id="disable-autostart" type="button" class="secondary">Disable</button>
+              </div>
+            </div>
+
             <div class="callout">
               <strong>Update policy</strong>
               <p class="supporting">The service can periodically fetch signed runtime releases and apply them for you.</p>
@@ -281,6 +521,8 @@
       const claimCard = document.getElementById("claim-card");
       const openClaimButton = document.getElementById("open-claim");
       const downloadLink = document.getElementById("download-link");
+      const profileInput = document.getElementById("setup_profile");
+      const profileButtons = Array.from(document.querySelectorAll(".profile-option"));
       let formHydrated = false;
       let claimUrl = "";
 
@@ -305,8 +547,17 @@
         return "danger";
       }
 
+      function selectProfile(profile) {
+        profileInput.value = profile;
+        profileButtons.forEach((button) => {
+          button.classList.toggle("active", button.dataset.profile === profile);
+        });
+      }
+
       function setupPayload() {
         return {
+          setup_mode: "quickstart",
+          setup_profile: profileInput.value,
           edge_control_url: document.getElementById("edge_control_url").value.trim(),
           node_label: document.getElementById("node_label").value.trim(),
           node_region: document.getElementById("node_region").value.trim(),
@@ -328,6 +579,7 @@
           document.getElementById("vllm_model").value = config.vllm_model || "";
           document.getElementById("supported_models").value = config.supported_models || "";
           document.getElementById("max_concurrent_assignments").value = config.max_concurrent_assignments || "";
+          selectProfile(config.setup_profile || config.recommended_setup_profile || "balanced");
           formHydrated = true;
         }
         if (updates) {
@@ -336,31 +588,69 @@
         }
       }
 
+      function renderJourney(ownerSetup) {
+        const journey = document.getElementById("journey-list");
+        const steps = ownerSetup?.steps || [];
+        journey.innerHTML = "";
+        if (!steps.length) {
+          journey.innerHTML = "<li class='journey-item pending'><strong>Preparing</strong><div class='meta'>Waiting for node status.</div></li>";
+          return;
+        }
+        steps.forEach((step) => {
+          const item = document.createElement("li");
+          item.className = `journey-item ${step.status || "pending"}`;
+          item.innerHTML = `<strong>${step.label || "Step"}</strong><div class="meta">${step.detail || ""}</div>`;
+          journey.appendChild(item);
+        });
+      }
+
       function render(payload) {
         const runtime = payload.runtime || {};
         const installer = payload.installer || {};
         const installerState = installer.state || {};
-        const preflight = runtime.preflight || {};
+        const preflight = installer.preflight || runtime.preflight || {};
+        const config = installer.config || {};
         const updates = payload.updates || {};
         const diagnostics = payload.diagnostics || {};
+        const ownerSetup = payload.owner_setup || installer.owner_setup || {};
+        const autostart = payload.autostart || installer.autostart || {};
         const claim = installerState.claim || null;
+        const gpu = preflight.gpu || {};
+        const disk = preflight.disk || {};
+        const runningServices = (preflight.running_services || []).join(", ") || "No services detected yet.";
 
-        document.getElementById("status-message").textContent = runtime.message || "Local node service is ready.";
-        document.getElementById("service-logs").textContent = (payload.service?.logs || []).join("\\n") || "Waiting for service events...";
-        document.getElementById("installer-logs").textContent = (installerState.logs || []).join("\\n") || "Waiting for installer events...";
+        document.getElementById("next-headline").textContent = ownerSetup.headline || runtime.message || "Local node service is ready.";
+        document.getElementById("next-detail").textContent = ownerSetup.detail || runtime.message || "Use Quick Start to bring this machine online.";
+        document.getElementById("machine-summary").textContent =
+          gpu.detected ? `${gpu.name} detected with ${gpu.memory_gb} GB VRAM` : "GPU detection is optional for Quick Start";
+        document.getElementById("profile-summary").textContent =
+          ownerSetup.profile_summary || config.profile_summary || "The local service will auto-tune this machine for the selected profile.";
+        document.getElementById("service-logs").textContent = (payload.service?.logs || []).join("\n") || "Waiting for service events...";
+        document.getElementById("installer-logs").textContent = (installerState.logs || []).join("\n") || "Waiting for installer events...";
+        renderJourney(ownerSetup);
 
         const engineReady = Boolean(preflight.docker_cli && preflight.docker_compose && preflight.docker_daemon);
         setPill(document.getElementById("engine-pill"), engineReady ? "Ready" : "Needs attention", tone(engineReady, Boolean(preflight.docker_cli || preflight.docker_compose)));
         document.getElementById("engine-copy").textContent =
-          preflight.docker_error || (engineReady ? "The local runtime engine is available to the service." : "Install Docker Desktop or start Docker before continuing.");
+          preflight.docker_error || (engineReady ? `Compose is available. Running services: ${runningServices}` : "Install Docker Desktop or start Docker before continuing.");
+
+        const gpuReady = Boolean(gpu.detected);
+        setPill(document.getElementById("gpu-pill"), gpuReady ? "Detected" : "Optional", tone(gpuReady, true));
+        document.getElementById("gpu-copy").textContent =
+          gpuReady ? `${gpu.name} with ${gpu.memory_gb} GB VRAM.` : "GPU detection is unavailable. Quick Start will still use safe defaults.";
+
+        const diskReady = Boolean(disk.ok);
+        setPill(document.getElementById("disk-pill"), diskReady ? "Ready" : "Low space", tone(diskReady, true));
+        document.getElementById("disk-copy").textContent =
+          disk.total_gb ? `${disk.free_gb} GB free of ${disk.total_gb} GB total.` : "Disk space has not been measured yet.";
 
         const registrationReady = Boolean(runtime.credentials_present);
         setPill(document.getElementById("claim-pill"), registrationReady ? "Registered" : (claim ? claim.status : "Pending"), tone(registrationReady, true));
         document.getElementById("claim-copy").textContent =
-          registrationReady ? "Credentials are stored locally for this node." : (claim ? `Claim code ${claim.claim_code}. Approval is still pending.` : "Run guided setup to create a claim and register this node.");
+          registrationReady ? "Credentials are stored locally for this machine." : (claim ? `Claim code ${claim.claim_code}. Approval is still pending.` : "Run Quick Start to create a claim and register this node.");
 
         const runtimeOk = runtime.stage === "running";
-        setPill(document.getElementById("runtime-pill"), runtime.stage || "idle", tone(runtimeOk, runtime.stage === "ready" || runtime.stage === "registration_required"));
+        setPill(document.getElementById("runtime-pill"), runtimeOk ? "Running" : (runtime.stage || "Idle"), tone(runtimeOk, runtime.stage === "ready" || runtime.stage === "registration_required"));
         document.getElementById("runtime-copy").textContent =
           runtimeOk ? "The node agent and supporting services are running." : (runtime.message || "Runtime is idle.");
 
@@ -368,6 +658,12 @@
         setPill(document.getElementById("update-pill"), updates.auto_update_enabled ? "Enabled" : "Manual", tone(updateHealthy, true));
         document.getElementById("update-copy").textContent =
           updates.last_error || updates.last_result || "No update checks have run yet.";
+
+        setPill(document.getElementById("autostart-pill"), autostart.label || "Unavailable", tone(Boolean(autostart.enabled), Boolean(autostart.supported)));
+        document.getElementById("autostart-copy").textContent =
+          autostart.detail || "Automatic start status is unavailable.";
+        document.getElementById("enable-autostart").disabled = !autostart.supported || Boolean(autostart.enabled);
+        document.getElementById("disable-autostart").disabled = !autostart.supported || !autostart.enabled;
 
         if (claim && claim.approval_url) {
           claimCard.hidden = false;
@@ -394,7 +690,12 @@
           downloadLink.removeAttribute("href");
         }
 
-        hydrateForm(installer.config, updates);
+        if (!installerState.busy && config.setup_profile) {
+          selectProfile(config.setup_profile);
+        }
+        document.getElementById("setup-button").disabled = Boolean(installerState.busy);
+        document.getElementById("setup-button").textContent = installerState.busy ? "Quick Start is running..." : "Run Quick Start";
+        hydrateForm(config, updates);
       }
 
       async function postJson(path, payload = {}) {
@@ -432,6 +733,12 @@
         }
       }
 
+      profileButtons.forEach((button) => {
+        button.addEventListener("click", () => {
+          selectProfile(button.dataset.profile || "balanced");
+        });
+      });
+
       setupForm.addEventListener("submit", async (event) => {
         event.preventDefault();
         await runAction(() => postJson("/api/install", setupPayload()));
@@ -449,6 +756,8 @@
       });
       document.getElementById("check-updates").addEventListener("click", async () => runAction(() => postJson("/api/updates/check", { apply: false })));
       document.getElementById("apply-updates").addEventListener("click", async () => runAction(() => postJson("/api/updates/check", { apply: true })));
+      document.getElementById("enable-autostart").addEventListener("click", async () => runAction(() => postJson("/api/autostart/enable")));
+      document.getElementById("disable-autostart").addEventListener("click", async () => runAction(() => postJson("/api/autostart/disable")));
       document.getElementById("create-diagnostics").addEventListener("click", async () => runAction(() => postJson("/api/diagnostics")));
       openClaimButton.addEventListener("click", () => {
         if (claimUrl) {

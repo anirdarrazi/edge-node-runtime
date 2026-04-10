@@ -66,6 +66,34 @@ def test_current_config_prefills_detected_gpu(tmp_path: Path, monkeypatch: pytes
     assert config["gpu_name"] == "RTX 4090"
     assert config["gpu_memory_gb"] == "24.0"
     assert config["max_concurrent_assignments"] == "2"
+    assert config["setup_profile"] == "balanced"
+    assert "everyday setting" in config["profile_summary"]
+
+
+def test_build_env_uses_quickstart_profile_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    write_example_env(tmp_path)
+    monkeypatch.setattr(installer_module.shutil, "which", lambda name: "nvidia-smi" if name == "nvidia-smi" else None)
+
+    def runner(args: list[str], _cwd: Path) -> subprocess.CompletedProcess[str]:
+        if args[0] == "nvidia-smi":
+            return completed(args, stdout="RTX 4090, 24564\n")
+        raise AssertionError(f"Unexpected command: {args}")
+
+    installer = installer_module.GuidedInstaller(runtime_dir=tmp_path, command_runner=runner)
+    env_values = installer.build_env(
+        {
+            "setup_mode": "quickstart",
+            "setup_profile": "performance",
+            "node_label": "",
+            "max_concurrent_assignments": "",
+        }
+    )
+
+    assert env_values["SETUP_PROFILE"] == "performance"
+    assert env_values["MAX_CONCURRENT_ASSIGNMENTS"] == "3"
+    assert env_values["THERMAL_HEADROOM"] == "0.92"
+    assert env_values["MAX_BATCH_TOKENS"] == "65000"
+    assert env_values["NODE_LABEL"] == "AUTONOMOUSc RTX 4090 Node"
 
 
 def test_collect_preflight_reports_missing_docker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -78,6 +106,8 @@ def test_collect_preflight_reports_missing_docker(tmp_path: Path, monkeypatch: p
     assert preflight["docker_cli"] is False
     assert preflight["docker_daemon"] is False
     assert "Docker is not installed" in preflight["docker_error"]
+    assert preflight["disk"]["total_gb"] > 0
+    assert preflight["blockers"]
 
 
 def test_run_install_creates_claim_and_starts_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -132,10 +162,34 @@ def test_run_install_creates_claim_and_starts_runtime(tmp_path: Path, monkeypatc
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps({"node_id": node_id, "node_key": node_key}), encoding="utf-8")
 
+    class FakeAutoStartManager:
+        def __init__(self) -> None:
+            self.ensure_calls = 0
+
+        def ensure_enabled(self):
+            self.ensure_calls += 1
+            return {
+                "supported": True,
+                "enabled": True,
+                "label": "Enabled",
+                "detail": "Automatic start is enabled.",
+            }
+
+        def status(self):
+            return {
+                "supported": True,
+                "enabled": True,
+                "label": "Enabled",
+                "detail": "Automatic start is enabled.",
+            }
+
+    autostart = FakeAutoStartManager()
+
     installer = installer_module.GuidedInstaller(
         runtime_dir=runtime_dir,
         command_runner=runner,
         control_client_factory=FakeControlClient,
+        autostart_manager=autostart,
         sleep=lambda _seconds: None,
     )
     installer.wait_for_vllm = lambda timeout_seconds=240.0: None  # type: ignore[method-assign]
@@ -158,6 +212,8 @@ def test_run_install_creates_claim_and_starts_runtime(tmp_path: Path, monkeypatc
     assert ["docker", "compose", "up", "-d", "vllm"] in commands
     assert ["docker", "compose", "up", "-d", "node-agent", "vector"] in commands
     assert "Nordic Heat Compute" in (runtime_dir / ".env").read_text(encoding="utf-8")
+    assert "SETUP_PROFILE=balanced" in (runtime_dir / ".env").read_text(encoding="utf-8")
+    assert autostart.ensure_calls == 1
 
 
 def test_run_install_skips_claim_when_credentials_exist(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -243,3 +299,14 @@ def test_installer_bootstrap_exchanges_query_token_for_cookie_session(
         server.shutdown()
         thread.join(timeout=5.0)
         server.server_close()
+
+
+def test_status_payload_includes_owner_setup_guidance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    write_example_env(tmp_path)
+    monkeypatch.setattr(installer_module.shutil, "which", lambda _name: None)
+
+    installer = installer_module.GuidedInstaller(runtime_dir=tmp_path)
+    payload = installer.status_payload()
+
+    assert payload["owner_setup"]["headline"] == "Start Docker Desktop"
+    assert payload["owner_setup"]["steps"][0]["label"] == "Check this machine"

@@ -20,6 +20,7 @@ from urllib.parse import quote, unquote, urlparse
 
 import httpx
 
+from .autostart import AutoStartManager
 from .installer import CommandRunner, GuidedInstaller, parse_env_file, run_command
 from .local_api_security import (
     ADMIN_TOKEN_HEADER,
@@ -99,6 +100,7 @@ class NodeRuntimeService:
         runtime_dir: Path | None = None,
         *,
         command_runner: CommandRunner = run_command,
+        autostart_manager: AutoStartManager | None = None,
     ) -> None:
         self.runtime_dir = ensure_runtime_bundle(runtime_dir or resolve_runtime_dir())
         self.data_dir = self.runtime_dir / "data"
@@ -109,7 +111,15 @@ class NodeRuntimeService:
         self.state_path = self.service_dir / "service-state.json"
         self.release_env_path = self.service_dir / "release.env"
         self.command_runner = command_runner
-        self.guided_installer = GuidedInstaller(runtime_dir=self.runtime_dir, command_runner=command_runner)
+        self.autostart_manager = autostart_manager or AutoStartManager(
+            self.runtime_dir,
+            command_runner=command_runner,
+        )
+        self.guided_installer = GuidedInstaller(
+            runtime_dir=self.runtime_dir,
+            command_runner=command_runner,
+            autostart_manager=self.autostart_manager,
+        )
         self.lock = threading.Lock()
         self.shutdown_event = threading.Event()
         self.logs: list[str] = []
@@ -282,6 +292,8 @@ class NodeRuntimeService:
             },
             "runtime": self.runtime_status(preflight=preflight, installer_state=installer_state),
             "installer": installer_snapshot,
+            "owner_setup": installer_snapshot.get("owner_setup", {}),
+            "autostart": self.autostart_manager.status(),
             "updates": asdict(self.update_state),
             "diagnostics": asdict(self.diagnostics_state),
         }
@@ -500,6 +512,16 @@ class NodeRuntimeService:
     def open_ui(self) -> None:
         open_browser(self.host, self.port, self.admin_token)
 
+    def enable_autostart(self) -> dict[str, Any]:
+        status = self.autostart_manager.enable()
+        self.log(str(status.get("detail") or "Automatic start is enabled."))
+        return self.status_payload()
+
+    def disable_autostart(self) -> dict[str, Any]:
+        status = self.autostart_manager.disable()
+        self.log(str(status.get("detail") or "Automatic start is disabled."))
+        return self.status_payload()
+
     def auto_update_loop(self) -> None:
         while not self.shutdown_event.is_set():
             try:
@@ -713,6 +735,12 @@ def make_handler(service: NodeRuntimeService, server_ref: dict[str, ThreadingHTT
                             interval_hours=int(payload.get("interval_hours", 24)),
                         )
                     )
+                    return
+                if path == "/api/autostart/enable":
+                    self._send_json(service.enable_autostart())
+                    return
+                if path == "/api/autostart/disable":
+                    self._send_json(service.disable_autostart())
                     return
                 if path == "/api/diagnostics":
                     self._send_json(service.create_diagnostics_bundle())
