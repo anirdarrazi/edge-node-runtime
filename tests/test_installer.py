@@ -196,3 +196,8 @@ def test_run_install_skips_claim_when_credentials_exist(tmp_path: Path, monkeypa
 
     assert installer.state.stage == "running"
     assert ["docker", "compose", "up", "-d", "vllm", "node-agent", "vector"] in commands
+
+
+def test_installer_rejects_remote_bind_without_allow_remote() -> None:
+    with pytest.raises(ValueError, match="non-loopback"):
+        installer_module.require_secure_bind_host("0.0.0.0", False)

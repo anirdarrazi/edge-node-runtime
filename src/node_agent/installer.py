@@ -12,12 +12,21 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 
 from .config import NodeAgentSettings
 from .control_plane import EdgeControlClient
+from .local_api_security import (
+    ADMIN_TOKEN_HEADER,
+    browser_access_host,
+    generate_admin_token,
+    origin_matches_host,
+    request_query_param,
+    require_secure_bind_host,
+    token_matches,
+)
 from .runtime_layout import ensure_runtime_bundle, resolve_runtime_dir, service_access_host
 
 
@@ -464,7 +473,7 @@ class GuidedInstaller:
             self.set_error(str(error))
 
 
-def make_handler(installer: GuidedInstaller) -> type[BaseHTTPRequestHandler]:
+def make_handler(installer: GuidedInstaller, admin_token: str) -> type[BaseHTTPRequestHandler]:
     class InstallerHandler(BaseHTTPRequestHandler):
         def log_message(self, _format: str, *_args: Any) -> None:  # pragma: no cover
             return
@@ -477,23 +486,50 @@ def make_handler(installer: GuidedInstaller) -> type[BaseHTTPRequestHandler]:
             self.end_headers()
             self.wfile.write(body)
 
+        def _send_html(self, body: bytes) -> None:
+            self.send_response(HTTPStatus.OK.value)
+            self.send_header("content-type", "text/html; charset=utf-8")
+            self.send_header("content-length", str(len(body)))
+            self.send_header("cache-control", "no-store")
+            self.send_header("referrer-policy", "no-referrer")
+            self.send_header("x-frame-options", "DENY")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _authorized(self, *, allow_query: bool) -> bool:
+            provided = self.headers.get(ADMIN_TOKEN_HEADER)
+            if not provided and allow_query:
+                provided = request_query_param(self.path, "token")
+            return token_matches(provided.strip() if isinstance(provided, str) else None, admin_token)
+
+        def _origin_allowed(self) -> bool:
+            return origin_matches_host(self.headers)
+
         def do_GET(self) -> None:  # pragma: no cover
             path = urlparse(self.path).path
             if path == "/":
+                if not self._authorized(allow_query=True):
+                    self._send_json({"error": {"code": "unauthorized", "message": "A local admin token is required."}}, HTTPStatus.UNAUTHORIZED)
+                    return
                 body = installer_html().encode("utf-8")
-                self.send_response(HTTPStatus.OK.value)
-                self.send_header("content-type", "text/html; charset=utf-8")
-                self.send_header("content-length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+                self._send_html(body)
                 return
             if path == "/api/status":
+                if not self._authorized(allow_query=True):
+                    self._send_json({"error": {"code": "unauthorized", "message": "A local admin token is required."}}, HTTPStatus.UNAUTHORIZED)
+                    return
                 self._send_json(installer.status_payload())
                 return
             self._send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
 
         def do_POST(self) -> None:  # pragma: no cover
             path = urlparse(self.path).path
+            if not self._authorized(allow_query=False):
+                self._send_json({"error": {"code": "unauthorized", "message": "A local admin token is required."}}, HTTPStatus.UNAUTHORIZED)
+                return
+            if not self._origin_allowed():
+                self._send_json({"error": {"code": "forbidden", "message": "Cross-origin requests are not allowed."}}, HTTPStatus.FORBIDDEN)
+                return
             if path != "/api/install":
                 self._send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
                 return
@@ -515,12 +551,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Launch the AUTONOMOUSc edge node guided installer.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--allow-remote", action="store_true")
     args = parser.parse_args(argv)
 
+    require_secure_bind_host(args.host, bool(args.allow_remote))
     installer = GuidedInstaller()
-    server = ThreadingHTTPServer((args.host, args.port), make_handler(installer))
-    local_host = "127.0.0.1" if args.host == "0.0.0.0" else args.host
-    url = f"http://{local_host}:{args.port}"
+    admin_token = generate_admin_token()
+    server = ThreadingHTTPServer((args.host, args.port), make_handler(installer, admin_token))
+    url = f"http://{browser_access_host(args.host)}:{args.port}/?token={quote(admin_token)}"
 
     print(f"AUTONOMOUSc guided installer is available at {url}")
     try:

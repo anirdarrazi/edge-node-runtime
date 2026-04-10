@@ -16,11 +16,21 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 import httpx
 
 from .installer import CommandRunner, GuidedInstaller, parse_env_file, run_command
+from .local_api_security import (
+    ADMIN_TOKEN_HEADER,
+    browser_access_host,
+    generate_admin_token,
+    origin_matches_host,
+    request_query_param,
+    require_secure_bind_host,
+    tighten_private_path,
+    token_matches,
+)
 from .release_manifest import (
     RELEASE_ENV_CHANNEL_KEY,
     RELEASE_ENV_VAR_BY_SERVICE,
@@ -90,6 +100,8 @@ class NodeRuntimeService:
         self.logs: list[str] = []
         self.update_state = UpdateState()
         self.diagnostics_state = DiagnosticsState()
+        self.admin_token = generate_admin_token()
+        self.allow_remote = False
         self.host = "127.0.0.1"
         self.port = 8765
         self.ensure_dirs()
@@ -98,6 +110,7 @@ class NodeRuntimeService:
     def ensure_dirs(self) -> None:
         for path in (self.data_dir, self.service_dir, self.diagnostics_dir):
             path.mkdir(parents=True, exist_ok=True)
+            tighten_private_path(path, directory=True)
 
     def load_state(self) -> None:
         if not self.state_path.exists():
@@ -115,6 +128,7 @@ class NodeRuntimeService:
             "diagnostics": asdict(self.diagnostics_state),
         }
         self.state_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        tighten_private_path(self.state_path)
 
     def log(self, message: str) -> None:
         with self.lock:
@@ -501,9 +515,20 @@ class NodeRuntimeService:
     def write_meta(self) -> None:
         self.pid_path.write_text(str(os.getpid()), encoding="utf-8")
         self.meta_path.write_text(
-            json.dumps({"pid": os.getpid(), "host": self.host, "port": self.port}, indent=2),
+            json.dumps(
+                {
+                    "pid": os.getpid(),
+                    "host": self.host,
+                    "port": self.port,
+                    "admin_token": self.admin_token,
+                    "allow_remote": self.allow_remote,
+                },
+                indent=2,
+            ),
             encoding="utf-8",
         )
+        tighten_private_path(self.pid_path)
+        tighten_private_path(self.meta_path)
 
     def clear_meta(self) -> None:
         for path in (self.pid_path, self.meta_path):
@@ -532,6 +557,16 @@ def make_handler(service: NodeRuntimeService, server_ref: dict[str, ThreadingHTT
             self.end_headers()
             self.wfile.write(body)
 
+        def _send_html(self, body: bytes, *, status: HTTPStatus = HTTPStatus.OK) -> None:
+            self.send_response(status.value)
+            self.send_header("content-type", "text/html; charset=utf-8")
+            self.send_header("content-length", str(len(body)))
+            self.send_header("cache-control", "no-store")
+            self.send_header("referrer-policy", "no-referrer")
+            self.send_header("x-frame-options", "DENY")
+            self.end_headers()
+            self.wfile.write(body)
+
         def _read_json(self) -> dict[str, Any]:
             content_length = int(self.headers.get("content-length", "0"))
             raw = self.rfile.read(content_length) if content_length else b"{}"
@@ -539,23 +574,53 @@ def make_handler(service: NodeRuntimeService, server_ref: dict[str, ThreadingHTT
                 return {}
             return json.loads(raw.decode("utf-8"))
 
+        def _request_token(self, *, allow_query: bool) -> str | None:
+            token = self.headers.get(ADMIN_TOKEN_HEADER)
+            if token:
+                return token.strip()
+            if not allow_query:
+                return None
+            return request_query_param(self.path, "token")
+
+        def _authorized(self, *, allow_query: bool) -> bool:
+            return token_matches(self._request_token(allow_query=allow_query), service.admin_token)
+
+        def _origin_allowed(self) -> bool:
+            return origin_matches_host(self.headers)
+
+        def _reject(self, status: HTTPStatus, code: str, message: str) -> None:
+            self._send_json(
+                {
+                    "error": {
+                        "code": code,
+                        "message": message,
+                    }
+                },
+                status,
+            )
+
         def do_GET(self) -> None:  # pragma: no cover
             path = urlparse(self.path).path
             if path == "/":
+                if not self._authorized(allow_query=True):
+                    self._reject(HTTPStatus.UNAUTHORIZED, "unauthorized", "A local admin token is required.")
+                    return
                 body = service_html().encode("utf-8")
-                self.send_response(HTTPStatus.OK.value)
-                self.send_header("content-type", "text/html; charset=utf-8")
-                self.send_header("content-length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+                self._send_html(body)
                 return
             if path == "/api/healthz":
                 self._send_json({"ok": True, "service": "node-runtime"})
                 return
             if path == "/api/status":
+                if not self._authorized(allow_query=True):
+                    self._reject(HTTPStatus.UNAUTHORIZED, "unauthorized", "A local admin token is required.")
+                    return
                 self._send_json(service.status_payload())
                 return
             if path.startswith("/downloads/"):
+                if not self._authorized(allow_query=True):
+                    self._reject(HTTPStatus.UNAUTHORIZED, "unauthorized", "A local admin token is required.")
+                    return
                 requested = unquote(path.removeprefix("/downloads/"))
                 target = (service.diagnostics_dir / requested).resolve()
                 if not str(target).startswith(str(service.diagnostics_dir.resolve())) or not target.exists():
@@ -573,6 +638,12 @@ def make_handler(service: NodeRuntimeService, server_ref: dict[str, ThreadingHTT
 
         def do_POST(self) -> None:  # pragma: no cover
             path = urlparse(self.path).path
+            if not self._authorized(allow_query=False):
+                self._reject(HTTPStatus.UNAUTHORIZED, "unauthorized", "A local admin token is required.")
+                return
+            if not self._origin_allowed():
+                self._reject(HTTPStatus.FORBIDDEN, "forbidden", "Cross-origin requests are not allowed.")
+                return
             try:
                 if path == "/api/install":
                     payload = self._read_json()
@@ -630,8 +701,10 @@ def make_handler(service: NodeRuntimeService, server_ref: dict[str, ThreadingHTT
     return ServiceHandler
 
 
-def spawn_background(runtime_dir: Path, host: str, port: int) -> None:
+def spawn_background(runtime_dir: Path, host: str, port: int, allow_remote: bool = False) -> None:
     args = [sys.executable, "-m", "node_agent.service", "run", "--host", host, "--port", str(port)]
+    if allow_remote:
+        args.append("--allow-remote")
     kwargs: dict[str, Any] = {
         "cwd": runtime_dir,
         "stdin": subprocess.DEVNULL,
@@ -669,8 +742,11 @@ def wait_for_service(host: str, port: int, timeout_seconds: float = 20.0) -> Non
     raise RuntimeError("The node runtime service did not become ready in time.")
 
 
-def open_browser(host: str, port: int) -> None:
-    webbrowser.open(f"http://{host}:{port}", new=2)
+def open_browser(host: str, port: int, admin_token: str | None = None) -> None:
+    url = f"http://{browser_access_host(host)}:{port}"
+    if admin_token:
+        url = f"{url}/?token={quote(admin_token)}"
+    webbrowser.open(url, new=2)
 
 
 def clear_service_meta(runtime_dir: Path) -> None:
@@ -681,8 +757,10 @@ def clear_service_meta(runtime_dir: Path) -> None:
             path.unlink()
 
 
-def command_run(host: str, port: int) -> int:
+def command_run(host: str, port: int, allow_remote: bool = False) -> int:
+    require_secure_bind_host(host, allow_remote)
     service = NodeRuntimeService()
+    service.allow_remote = allow_remote
     service.host = host
     service.port = port
     service.write_meta()
@@ -716,23 +794,26 @@ def command_run(host: str, port: int) -> int:
     return 0
 
 
-def command_start(runtime_dir: Path, host: str, port: int, open_ui_flag: bool) -> int:
+def command_start(runtime_dir: Path, host: str, port: int, open_ui_flag: bool, allow_remote: bool = False) -> int:
+    require_secure_bind_host(host, allow_remote)
     meta = load_meta(runtime_dir)
     if meta:
         existing_host = str(meta.get("host", host))
         existing_port = int(meta.get("port", port))
+        existing_token = meta.get("admin_token")
         try:
             wait_for_service(existing_host, existing_port, timeout_seconds=2.0)
             if open_ui_flag:
-                open_browser(existing_host, existing_port)
+                open_browser(existing_host, existing_port, str(existing_token) if existing_token else None)
             return 0
         except RuntimeError:
             pass
 
-    spawn_background(runtime_dir, host, port)
+    spawn_background(runtime_dir, host, port, allow_remote=allow_remote)
     wait_for_service(host, port)
     if open_ui_flag:
-        open_browser(host, port)
+        meta = load_meta(runtime_dir)
+        open_browser(host, port, str(meta.get("admin_token")) if meta and meta.get("admin_token") else None)
     return 0
 
 
@@ -741,8 +822,13 @@ def command_stop(runtime_dir: Path) -> int:
     if meta:
         host = str(meta.get("host", "127.0.0.1"))
         port = int(meta.get("port", 8765))
+        admin_token = str(meta.get("admin_token", "") or "")
         try:
-            httpx.post(f"http://{host}:{port}/api/shutdown", timeout=3.0)
+            httpx.post(
+                f"http://{host}:{port}/api/shutdown",
+                timeout=3.0,
+                headers={ADMIN_TOKEN_HEADER: admin_token} if admin_token else None,
+            )
             return 0
         except httpx.HTTPError:
             pass
@@ -764,8 +850,10 @@ def command_status(runtime_dir: Path) -> int:
         return 0
     host = str(meta.get("host", "127.0.0.1"))
     port = int(meta.get("port", 8765))
+    admin_token = str(meta.get("admin_token", "") or "")
+    headers = {ADMIN_TOKEN_HEADER: admin_token} if admin_token else None
     try:
-        response = httpx.get(f"http://{host}:{port}/api/status", timeout=15.0)
+        response = httpx.get(f"http://{host}:{port}/api/status", timeout=15.0, headers=headers)
         payload = response.json()
         print(json.dumps(payload["runtime"], indent=2))
     except httpx.HTTPError:
@@ -790,11 +878,13 @@ def main(argv: list[str] | None = None) -> int:
     run_parser = subparsers.add_parser("run", help="Run the node runtime service in the foreground.")
     run_parser.add_argument("--host", default="127.0.0.1")
     run_parser.add_argument("--port", type=int, default=8765)
+    run_parser.add_argument("--allow-remote", action="store_true")
 
     start_parser = subparsers.add_parser("start", help="Start the node runtime service in the background.")
     start_parser.add_argument("--host", default="127.0.0.1")
     start_parser.add_argument("--port", type=int, default=8765)
     start_parser.add_argument("--open", action="store_true")
+    start_parser.add_argument("--allow-remote", action="store_true")
 
     subparsers.add_parser("stop", help="Stop the node runtime service.")
     subparsers.add_parser("status", help="Print the current runtime status.")
@@ -808,14 +898,22 @@ def main(argv: list[str] | None = None) -> int:
     runtime_dir = ensure_runtime_bundle(resolve_runtime_dir())
 
     if command == "run":
-        return command_run(args.host, args.port)
+        return command_run(args.host, args.port, allow_remote=bool(args.allow_remote))
     if command == "start":
-        return command_start(runtime_dir, args.host, args.port, args.open)
+        return command_start(runtime_dir, args.host, args.port, args.open, allow_remote=bool(args.allow_remote))
     if command == "stop":
         return command_stop(runtime_dir)
     if command == "status":
         return command_status(runtime_dir)
     if command == "open":
+        meta = load_meta(runtime_dir)
+        if meta:
+            open_browser(
+                str(meta.get("host", args.host)),
+                int(meta.get("port", args.port)),
+                str(meta.get("admin_token")) if meta.get("admin_token") else None,
+            )
+            return 0
         open_browser(args.host, args.port)
         return 0
     raise SystemExit(f"Unknown command: {command}")

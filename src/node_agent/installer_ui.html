@@ -3,6 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
     <title>AUTONOMOUSc Edge Node Installer</title>
     <style>
       :root {
@@ -386,6 +387,7 @@
       const errorBanner = document.getElementById("error-banner");
       const claimCard = document.getElementById("claim-card");
       const claimLink = document.getElementById("claim-link");
+      const adminToken = new URLSearchParams(window.location.search).get("token") || "";
       let formHydrated = false;
 
       function pillTone(ok, warning = false) {
@@ -477,7 +479,9 @@
       }
 
       async function refreshStatus() {
-        const response = await fetch("/api/status");
+        const response = await fetch("/api/status", {
+          headers: { "x-local-admin-token": adminToken }
+        });
         const data = await response.json();
         hydrateForm(data.config);
         render(data);
@@ -488,7 +492,10 @@
         errorBanner.hidden = true;
         const response = await fetch("/api/install", {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: {
+            "content-type": "application/json",
+            "x-local-admin-token": adminToken
+          },
           body: JSON.stringify(formPayload())
         });
         const data = await response.json();

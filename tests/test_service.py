@@ -247,6 +247,11 @@ def test_spawn_background_uses_module_arguments(monkeypatch: pytest.MonkeyPatch,
     ]
 
 
+def test_command_run_rejects_remote_bind_without_allow_remote() -> None:
+    with pytest.raises(ValueError, match="non-loopback"):
+        service_module.require_secure_bind_host("0.0.0.0", False)
+
+
 def test_wait_for_service_uses_health_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
     requested_urls: list[str] = []
 
@@ -271,9 +276,11 @@ def test_command_status_reports_online_when_health_endpoint_responds(
     service_dir = tmp_path / "data" / "service"
     service_dir.mkdir(parents=True)
     (service_dir / "service-meta.json").write_text(
-        '{"host":"127.0.0.1","port":8765,"pid":123}',
+        '{"host":"127.0.0.1","port":8765,"pid":123,"admin_token":"local-admin-token"}',
         encoding="utf-8",
     )
+
+    observed_headers: list[dict[str, str] | None] = []
 
     class FakeResponse:
         def __init__(self, status_code: int, payload: dict[str, object] | None = None) -> None:
@@ -283,7 +290,8 @@ def test_command_status_reports_online_when_health_endpoint_responds(
         def json(self) -> dict[str, object]:
             return self._payload
 
-    def fake_get(url: str, timeout: float):
+    def fake_get(url: str, timeout: float, headers=None):
+        observed_headers.append(headers)
         if url.endswith("/api/status"):
             raise service_module.httpx.ReadTimeout("timed out")
         if url.endswith("/api/healthz"):
@@ -296,3 +304,4 @@ def test_command_status_reports_online_when_health_endpoint_responds(
 
     assert exit_code == 0
     assert "Node runtime service is online" in capsys.readouterr().out
+    assert observed_headers[0] == {service_module.ADMIN_TOKEN_HEADER: "local-admin-token"}
