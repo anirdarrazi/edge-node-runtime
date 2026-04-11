@@ -1,0 +1,160 @@
+{
+  "version": "2026.04.10.1",
+  "generated_at": "2026-04-10T00:00:00Z",
+  "artifacts": [
+    {
+      "model": "BAAI/bge-large-en-v1.5",
+      "operation": "embeddings",
+      "source": "huggingface",
+      "repository": "BAAI/bge-large-en-v1.5",
+      "revision": "d4aa6901d3a41ba39fb536a557fa166f842b0e09",
+      "model_manifest_digest": "sha256:2467877e3f94783a952a3d018a783cc79ba21be2df30ce147d58bed28c95953e",
+      "tokenizer_digest": "sha256:ff9651cda6b419958fa94941c9bb336627cdcb9a8c16f9af45234f4a62686e37",
+      "model_manifest": {
+        "artifact_kind": "huggingface_model_snapshot",
+        "operation": "embeddings",
+        "repository": "BAAI/bge-large-en-v1.5",
+        "revision": "d4aa6901d3a41ba39fb536a557fa166f842b0e09",
+        "runtime_engine": "vllm",
+        "files": [
+          {
+            "path": "1_Pooling/config.json",
+            "digest": "gitsha1:9bd85925f325e25246d94c4918dc02ab98f2a1b7",
+            "size_bytes": 191
+          },
+          {
+            "path": "config.json",
+            "digest": "gitsha1:ab101ed8d012df683ef32f92cea51e97615ad07c",
+            "size_bytes": 779
+          },
+          {
+            "path": "config_sentence_transformers.json",
+            "digest": "gitsha1:dcb0c0d97d09b930d13600b1a773ddb27e441aab",
+            "size_bytes": 124
+          },
+          {
+            "path": "model.safetensors",
+            "digest": "sha256:45e1954914e29bd74080e6c1510165274ff5279421c89f76c418878732f64ae7",
+            "size_bytes": 1340616616
+          },
+          {
+            "path": "modules.json",
+            "digest": "gitsha1:952a9b81c0bfd99800fabf352f69c7ccd46c5e43",
+            "size_bytes": 349
+          },
+          {
+            "path": "sentence_bert_config.json",
+            "digest": "gitsha1:ea85692bff64b0d1917833c31ddbca8ab10f5455",
+            "size_bytes": 52
+          }
+        ]
+      },
+      "tokenizer_manifest": {
+        "artifact_kind": "huggingface_tokenizer_snapshot",
+        "operation": "embeddings",
+        "repository": "BAAI/bge-large-en-v1.5",
+        "revision": "d4aa6901d3a41ba39fb536a557fa166f842b0e09",
+        "runtime_engine": "vllm",
+        "files": [
+          {
+            "path": "special_tokens_map.json",
+            "digest": "gitsha1:a8b3208c2884c4efb86e49300fdd3dc877220cdf",
+            "size_bytes": 125
+          },
+          {
+            "path": "tokenizer.json",
+            "digest": "gitsha1:688882a79f44442ddc1f60d70334a7ff5df0fb47",
+            "size_bytes": 711396
+          },
+          {
+            "path": "tokenizer_config.json",
+            "digest": "gitsha1:37fca74771bc76a8e01178ce3a6055a0995f8093",
+            "size_bytes": 366
+          },
+          {
+            "path": "vocab.txt",
+            "digest": "gitsha1:fb140275c155a9c7c5a3b3e0e77a9e839594a938",
+            "size_bytes": 231508
+          }
+        ]
+      }
+    },
+    {
+      "model": "meta-llama/Llama-3.1-8B-Instruct",
+      "operation": "responses",
+      "source": "huggingface",
+      "repository": "meta-llama/Llama-3.1-8B-Instruct",
+      "revision": "0e9e39f249a16976918f6564b8830bc894c89659",
+      "model_manifest_digest": "sha256:c58ccc76f8acd8100cdaa1dca9168bf16e31f510846e1edc52cbbbbad18e43f2",
+      "tokenizer_digest": "sha256:1e7bf56135c6a61a0fa6c7b3bc79981614281dc3f58bbd4410ad051b6fc0647d",
+      "model_manifest": {
+        "artifact_kind": "huggingface_model_snapshot",
+        "operation": "responses",
+        "repository": "meta-llama/Llama-3.1-8B-Instruct",
+        "revision": "0e9e39f249a16976918f6564b8830bc894c89659",
+        "runtime_engine": "vllm",
+        "files": [
+          {
+            "path": "config.json",
+            "digest": "gitsha1:0bb6fd75b3ad2fe988565929f329945262c2814e",
+            "size_bytes": 855
+          },
+          {
+            "path": "generation_config.json",
+            "digest": "gitsha1:cc7276afd599de091142c6ed3005faf8a74aa257",
+            "size_bytes": 184
+          },
+          {
+            "path": "model-00001-of-00004.safetensors",
+            "digest": "sha256:2b1879f356aed350030bb40eb45ad362c89d9891096f79a3ab323d3ba5607668",
+            "size_bytes": 4976698672
+          },
+          {
+            "path": "model-00002-of-00004.safetensors",
+            "digest": "sha256:09d433f650646834a83c580877bd60c6d1f88f7755305c12576b5c7058f9af15",
+            "size_bytes": 4999802720
+          },
+          {
+            "path": "model-00003-of-00004.safetensors",
+            "digest": "sha256:fc1cdddd6bfa91128d6e94ee73d0ce62bfcdb7af29e978ddcab30c66ae9ea7fa",
+            "size_bytes": 4915916176
+          },
+          {
+            "path": "model-00004-of-00004.safetensors",
+            "digest": "sha256:92ecfe1a2414458b4821ac8c13cf8cb70aed66b5eea8dc5ad9eeb4ff309d6d7b",
+            "size_bytes": 1168138808
+          },
+          {
+            "path": "model.safetensors.index.json",
+            "digest": "gitsha1:0fd8120f1c6acddc268ebc2583058efaf699a771",
+            "size_bytes": 23950
+          }
+        ]
+      },
+      "tokenizer_manifest": {
+        "artifact_kind": "huggingface_tokenizer_snapshot",
+        "operation": "responses",
+        "repository": "meta-llama/Llama-3.1-8B-Instruct",
+        "revision": "0e9e39f249a16976918f6564b8830bc894c89659",
+        "runtime_engine": "vllm",
+        "files": [
+          {
+            "path": "special_tokens_map.json",
+            "digest": "gitsha1:02ee80b6196926a5ad790a004d9efd6ab1ba6542",
+            "size_bytes": 296
+          },
+          {
+            "path": "tokenizer.json",
+            "digest": "gitsha1:5cc5f00a5b203e90a27a3bd60d1ec393b07971e8",
+            "size_bytes": 9085657
+          },
+          {
+            "path": "tokenizer_config.json",
+            "digest": "gitsha1:db88166e2bc4c799fd5d1ae643b75e84d03ee70e",
+            "size_bytes": 55351
+          }
+        ]
+      }
+    }
+  ]
+}

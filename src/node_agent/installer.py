@@ -663,6 +663,7 @@ class GuidedInstaller:
             restricted_capable=env_values["RESTRICTED_CAPABLE"].lower() == "true",
             credentials_path=str(self.credentials_path),
             vllm_base_url=f"http://{service_access_host()}:8000",
+            vllm_model=env_values["VLLM_MODEL"],
             gpu_name=env_values["GPU_NAME"],
             gpu_memory_gb=float(env_values["GPU_MEMORY_GB"]),
             max_context_tokens=int(env_values["MAX_CONTEXT_TOKENS"]),

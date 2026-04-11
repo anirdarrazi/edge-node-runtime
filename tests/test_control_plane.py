@@ -8,6 +8,7 @@ import pytest
 
 from node_agent.config import NodeAgentSettings
 from node_agent.control_plane import EdgeControlClient
+from node_agent.model_artifacts import find_model_artifact
 
 
 class DummyResponse:
@@ -151,6 +152,20 @@ def test_attest_declares_attestation_provider(tmp_path: Path):
     assert persisted["node_id"] == "node_123"
     assert persisted["attestation_provider"] == "simulated"
     assert persisted["status"] == "verified"
+
+
+def test_node_request_payload_uses_bundled_release_metadata_for_the_primary_model(tmp_path: Path):
+    credentials_path = tmp_path / "credentials" / "node.json"
+    settings = build_settings(credentials_path, operator_token="operator_token")
+    settings.vllm_model = "meta-llama/Llama-3.1-8B-Instruct"
+    client = EdgeControlClient(settings)
+
+    payload = client._node_request_payload()
+    artifact = find_model_artifact("meta-llama/Llama-3.1-8B-Instruct", "responses")
+
+    assert artifact is not None
+    assert payload["runtime"]["model_manifest_digest"] == artifact.model_manifest_digest
+    assert payload["runtime"]["tokenizer_digest"] == artifact.tokenizer_digest
 
 
 class ArtifactResponse:

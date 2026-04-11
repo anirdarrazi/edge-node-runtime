@@ -23,6 +23,7 @@ class NodeAgentSettings(BaseSettings):
     attestation_state_path: str = "/var/lib/autonomousc/credentials/attestation-state.json"
     recovery_note_path: str = "/var/lib/autonomousc/credentials/recovery-note.txt"
     vllm_base_url: str = "http://vllm:8000"
+    vllm_model: str = "meta-llama/Llama-3.1-8B-Instruct"
     gpu_name: str = "Generic GPU"
     gpu_memory_gb: float = 24.0
     max_context_tokens: int = 32768

@@ -10,6 +10,7 @@ import httpx
 
 from .config import NodeAgentSettings
 from .control_plane import EdgeControlClient
+from .model_artifacts import resolved_model_manifest_digest, resolved_tokenizer_digest
 from .runtime import VLLMRuntime
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -99,9 +100,11 @@ def restricted_attestation_is_fresh(
 
 def validate_assignment_policy(control: EdgeControlClient, assignment: object) -> None:
     settings = control.settings
+    assignment_model = getattr(assignment, "model", None)
+    assignment_operation = getattr(assignment, "operation", None)
     if getattr(assignment, "operation", None) not in supported_operations:
         raise ValueError(f"assignment operation {getattr(assignment, 'operation', None)!r} is not supported by this node")
-    if getattr(assignment, "model", None) not in configured_supported_models(settings):
+    if assignment_model not in configured_supported_models(settings):
         raise ValueError(f"assignment model {getattr(assignment, 'model', None)!r} is not supported by this node")
     allowed_regions = getattr(assignment, "allowed_regions", [])
     if not isinstance(allowed_regions, list) or (
@@ -165,17 +168,21 @@ def validate_assignment_policy(control: EdgeControlClient, assignment: object) -
                 )
         expected_model_manifest_digest = getattr(assignment, "expected_model_manifest_digest", None)
         if isinstance(expected_model_manifest_digest, str) and expected_model_manifest_digest:
-            if settings.model_manifest_digest != expected_model_manifest_digest:
+            declared_model_manifest_digest = resolved_model_manifest_digest(
+                settings, assignment_model, assignment_operation
+            )
+            if declared_model_manifest_digest != expected_model_manifest_digest:
                 raise ValueError(
                     "trusted assignment rejected because the local model manifest digest "
-                    f"{settings.model_manifest_digest!r} does not match expected {expected_model_manifest_digest!r}"
+                    f"{declared_model_manifest_digest!r} does not match expected {expected_model_manifest_digest!r}"
                 )
         expected_tokenizer_digest = getattr(assignment, "expected_tokenizer_digest", None)
         if isinstance(expected_tokenizer_digest, str) and expected_tokenizer_digest:
-            if settings.tokenizer_digest != expected_tokenizer_digest:
+            declared_tokenizer_digest = resolved_tokenizer_digest(settings, assignment_model, assignment_operation)
+            if declared_tokenizer_digest != expected_tokenizer_digest:
                 raise ValueError(
                     "trusted assignment rejected because the local tokenizer digest "
-                    f"{settings.tokenizer_digest!r} does not match expected {expected_tokenizer_digest!r}"
+                    f"{declared_tokenizer_digest!r} does not match expected {expected_tokenizer_digest!r}"
                 )
 
 
@@ -271,12 +278,18 @@ def build_runtime_receipt(
     assignment: object,
     item_results: list[dict[str, object]],
 ) -> dict[str, object]:
+    assignment_model = getattr(assignment, "model", None)
+    assignment_operation = getattr(assignment, "operation", None)
     return {
         "assignment_nonce": getattr(assignment, "assignment_nonce", ""),
-        "declared_model": getattr(assignment, "model", ""),
+        "declared_model": assignment_model or "",
         "declared_runtime_image_digest": control.settings.docker_image,
-        "declared_model_manifest_digest": control.settings.model_manifest_digest,
-        "declared_tokenizer_digest": control.settings.tokenizer_digest,
+        "declared_model_manifest_digest": resolved_model_manifest_digest(
+            control.settings, assignment_model, assignment_operation
+        ),
+        "declared_tokenizer_digest": resolved_tokenizer_digest(
+            control.settings, assignment_model, assignment_operation
+        ),
         "provider_usage_summary": summarize_provider_usage(item_results),
     }
 

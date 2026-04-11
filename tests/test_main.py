@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 import node_agent.main as main_module
+from node_agent.model_artifacts import find_model_artifact
 
 
 class FakeControl:
@@ -17,11 +18,15 @@ class FakeControl:
             restricted_capable=True,
             node_id="node_123",
             supported_models="meta-llama/Llama-3.1-8B-Instruct,BAAI/bge-large-en-v1.5",
+            vllm_model="meta-llama/Llama-3.1-8B-Instruct",
             gpu_memory_gb=24.0,
             max_context_tokens=32768,
             max_batch_tokens=50000,
             attestation_provider="hardware",
             restricted_attestation_max_age_seconds=3600,
+            docker_image="anirdarrazi/autonomousc-ai-edge-runtime@sha256:4662922dd7912bbd928f0703e27472829cacc0a858732a2d48caa167a96561db",
+            model_manifest_digest=None,
+            tokenizer_digest=None,
         )
         self._has_credentials = has_credentials
         self.bootstrap_calls = 0
@@ -81,8 +86,8 @@ class FakeControl:
     def report_progress(self, assignment_id: str, progress):
         self.progress_updates.append((assignment_id, progress))
 
-    def complete_assignment(self, assignment_id: str, results):
-        self.completions.append((assignment_id, results))
+    def complete_assignment(self, assignment_id: str, results, runtime_receipt=None):
+        self.completions.append((assignment_id, results, runtime_receipt))
 
     def fail_assignment(self, assignment_id: str, code: str, message: str, retryable: bool = True):
         self.failures.append((assignment_id, code, message, retryable))
@@ -341,3 +346,22 @@ def test_validate_assignment_rejects_item_model_mismatch():
                 }
             ],
         )
+
+
+def test_build_runtime_receipt_uses_release_metadata_for_the_assignment_model():
+    control = FakeControl(has_credentials=True)
+    assignment = SimpleNamespace(
+        assignment_id="assign_receipt",
+        execution_id="pexec_receipt",
+        assignment_nonce="nonce_123",
+        operation="responses",
+        model="meta-llama/Llama-3.1-8B-Instruct",
+    )
+    artifact = find_model_artifact("meta-llama/Llama-3.1-8B-Instruct", "responses")
+
+    receipt = main_module.build_runtime_receipt(control, assignment, [{"usage": {"total_tokens": 5}}])
+
+    assert artifact is not None
+    assert receipt["declared_runtime_image_digest"] == control.settings.docker_image
+    assert receipt["declared_model_manifest_digest"] == artifact.model_manifest_digest
+    assert receipt["declared_tokenizer_digest"] == artifact.tokenizer_digest

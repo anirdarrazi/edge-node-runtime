@@ -16,6 +16,7 @@ from typing import Any
 import httpx
 
 from .config import AssignmentEnvelope, NodeAgentSettings, NodeClaimPollResult, NodeClaimSession
+from .model_artifacts import resolved_default_runtime_metadata
 
 
 class EdgeControlClient:
@@ -134,6 +135,7 @@ class EdgeControlClient:
         return sys.stdin.isatty() and sys.stdout.isatty()
 
     def _node_request_payload(self) -> dict[str, Any]:
+        model_manifest_digest, tokenizer_digest = resolved_default_runtime_metadata(self.settings)
         return {
             "label": self.settings.node_label,
             "region": self.settings.node_region,
@@ -153,8 +155,8 @@ class EdgeControlClient:
                 "agent_version": self.settings.agent_version,
                 "vllm_base_url": self.settings.vllm_base_url,
                 "docker_image": self.settings.docker_image,
-                "model_manifest_digest": self.settings.model_manifest_digest,
-                "tokenizer_digest": self.settings.tokenizer_digest,
+                "model_manifest_digest": model_manifest_digest,
+                "tokenizer_digest": tokenizer_digest,
             },
         }
 
@@ -326,6 +328,7 @@ class EdgeControlClient:
         self._persist_attestation_state(attestation_provider=attestation_provider)
 
     def heartbeat(self, queue_depth: int = 0, active_assignments: int = 0) -> None:
+        model_manifest_digest, tokenizer_digest = resolved_default_runtime_metadata(self.settings)
         response = self.client.post(
             "/nodes/heartbeat",
             json={
@@ -337,8 +340,8 @@ class EdgeControlClient:
                 "runtime": {
                     "agent_version": self.settings.agent_version,
                     "docker_image": self.settings.docker_image,
-                    "model_manifest_digest": self.settings.model_manifest_digest,
-                    "tokenizer_digest": self.settings.tokenizer_digest,
+                    "model_manifest_digest": model_manifest_digest,
+                    "tokenizer_digest": tokenizer_digest,
                 },
             },
         )
