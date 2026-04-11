@@ -33,6 +33,8 @@ class NodeAgentSettings(BaseSettings):
     poll_interval_seconds: int = 10
     agent_version: str = "0.1.0"
     docker_image: str = DEFAULT_NODE_AGENT_IMAGE
+    model_manifest_digest: str | None = None
+    tokenizer_digest: str | None = None
     attestation_provider: Literal["simulated", "hardware"] = "simulated"
     restricted_attestation_max_age_seconds: int = 3600
 
@@ -40,14 +42,20 @@ class NodeAgentSettings(BaseSettings):
 class AssignmentEnvelope(BaseModel):
     assignment_id: str
     execution_id: str
+    assignment_nonce: str
     operation: str
     model: str
     privacy_tier: str
+    node_trust_requirement: str
+    result_guarantee: str
     allowed_regions: list[str]
     required_vram_gb: float
     required_context_tokens: int
     token_budget: dict
     item_count: int
+    expected_runtime_image_digest: str | None = None
+    expected_model_manifest_digest: str | None = None
+    expected_tokenizer_digest: str | None = None
     input_artifact_url: str
     input_artifact_sha256: str
     input_artifact_encryption: dict

@@ -313,7 +313,10 @@ def test_repair_runtime_recreates_env_and_restarts_claimed_runtime(
 
     assert service.guided_installer.env_path.exists()
     assert "SETUP_PROFILE=" in service.guided_installer.env_path.read_text(encoding="utf-8")
-    assert ["docker", "compose", "up", "-d", "vllm", "node-agent", "vector"] in commands
+    assert any(
+        command[:2] == ["docker", "compose"] and command[-5:] == ["up", "-d", "vllm", "node-agent", "vector"]
+        for command in commands
+    )
     assert autostart.ensure_calls == 1
     assert launcher.ensure_calls == 1
     assert payload["runtime"]["config_present"] is True

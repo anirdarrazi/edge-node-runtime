@@ -154,6 +154,30 @@ def validate_assignment_policy(control: EdgeControlClient, assignment: object) -
     if privacy_tier == "confidential" and settings.trust_tier == "standard":
         raise ValueError("confidential assignment rejected because the node trust tier is only standard")
 
+    node_trust_requirement = getattr(assignment, "node_trust_requirement", None)
+    if node_trust_requirement == "trusted_only":
+        expected_runtime_image_digest = getattr(assignment, "expected_runtime_image_digest", None)
+        if isinstance(expected_runtime_image_digest, str) and expected_runtime_image_digest:
+            if settings.docker_image != expected_runtime_image_digest:
+                raise ValueError(
+                    "trusted assignment rejected because the local runtime image digest "
+                    f"{settings.docker_image!r} does not match expected {expected_runtime_image_digest!r}"
+                )
+        expected_model_manifest_digest = getattr(assignment, "expected_model_manifest_digest", None)
+        if isinstance(expected_model_manifest_digest, str) and expected_model_manifest_digest:
+            if settings.model_manifest_digest != expected_model_manifest_digest:
+                raise ValueError(
+                    "trusted assignment rejected because the local model manifest digest "
+                    f"{settings.model_manifest_digest!r} does not match expected {expected_model_manifest_digest!r}"
+                )
+        expected_tokenizer_digest = getattr(assignment, "expected_tokenizer_digest", None)
+        if isinstance(expected_tokenizer_digest, str) and expected_tokenizer_digest:
+            if settings.tokenizer_digest != expected_tokenizer_digest:
+                raise ValueError(
+                    "trusted assignment rejected because the local tokenizer digest "
+                    f"{settings.tokenizer_digest!r} does not match expected {expected_tokenizer_digest!r}"
+                )
+
 
 def validate_assignment_items(assignment: object, items: object) -> list[dict[str, object]]:
     if not isinstance(items, list) or not items:
@@ -221,15 +245,52 @@ class AssignmentProgressKeepalive:
                 LOGGER.warning("progress keepalive for %s failed; will retry: %s", self.assignment_id, error)
 
 
+def summarize_provider_usage(item_results: list[dict[str, object]]) -> dict[str, object]:
+    totals = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "input_texts": 0,
+    }
+    for item in item_results:
+        usage = item.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        for key in list(totals):
+            value = usage.get(key)
+            if isinstance(value, int):
+                totals[key] += value
+    return {
+        **totals,
+        "item_count": len(item_results),
+    }
+
+
+def build_runtime_receipt(
+    control: EdgeControlClient,
+    assignment: object,
+    item_results: list[dict[str, object]],
+) -> dict[str, object]:
+    return {
+        "assignment_nonce": getattr(assignment, "assignment_nonce", ""),
+        "declared_model": getattr(assignment, "model", ""),
+        "declared_runtime_image_digest": control.settings.docker_image,
+        "declared_model_manifest_digest": control.settings.model_manifest_digest,
+        "declared_tokenizer_digest": control.settings.tokenizer_digest,
+        "provider_usage_summary": summarize_provider_usage(item_results),
+    }
+
+
 def complete_assignment_with_retry(
     control: EdgeControlClient,
     assignment_id: str,
     item_results: list[dict[str, object]],
+    runtime_receipt: dict[str, object] | None,
     max_attempts: int = 3,
 ) -> None:
     for attempt in range(1, max_attempts + 1):
         try:
-            control.complete_assignment(assignment_id, item_results)
+            control.complete_assignment(assignment_id, item_results, runtime_receipt=runtime_receipt)
             return
         except Exception as error:
             if control.is_auth_error(error) or attempt >= max_attempts or not is_transient_http_error(error):
@@ -312,7 +373,8 @@ def run_worker_loop(control: EdgeControlClient, runtime: VLLMRuntime, attest_on_
                     raise runtime_error
                 results_ready = True
                 control.report_progress(assignment.assignment_id, assignment_progress("completed", item_count))
-                complete_assignment_with_retry(control, assignment.assignment_id, results)
+                runtime_receipt = build_runtime_receipt(control, assignment, results)
+                complete_assignment_with_retry(control, assignment.assignment_id, results, runtime_receipt)
             except Exception as assignment_error:
                 if control.is_auth_error(assignment_error):
                     raise

@@ -153,6 +153,8 @@ class EdgeControlClient:
                 "agent_version": self.settings.agent_version,
                 "vllm_base_url": self.settings.vllm_base_url,
                 "docker_image": self.settings.docker_image,
+                "model_manifest_digest": self.settings.model_manifest_digest,
+                "tokenizer_digest": self.settings.tokenizer_digest,
             },
         }
 
@@ -332,7 +334,12 @@ class EdgeControlClient:
                 "status": "active",
                 "queue_depth": queue_depth,
                 "active_assignments": active_assignments,
-                "runtime": {"agent_version": self.settings.agent_version},
+                "runtime": {
+                    "agent_version": self.settings.agent_version,
+                    "docker_image": self.settings.docker_image,
+                    "model_manifest_digest": self.settings.model_manifest_digest,
+                    "tokenizer_digest": self.settings.tokenizer_digest,
+                },
             },
         )
         response.raise_for_status()
@@ -368,13 +375,19 @@ class EdgeControlClient:
         )
         response.raise_for_status()
 
-    def complete_assignment(self, assignment_id: str, item_results: list[dict[str, Any]]) -> None:
+    def complete_assignment(
+        self,
+        assignment_id: str,
+        item_results: list[dict[str, Any]],
+        runtime_receipt: dict[str, Any] | None = None,
+    ) -> None:
         response = self.client.post(
             f"/nodes/assignments/{assignment_id}/complete",
             json={
                 "node_id": self.settings.node_id,
                 "node_key": self.settings.node_key,
                 "item_results": item_results,
+                "runtime_receipt": runtime_receipt,
             },
         )
         response.raise_for_status()

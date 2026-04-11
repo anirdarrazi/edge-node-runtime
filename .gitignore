@@ -3,5 +3,12 @@
 .pytest_cache/
 __pycache__/
 *.pyc
+.env
+.env.*
+.python-version
+data/
+logs/
+diagnostics/
+*.log
 build/
 dist/

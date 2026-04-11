@@ -2,6 +2,16 @@
 
 Python runtime for AUTONOMOUSc edge nodes.
 
+## Open-source security model
+
+This runtime is designed to be publishable as open-source code. The control plane assumes the node owner can inspect and modify the runtime, so trust is enforced server-side instead of by hiding client behavior.
+
+- Community and self-hosted nodes enroll as `untrusted` by default.
+- Only first-party nodes and admin-approved partner nodes can be promoted to the `trusted` execution tier.
+- Premium `trusted_only` workloads are routed by the control plane and require server-owned trust state plus canary verification for partner nodes.
+- The runtime now emits a `runtime_receipt` with assignment nonce, declared model, runtime image digest, model manifest digest, tokenizer digest, and aggregated usage. This receipt is audit evidence only and does not grant trust by itself.
+- Sensitive files such as `.env`, runtime data, credentials, and diagnostics should stay local and are excluded from the standalone repo with `.gitignore`.
+
 Contents:
 
 - `src/node_agent`: node enrollment, polling, assignment execution, and reporting
@@ -141,6 +151,7 @@ Notes:
 - `node-agent` runs headless after credentials have been stored in `./data/credentials`.
 - `OPERATOR_TOKEN` is now only a legacy fallback for development or controlled migrations.
 - `ATTESTATION_PROVIDER=simulated` is fine for local bring-up, but restricted work now requires hardware-backed attestation metadata before the control plane will schedule it.
+- Open-source/community nodes remain eligible for community-best-effort workloads, but exact-model audited workloads require the control plane to classify the node as `trusted`.
 - `.env.example` defaults to the production control plane at `https://edge.autonomousc.com`. Override it only for local Worker development.
 
 Run tests with:
