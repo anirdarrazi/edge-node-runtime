@@ -23,6 +23,7 @@ class EdgeControlClient:
     def __init__(self, settings: NodeAgentSettings):
         self.settings = settings
         self.client = httpx.Client(base_url=settings.edge_control_url, timeout=30.0)
+        self.last_control_plane_queue_depth = 0
 
     def _load_persisted_credentials(self) -> tuple[str, str] | None:
         credentials_path = Path(self.settings.credentials_path)
@@ -134,30 +135,47 @@ class EdgeControlClient:
     def _interactive_terminal_available(self) -> bool:
         return sys.stdin.isatty() and sys.stdout.isatty()
 
-    def _node_request_payload(self) -> dict[str, Any]:
+    def _node_capabilities_payload(self) -> dict[str, Any]:
+        return {
+            "supported_models": [model.strip() for model in self.settings.supported_models.split(",") if model.strip()],
+            "operations": ["responses", "embeddings"],
+            "gpu_name": self.settings.gpu_name,
+            "gpu_memory_gb": self.settings.gpu_memory_gb,
+            "max_context_tokens": self.settings.max_context_tokens,
+            "max_batch_tokens": self.settings.max_batch_tokens,
+            "max_concurrent_assignments": self.settings.max_concurrent_assignments,
+            "thermal_headroom": self.settings.thermal_headroom,
+        }
+
+    def _node_runtime_payload(self, *, autopilot: dict[str, Any] | None = None) -> dict[str, Any]:
         model_manifest_digest, tokenizer_digest = resolved_default_runtime_metadata(self.settings)
+        runtime = {
+            "agent_version": self.settings.agent_version,
+            "vllm_base_url": self.settings.vllm_base_url,
+            "docker_image": self.settings.docker_image,
+            "current_model": self.settings.vllm_model,
+            "model_manifest_digest": model_manifest_digest,
+            "tokenizer_digest": tokenizer_digest,
+        }
+        if autopilot is not None:
+            runtime["autopilot"] = autopilot
+        return runtime
+
+    @staticmethod
+    def _nonnegative_int(value: Any, fallback: int = 0) -> int:
+        try:
+            return max(0, int(float(str(value))))
+        except (TypeError, ValueError):
+            return fallback
+
+    def _node_request_payload(self) -> dict[str, Any]:
         return {
             "label": self.settings.node_label,
             "region": self.settings.node_region,
             "trust_tier": self.settings.trust_tier,
             "restricted_capable": self.settings.restricted_capable,
-            "capabilities": {
-                "supported_models": [model.strip() for model in self.settings.supported_models.split(",") if model.strip()],
-                "operations": ["responses", "embeddings"],
-                "gpu_name": self.settings.gpu_name,
-                "gpu_memory_gb": self.settings.gpu_memory_gb,
-                "max_context_tokens": self.settings.max_context_tokens,
-                "max_batch_tokens": self.settings.max_batch_tokens,
-                "max_concurrent_assignments": self.settings.max_concurrent_assignments,
-                "thermal_headroom": self.settings.thermal_headroom,
-            },
-            "runtime": {
-                "agent_version": self.settings.agent_version,
-                "vllm_base_url": self.settings.vllm_base_url,
-                "docker_image": self.settings.docker_image,
-                "model_manifest_digest": model_manifest_digest,
-                "tokenizer_digest": tokenizer_digest,
-            },
+            "capabilities": self._node_capabilities_payload(),
+            "runtime": self._node_runtime_payload(),
         }
 
     @staticmethod
@@ -327,8 +345,14 @@ class EdgeControlClient:
         response.raise_for_status()
         self._persist_attestation_state(attestation_provider=attestation_provider)
 
-    def heartbeat(self, queue_depth: int = 0, active_assignments: int = 0) -> None:
-        model_manifest_digest, tokenizer_digest = resolved_default_runtime_metadata(self.settings)
+    def heartbeat(
+        self,
+        queue_depth: int = 0,
+        active_assignments: int = 0,
+        *,
+        capabilities: dict[str, Any] | None = None,
+        autopilot: dict[str, Any] | None = None,
+    ) -> None:
         response = self.client.post(
             "/nodes/heartbeat",
             json={
@@ -337,13 +361,8 @@ class EdgeControlClient:
                 "status": "active",
                 "queue_depth": queue_depth,
                 "active_assignments": active_assignments,
-                "runtime": {
-                    "agent_version": self.settings.agent_version,
-                    "docker_image": self.settings.docker_image,
-                    "current_model": self.settings.vllm_model,
-                    "model_manifest_digest": model_manifest_digest,
-                    "tokenizer_digest": tokenizer_digest,
-                },
+                "capabilities": capabilities or self._node_capabilities_payload(),
+                "runtime": self._node_runtime_payload(autopilot=autopilot),
             },
         )
         response.raise_for_status()
@@ -371,7 +390,9 @@ class EdgeControlClient:
             },
         )
         response.raise_for_status()
-        assignment = response.json().get("assignment")
+        payload = response.json()
+        self.last_control_plane_queue_depth = self._nonnegative_int(payload.get("queue_depth"))
+        assignment = payload.get("assignment")
         return AssignmentEnvelope.model_validate(assignment) if assignment else None
 
     def accept_assignment(self, assignment_id: str) -> None:

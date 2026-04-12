@@ -188,6 +188,8 @@ class NodeRuntimeService:
         self.data_dir = self.runtime_dir / "data"
         self.service_dir = self.data_dir / "service"
         self.diagnostics_dir = self.data_dir / "diagnostics"
+        self.scratch_dir = self.data_dir / "scratch"
+        self.autopilot_state_path = self.scratch_dir / "autopilot-state.json"
         self.pid_path = self.service_dir / "service.pid"
         self.meta_path = self.service_dir / "service-meta.json"
         self.state_path = self.service_dir / "service-state.json"
@@ -225,7 +227,7 @@ class NodeRuntimeService:
         self.load_state()
 
     def ensure_dirs(self) -> None:
-        for path in (self.data_dir, self.service_dir, self.diagnostics_dir):
+        for path in (self.data_dir, self.service_dir, self.diagnostics_dir, self.scratch_dir):
             path.mkdir(parents=True, exist_ok=True)
             tighten_private_path(path, directory=True)
 
@@ -646,11 +648,118 @@ class NodeRuntimeService:
             "stale": False,
         }
 
+    def load_autopilot_state(self) -> dict[str, Any] | None:
+        if not self.autopilot_state_path.exists():
+            return None
+        try:
+            payload = json.loads(self.autopilot_state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def save_autopilot_state(self, payload: dict[str, Any]) -> None:
+        self.autopilot_state_path.parent.mkdir(parents=True, exist_ok=True)
+        self.autopilot_state_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        tighten_private_path(self.autopilot_state_path)
+
+    def autopilot_payload(self) -> dict[str, Any]:
+        state = self.load_autopilot_state()
+        if not state:
+            return {
+                "enabled": True,
+                "status": "learning",
+                "value": "Learning",
+                "tone": "warning",
+                "detail": "Autopilot starts tuning after this node completes real work.",
+                "signals": {},
+                "recommendation": None,
+            }
+        recommendation = state.get("recommendation") if isinstance(state.get("recommendation"), dict) else {}
+        signals = state.get("signals") if isinstance(state.get("signals"), dict) else {}
+        pending_restart = bool(recommendation.get("pending_restart"))
+        startup_model = str(recommendation.get("startup_model") or state.get("current_model") or "current model")
+        profile = str(recommendation.get("setup_profile") or "balanced").replace("_", " ")
+        concurrency = str(recommendation.get("max_concurrent_assignments") or "1")
+        reason = str(recommendation.get("reason") or "Autopilot is monitoring this machine.")
+        pressure = signals.get("gpu_memory_pressure")
+        failure_rate = signals.get("failure_rate")
+        latency = signals.get("ewma_latency_seconds")
+        signal_parts: list[str] = []
+        if isinstance(pressure, (int, float)):
+            signal_parts.append(f"GPU memory {round(float(pressure) * 100)}%")
+        if isinstance(failure_rate, (int, float)):
+            signal_parts.append(f"failure rate {round(float(failure_rate) * 100)}%")
+        if isinstance(latency, (int, float)):
+            signal_parts.append(f"latency {round(float(latency), 1)}s")
+        signal_copy = ", ".join(signal_parts)
+        detail = f"{reason} Target: {startup_model}, {profile} profile, {concurrency} concurrent."
+        if signal_copy:
+            detail = f"{detail} Signals: {signal_copy}."
+        if pending_restart:
+            detail = f"{detail} A safe restart is needed to switch the startup model."
+        return {
+            "enabled": bool(state.get("enabled", True)),
+            "status": "restart_pending" if pending_restart else "active",
+            "value": "Restart pending" if pending_restart else "Active",
+            "tone": "warning" if pending_restart else "success",
+            "detail": detail,
+            "signals": signals,
+            "recommendation": recommendation,
+            "updated_at": state.get("updated_at"),
+            "history": state.get("history") if isinstance(state.get("history"), list) else [],
+        }
+
+    def apply_autopilot_tuning(self) -> tuple[bool, str]:
+        state = self.load_autopilot_state()
+        if not state:
+            return False, "Autopilot has not produced a tuning recommendation yet."
+        recommendation = state.get("recommendation") if isinstance(state.get("recommendation"), dict) else {}
+        env_updates = recommendation.get("env_updates") if isinstance(recommendation.get("env_updates"), dict) else {}
+        if not env_updates:
+            return False, "Autopilot does not have env changes to apply yet."
+        if recommendation.get("safe_to_apply") is False:
+            return False, "Autopilot is waiting until the current assignment is finished before applying changes."
+
+        env_values = self.guided_installer.effective_runtime_env()
+        if not env_values:
+            return False, "Autopilot is waiting for local runtime settings to exist."
+        next_env = dict(env_values)
+        changed = False
+        for key, value in env_updates.items():
+            if key not in {"SETUP_PROFILE", "MAX_CONCURRENT_ASSIGNMENTS", "THERMAL_HEADROOM", "SUPPORTED_MODELS", "VLLM_MODEL"}:
+                continue
+            next_value = str(value)
+            if next_env.get(key) != next_value:
+                next_env[key] = next_value
+                changed = True
+        if not changed:
+            recommendation["pending_restart"] = False
+            recommendation["applied_at"] = now_iso()
+            state["recommendation"] = recommendation
+            self.save_autopilot_state(state)
+            return False, "Autopilot tuning already matches the local runtime config."
+
+        model_changed = env_values.get("VLLM_MODEL") != next_env.get("VLLM_MODEL")
+        self.guided_installer.write_runtime_settings(next_env)
+        self.guided_installer.write_runtime_env(next_env)
+        recommendation["applied_at"] = now_iso()
+        recommendation["pending_restart"] = False
+        state["recommendation"] = recommendation
+        self.save_autopilot_state(state)
+
+        if model_changed:
+            self.log("Autopilot is restarting the runtime to apply a safer startup model.")
+            self.restart_runtime()
+            return True, f"Autopilot switched the startup model to {next_env.get('VLLM_MODEL')} and restarted the runtime."
+
+        return True, "Autopilot applied updated concurrency and thermal tuning for the next runtime cycle."
+
     def dashboard_payload(self, health: dict[str, Any], installer_snapshot: dict[str, Any]) -> dict[str, Any]:
         runtime = health.get("runtime", {})
         installer_state = health.get("installer_state", {})
         config = installer_snapshot.get("config", {})
         updates = asdict(self.update_state)
+        autopilot = self.autopilot_payload()
         remote = self.remote_dashboard_snapshot()
         remote_summary = remote.get("summary") if isinstance(remote.get("summary"), dict) else {}
         remote_node = remote_summary.get("node") if isinstance(remote_summary.get("node"), dict) else {}
@@ -835,7 +944,13 @@ class NodeRuntimeService:
                 "uptime": {"value": uptime_value, "detail": uptime_detail, "tone": uptime_tone},
                 "blocked": {"value": blocked_value, "detail": blocked_detail, "tone": blocked_tone},
                 "updates": {"value": update_value, "detail": update_detail, "tone": update_tone},
+                "autopilot": {
+                    "value": autopilot["value"],
+                    "detail": autopilot["detail"],
+                    "tone": autopilot["tone"],
+                },
             },
+            "autopilot": autopilot,
         }
 
     def status_payload(self) -> dict[str, Any]:
@@ -1317,6 +1432,17 @@ class NodeRuntimeService:
 
         if health["runtime_healthy"]:
             self.remember_known_good_release()
+            applied, autopilot_result = self.apply_autopilot_tuning()
+            if applied:
+                self.update_self_heal_state(
+                    status="healthy",
+                    last_result=autopilot_result,
+                    last_issue=None,
+                    last_error=None,
+                    last_action="autopilot_tuning",
+                    fix_available=False,
+                )
+                return self.status_payload()
             self.update_self_heal_state(
                 status="healthy",
                 last_result="The runtime looks healthy and self-healing is monitoring it.",

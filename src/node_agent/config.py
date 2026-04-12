@@ -22,6 +22,7 @@ class NodeAgentSettings(BaseSettings):
     credentials_path: str = "/var/lib/autonomousc/credentials/node-credentials.json"
     attestation_state_path: str = "/var/lib/autonomousc/credentials/attestation-state.json"
     recovery_note_path: str = "/var/lib/autonomousc/credentials/recovery-note.txt"
+    autopilot_state_path: str = "/var/lib/autonomousc/scratch/autopilot-state.json"
     vllm_base_url: str = "http://vllm:8000"
     vllm_model: str = "meta-llama/Llama-3.1-8B-Instruct"
     gpu_name: str = "Generic GPU"

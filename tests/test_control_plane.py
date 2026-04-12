@@ -36,6 +36,15 @@ class FailIfCalledClient:
         raise AssertionError(f"unexpected network call: {path} {json}")
 
 
+class PullClient:
+    def __init__(self):
+        self.calls = []
+
+    def post(self, path, json):
+        self.calls.append((path, json))
+        return DummyResponse({"assignment": None, "queue_depth": 3})
+
+
 def build_settings(credentials_path: Path, operator_token: str | None):
     return NodeAgentSettings(
         edge_control_url="http://localhost:8787",
@@ -169,6 +178,21 @@ def test_heartbeat_reports_current_model(tmp_path: Path):
     path, payload = recording_client.calls[0]
     assert path == "/nodes/heartbeat"
     assert payload["runtime"]["current_model"] == "meta-llama/Llama-3.1-8B-Instruct"
+    assert payload["capabilities"]["max_concurrent_assignments"] == settings.max_concurrent_assignments
+
+
+def test_pull_assignment_tracks_control_plane_queue_depth(tmp_path: Path):
+    credentials_path = tmp_path / "credentials" / "node.json"
+    settings = build_settings(credentials_path, operator_token="operator_token")
+    settings.node_id = "node_123"
+    settings.node_key = "key_123456789012345678901234"
+    client = EdgeControlClient(settings)
+    client.client = PullClient()
+
+    assignment = client.pull_assignment()
+
+    assert assignment is None
+    assert client.last_control_plane_queue_depth == 3
 
 
 def test_node_request_payload_uses_bundled_release_metadata_for_the_primary_model(tmp_path: Path):

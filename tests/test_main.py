@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 import time
+import tempfile
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import httpx
 import pytest
@@ -22,11 +24,14 @@ class FakeControl:
             gpu_memory_gb=24.0,
             max_context_tokens=32768,
             max_batch_tokens=50000,
+            max_concurrent_assignments=2,
+            thermal_headroom=0.8,
             attestation_provider="hardware",
             restricted_attestation_max_age_seconds=3600,
             docker_image="anirdarrazi/autonomousc-ai-edge-runtime@sha256:4662922dd7912bbd928f0703e27472829cacc0a858732a2d48caa167a96561db",
             model_manifest_digest=None,
             tokenizer_digest=None,
+            autopilot_state_path=str(Path(tempfile.gettempdir()) / f"autopilot-{id(self)}.json"),
         )
         self._has_credentials = has_credentials
         self.bootstrap_calls = 0
@@ -70,7 +75,7 @@ class FakeControl:
             "attested_at": datetime.now(timezone.utc).isoformat(),
         }
 
-    def heartbeat(self):
+    def heartbeat(self, *args, **kwargs):
         if self.auth_fail_on_heartbeat:
             request = httpx.Request("POST", "http://edge.test/nodes/heartbeat")
             response = httpx.Response(401, request=request)
@@ -150,7 +155,7 @@ def test_run_worker_loop_reports_assignment_failure():
             super().__init__(has_credentials=True)
             self.pulled = False
 
-        def heartbeat(self):
+        def heartbeat(self, *args, **kwargs):
             return None
 
         def pull_assignment(self):
@@ -192,7 +197,7 @@ def test_run_worker_loop_keeps_assignments_fresh_while_runtime_is_busy(monkeypat
             super().__init__(has_credentials=True)
             self.pulled = False
 
-        def heartbeat(self):
+        def heartbeat(self, *args, **kwargs):
             return None
 
         def pull_assignment(self):

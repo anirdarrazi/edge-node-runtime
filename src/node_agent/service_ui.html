@@ -496,6 +496,12 @@
               <span id="dashboard-updates-value" class="metric-value">Loading...</span>
               <p id="dashboard-updates-copy" class="meta"></p>
             </div>
+            <div class="status-card">
+              <strong>Autopilot</strong>
+              <span id="dashboard-autopilot-pill" class="pill">Checking</span>
+              <span id="dashboard-autopilot-value" class="metric-value">Loading...</span>
+              <p id="dashboard-autopilot-copy" class="meta"></p>
+            </div>
           </div>
 
           <div class="callout">
@@ -767,7 +773,7 @@
         document.getElementById("dashboard-detail").textContent =
           dashboard?.detail || "Health, earnings, heartbeat, and update state will appear here.";
 
-        ["health", "earnings", "heartbeat", "model", "uptime", "blocked", "updates"].forEach((key) => {
+        ["health", "earnings", "heartbeat", "model", "uptime", "blocked", "updates", "autopilot"].forEach((key) => {
           const card = cards[key] || {};
           const pillLabel =
             card.badge ||

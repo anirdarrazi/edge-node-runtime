@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 
 import httpx
 
+from .autopilot import AutopilotController
 from .config import NodeAgentSettings
 from .control_plane import EdgeControlClient
 from .model_artifacts import resolved_model_manifest_digest, resolved_tokenizer_digest
@@ -51,6 +52,13 @@ def assignment_progress(state: str, item_count: int, **details: object) -> dict[
     }
     payload.update(details)
     return payload
+
+
+def control_plane_queue_depth(control: object) -> int:
+    try:
+        return max(0, int(getattr(control, "last_control_plane_queue_depth", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def configured_supported_models(settings: NodeAgentSettings) -> set[str]:
@@ -330,6 +338,7 @@ def bootstrap_node(control: EdgeControlClient, interactive: bool) -> str:
 
 def run_worker_loop(control: EdgeControlClient, runtime: VLLMRuntime, attest_on_start: bool = True) -> None:
     node_id, _node_key = control.require_credentials()
+    autopilot = AutopilotController(control.settings)
     LOGGER.info("node enrolled or restored: %s", node_id)
     if attest_on_start:
         print("Refreshing node attestation before entering the worker loop...")
@@ -347,9 +356,19 @@ def run_worker_loop(control: EdgeControlClient, runtime: VLLMRuntime, attest_on_
             ):
                 LOGGER.info("local restricted attestation is stale or missing; refreshing it before polling")
                 control.attest()
-            control.heartbeat()
+            queue_depth = control_plane_queue_depth(control)
+            autopilot.observe_idle(queue_depth=queue_depth, active_assignments=0)
+            control.heartbeat(
+                queue_depth=queue_depth,
+                active_assignments=0,
+                capabilities=autopilot.capabilities_payload(),
+                autopilot=autopilot.runtime_payload(),
+            )
             assignment = control.pull_assignment()
+            queue_depth = control_plane_queue_depth(control)
             if not assignment:
+                if queue_depth > 0:
+                    autopilot.observe_idle(queue_depth=queue_depth, active_assignments=0)
                 time.sleep(control.settings.poll_interval_seconds)
                 continue
 
@@ -367,6 +386,7 @@ def run_worker_loop(control: EdgeControlClient, runtime: VLLMRuntime, attest_on_
                 progress_keepalive.start()
                 results = []
                 runtime_error: Exception | None = None
+                runtime_started_at = time.monotonic()
                 try:
                     results = runtime.execute(assignment.operation, assignment.model, items)
                 except Exception as error:
@@ -384,6 +404,11 @@ def run_worker_loop(control: EdgeControlClient, runtime: VLLMRuntime, attest_on_
                         )
                 if runtime_error is not None:
                     raise runtime_error
+                autopilot.observe_assignment_success(
+                    latency_seconds=time.monotonic() - runtime_started_at,
+                    queue_depth=max(1, queue_depth),
+                    active_assignments=1,
+                )
                 results_ready = True
                 control.report_progress(assignment.assignment_id, assignment_progress("completed", item_count))
                 runtime_receipt = build_runtime_receipt(control, assignment, results)
@@ -398,6 +423,12 @@ def run_worker_loop(control: EdgeControlClient, runtime: VLLMRuntime, attest_on_
                     raise
 
                 code, message, retryable = classify_assignment_failure(assignment_error)
+                autopilot.observe_assignment_failure(
+                    code=code,
+                    retryable=retryable,
+                    queue_depth=max(1, queue_depth),
+                    active_assignments=1,
+                )
                 LOGGER.exception("assignment %s failed", assignment.assignment_id)
                 try:
                     control.report_progress(
