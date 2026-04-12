@@ -4,7 +4,7 @@ services:
       context: .
     command: ["node-agent", "run"]
     env_file:
-      - .env
+      - ./data/service/runtime.env
     environment:
       DOCKER_IMAGE: ${DOCKER_IMAGE:-local-build}
     depends_on:
@@ -20,7 +20,7 @@ services:
       context: .
     command: ["node-agent", "bootstrap"]
     env_file:
-      - .env
+      - ./data/service/runtime.env
     environment:
       DOCKER_IMAGE: ${DOCKER_IMAGE:-local-build}
     depends_on:

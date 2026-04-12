@@ -154,6 +154,23 @@ def test_attest_declares_attestation_provider(tmp_path: Path):
     assert persisted["status"] == "verified"
 
 
+def test_heartbeat_reports_current_model(tmp_path: Path):
+    credentials_path = tmp_path / "credentials" / "node.json"
+    settings = build_settings(credentials_path, operator_token="operator_token")
+    settings.node_id = "node_123"
+    settings.node_key = "key_123456789012345678901234"
+    settings.vllm_model = "meta-llama/Llama-3.1-8B-Instruct"
+    client = EdgeControlClient(settings)
+    recording_client = RecordingClient()
+    client.client = recording_client
+
+    client.heartbeat(queue_depth=2, active_assignments=1)
+
+    path, payload = recording_client.calls[0]
+    assert path == "/nodes/heartbeat"
+    assert payload["runtime"]["current_model"] == "meta-llama/Llama-3.1-8B-Instruct"
+
+
 def test_node_request_payload_uses_bundled_release_metadata_for_the_primary_model(tmp_path: Path):
     credentials_path = tmp_path / "credentials" / "node.json"
     settings = build_settings(credentials_path, operator_token="operator_token")
@@ -166,6 +183,52 @@ def test_node_request_payload_uses_bundled_release_metadata_for_the_primary_mode
     assert artifact is not None
     assert payload["runtime"]["model_manifest_digest"] == artifact.model_manifest_digest
     assert payload["runtime"]["tokenizer_digest"] == artifact.tokenizer_digest
+
+
+class DashboardClient:
+    def __init__(self):
+        self.calls = []
+
+    def post(self, path, json):
+        self.calls.append((path, json))
+        return DummyResponse(
+            {
+                "node": {
+                    "id": "node_123",
+                    "label": "Nordic node",
+                    "last_heartbeat_at": "2026-04-12T10:00:00Z",
+                },
+                "earnings": {
+                    "accrued_usd": "1.2500",
+                    "transferred_usd": "0.5000",
+                    "last_payout": None,
+                },
+                "schedulable": True,
+                "blocked_reason": None,
+            }
+        )
+
+
+def test_fetch_node_dashboard_summary_uses_stored_credentials(tmp_path: Path):
+    credentials_path = tmp_path / "credentials" / "node.json"
+    settings = build_settings(credentials_path, operator_token=None)
+    client = EdgeControlClient(settings)
+    client.persist_credentials("node_123", "key_123456789012345678901234")
+    dashboard_client = DashboardClient()
+    client.client = dashboard_client
+
+    payload = client.fetch_node_dashboard_summary()
+
+    assert payload["node"]["id"] == "node_123"
+    assert dashboard_client.calls == [
+        (
+            "/nodes/dashboard",
+            {
+                "node_id": "node_123",
+                "node_key": "key_123456789012345678901234",
+            },
+        )
+    ]
 
 
 class ArtifactResponse:

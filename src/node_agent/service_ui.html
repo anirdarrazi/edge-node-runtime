@@ -116,10 +116,6 @@
         grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
       }
 
-      .profile-grid {
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-      }
-
       .step-chip,
       .status-card,
       .callout,
@@ -206,26 +202,20 @@
         cursor: not-allowed;
       }
 
-      .profile-option {
-        text-align: left;
-        background: rgba(255, 255, 255, 0.52);
-        color: var(--ink);
-        border: 1px solid var(--line);
-        min-height: 110px;
-      }
-
-      .profile-option.active {
-        background: var(--accent);
-        color: var(--accent-ink);
-        border-color: transparent;
-      }
-
-      .profile-option span {
+      .recommendation-value {
         display: block;
-        margin-top: 6px;
-        font-size: 0.88rem;
-        line-height: 1.45;
-        opacity: 0.88;
+        margin: 6px 0 8px;
+        font-weight: 700;
+        line-height: 1.4;
+      }
+
+      .metric-value {
+        display: block;
+        margin: 10px 0 8px;
+        font-size: 1.05rem;
+        font-weight: 700;
+        line-height: 1.35;
+        word-break: break-word;
       }
 
       .journey-list {
@@ -243,7 +233,56 @@
 
       .journey-item.complete { border-left-color: var(--success); }
       .journey-item.active { border-left-color: var(--accent); }
+      .journey-item.warning { border-left-color: var(--warning); }
+      .journey-item.error { border-left-color: var(--danger); }
       .journey-item.pending { border-left-color: rgba(25, 34, 40, 0.16); }
+
+      .progress-shell {
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.42);
+        padding: 16px;
+        display: grid;
+        gap: 14px;
+      }
+
+      .progress-meta,
+      .flow-sequence {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+      }
+
+      .progress-meter {
+        height: 12px;
+        border-radius: 999px;
+        background: rgba(25, 34, 40, 0.08);
+        overflow: hidden;
+      }
+
+      .progress-fill {
+        height: 100%;
+        width: 0;
+        border-radius: 999px;
+        background: linear-gradient(90deg, #d1682f, #f09c67);
+        transition: width 220ms ease;
+      }
+
+      .flow-pill {
+        padding: 7px 11px;
+        border-radius: 999px;
+        font-size: 0.84rem;
+        font-weight: 700;
+        background: rgba(25, 34, 40, 0.08);
+        color: var(--muted);
+      }
+
+      .flow-pill.complete { background: rgba(37, 111, 75, 0.12); color: var(--success); }
+      .flow-pill.active { background: rgba(209, 104, 47, 0.16); color: var(--accent); }
+      .flow-pill.warning { background: rgba(155, 97, 7, 0.12); color: var(--warning); }
+      .flow-pill.error { background: rgba(162, 54, 41, 0.14); color: var(--danger); }
 
       .checkbox {
         display: flex;
@@ -298,8 +337,7 @@
       }
 
       @media (max-width: 980px) {
-        .layout,
-        .profile-grid {
+        .layout {
           grid-template-columns: 1fr;
         }
       }
@@ -310,11 +348,11 @@
       <section class="hero">
         <p class="eyebrow">AUTONOMOUSc Local Node Service</p>
         <h1>One local app for Quick Start, runtime health, updates, and support.</h1>
-        <p class="lede">This is the owner view. Start with Quick Start, approve the machine once, and then use the same local app to keep the node healthy and online.</p>
+        <p class="lede">This is the owner view. Start with Quick Start, approve the machine once, and then use the same local app to keep the node healthy and online, even through the slower first-time download and warm-up steps.</p>
         <div class="hero-grid">
           <div class="step-chip">
             <strong>Quick Start</strong>
-            <p class="meta">Name the machine, keep the recommended profile, and let the service auto-tune the rest.</p>
+            <p class="meta">Name the machine, review the inferred plan, and let the service auto-tune the rest while it shows exactly what first-time setup is doing.</p>
           </div>
           <div class="step-chip">
             <strong>Approval</strong>
@@ -322,7 +360,7 @@
           </div>
           <div class="step-chip">
             <strong>Healthy runtime</strong>
-            <p class="meta">Runtime status, updates, and recovery actions stay in one place.</p>
+            <p class="meta">Runtime status, updates, cache warm-up progress, and recovery actions stay in one place.</p>
           </div>
           <div class="step-chip">
             <strong>Support</strong>
@@ -336,7 +374,7 @@
           <div class="stack">
             <div>
               <h2>Quick Start</h2>
-              <p class="supporting">Use this for first-time setup or to retune the machine. Advanced settings are hidden by default so normal owners can stay on the happy path.</p>
+              <p class="supporting">Use this for first-time setup or to retune the machine. Advanced settings are hidden by default so normal owners can stay on the happy path, even when first startup takes a while.</p>
             </div>
             <div id="error-banner" class="error-banner" hidden></div>
           </div>
@@ -349,31 +387,12 @@
               <input id="node_label" placeholder="AUTONOMOUSc Edge Node">
             </label>
 
-            <div class="stack">
-              <div>
-                <h3>Performance profile</h3>
-                <p class="meta">The local service uses this to auto-tune concurrency and runtime limits.</p>
-              </div>
-              <div class="profile-grid">
-                <button class="profile-option" data-profile="quiet" type="button">
-                  Quiet
-                  <span>Lowest heat and noise, best for always-on background operation.</span>
-                </button>
-                <button class="profile-option" data-profile="balanced" type="button">
-                  Balanced
-                  <span>Recommended for most owners. Stable throughput with conservative tuning.</span>
-                </button>
-                <button class="profile-option" data-profile="performance" type="button">
-                  Performance
-                  <span>Higher throughput when you want the machine working harder.</span>
-                </button>
-              </div>
-            </div>
-
             <div class="callout">
               <strong id="machine-summary">Checking local hardware...</strong>
-              <p id="profile-summary" class="supporting">The service will choose safe defaults for this machine.</p>
+              <p id="profile-summary" class="supporting">The service is building an inferred runtime plan for this machine.</p>
             </div>
+
+            <div id="recommendation-grid" class="status-grid"></div>
 
             <div class="button-row">
               <button id="setup-button" type="submit">Run Quick Start</button>
@@ -383,6 +402,13 @@
             <details>
               <summary>Advanced settings</summary>
               <div class="stack" style="margin-top: 14px;">
+                <label>Thermal profile
+                  <select id="advanced_setup_profile">
+                    <option value="quiet">Quiet</option>
+                    <option value="balanced">Balanced</option>
+                    <option value="performance">Performance</option>
+                  </select>
+                </label>
                 <label>Control plane URL<input id="edge_control_url" placeholder="https://edge.autonomousc.com"></label>
                 <label>Region<input id="node_region" placeholder="eu-se-1"></label>
                 <label>Trust tier
@@ -423,12 +449,76 @@
 
         <article class="panel stack">
           <div class="callout">
+            <strong id="dashboard-headline">Loading owner dashboard...</strong>
+            <p id="dashboard-detail" class="supporting">Checking local runtime health and syncing the latest control-plane status for this node.</p>
+          </div>
+
+          <div class="status-grid">
+            <div class="status-card">
+              <strong>Health</strong>
+              <span id="dashboard-health-pill" class="pill">Checking</span>
+              <span id="dashboard-health-value" class="metric-value">Loading...</span>
+              <p id="dashboard-health-copy" class="meta"></p>
+            </div>
+            <div class="status-card">
+              <strong>Earnings</strong>
+              <span id="dashboard-earnings-pill" class="pill">Checking</span>
+              <span id="dashboard-earnings-value" class="metric-value">Loading...</span>
+              <p id="dashboard-earnings-copy" class="meta"></p>
+            </div>
+            <div class="status-card">
+              <strong>Last heartbeat</strong>
+              <span id="dashboard-heartbeat-pill" class="pill">Checking</span>
+              <span id="dashboard-heartbeat-value" class="metric-value">Loading...</span>
+              <p id="dashboard-heartbeat-copy" class="meta"></p>
+            </div>
+            <div class="status-card">
+              <strong>Current model</strong>
+              <span id="dashboard-model-pill" class="pill">Checking</span>
+              <span id="dashboard-model-value" class="metric-value">Loading...</span>
+              <p id="dashboard-model-copy" class="meta"></p>
+            </div>
+            <div class="status-card">
+              <strong>Uptime</strong>
+              <span id="dashboard-uptime-pill" class="pill">Checking</span>
+              <span id="dashboard-uptime-value" class="metric-value">Loading...</span>
+              <p id="dashboard-uptime-copy" class="meta"></p>
+            </div>
+            <div class="status-card">
+              <strong>Blocked reason</strong>
+              <span id="dashboard-blocked-pill" class="pill">Checking</span>
+              <span id="dashboard-blocked-value" class="metric-value">Loading...</span>
+              <p id="dashboard-blocked-copy" class="meta"></p>
+            </div>
+            <div class="status-card">
+              <strong>Update state</strong>
+              <span id="dashboard-updates-pill" class="pill">Checking</span>
+              <span id="dashboard-updates-value" class="metric-value">Loading...</span>
+              <p id="dashboard-updates-copy" class="meta"></p>
+            </div>
+          </div>
+
+          <div class="callout">
             <strong id="next-headline">Loading node status...</strong>
             <p id="next-detail" class="supporting">Checking this machine and preparing the next action.</p>
           </div>
 
+          <div class="progress-shell">
+            <div class="progress-meta">
+              <div>
+                <strong id="progress-step">Preparing Quick Start</strong>
+                <p id="progress-detail" class="supporting">Waiting for setup data from the local runtime.</p>
+              </div>
+              <span id="eta-pill" class="pill warning">ETA loading...</span>
+            </div>
+            <div class="progress-meter">
+              <div id="progress-fill" class="progress-fill"></div>
+            </div>
+            <div id="flow-sequence" class="flow-sequence"></div>
+          </div>
+
           <div class="journey">
-            <h3>Owner journey</h3>
+            <h3>Setup timeline</h3>
             <ul id="journey-list" class="journey-list"></ul>
           </div>
 
@@ -495,10 +585,11 @@
             </div>
 
             <div class="callout">
-              <strong>Repair this machine</strong>
-              <p id="repair-copy" class="supporting">Restore local launchers, rebuild missing config, and restart the runtime when it is safe.</p>
+              <strong>Self-healing</strong>
+              <span id="self-heal-pill" class="pill warning">Standing by</span>
+              <p id="self-heal-copy" class="supporting">Self-healing watches for missing config, stuck containers, and bad restarts, then fixes what it can automatically.</p>
               <div class="button-row">
-                <button id="repair-machine" type="button">Repair now</button>
+                <button id="fix-machine" type="button">Fix it</button>
               </div>
             </div>
 
@@ -544,7 +635,7 @@
       const openClaimButton = document.getElementById("open-claim");
       const downloadLink = document.getElementById("download-link");
       const profileInput = document.getElementById("setup_profile");
-      const profileButtons = Array.from(document.querySelectorAll(".profile-option"));
+      const advancedProfileSelect = document.getElementById("advanced_setup_profile");
       let formHydrated = false;
       let claimUrl = "";
 
@@ -571,9 +662,7 @@
 
       function selectProfile(profile) {
         profileInput.value = profile;
-        profileButtons.forEach((button) => {
-          button.classList.toggle("active", button.dataset.profile === profile);
-        });
+        advancedProfileSelect.value = profile;
       }
 
       function setupPayload() {
@@ -610,6 +699,26 @@
         }
       }
 
+      function renderRecommendations(ownerSetup) {
+        const grid = document.getElementById("recommendation-grid");
+        const recommendations = ownerSetup?.recommendations || [];
+        grid.innerHTML = "";
+        if (!recommendations.length) {
+          grid.innerHTML = "<div class='status-card'><strong>Machine plan</strong><p class='meta'>Waiting for local inference data.</p></div>";
+          return;
+        }
+        recommendations.forEach((recommendation) => {
+          const card = document.createElement("div");
+          card.className = "status-card";
+          card.innerHTML = `
+            <strong>${recommendation.label || "Recommendation"}</strong>
+            <span class="recommendation-value">${recommendation.value || "Pending"}</span>
+            <p class="meta">${recommendation.detail || ""}</p>
+          `;
+          grid.appendChild(card);
+        });
+      }
+
       function renderJourney(ownerSetup) {
         const journey = document.getElementById("journey-list");
         const steps = ownerSetup?.steps || [];
@@ -626,6 +735,54 @@
         });
       }
 
+      function renderFlowSequence(ownerSetup, installerState, runtime) {
+        const sequence = document.getElementById("flow-sequence");
+        const steps = ownerSetup?.steps || [];
+        sequence.innerHTML = "";
+        if (!steps.length) return;
+        steps.forEach((step) => {
+          const pill = document.createElement("span");
+          pill.className = `flow-pill ${step.status || "pending"}`;
+          pill.textContent = step.label || "Step";
+          sequence.appendChild(pill);
+        });
+
+        const activeStep =
+          steps.find((step) => step.key === ownerSetup?.current_step) ||
+          steps.find((step) => step.status === "active" || step.status === "error") ||
+          steps[0];
+        document.getElementById("progress-step").textContent = activeStep?.label || "Preparing Quick Start";
+        document.getElementById("progress-detail").textContent =
+          activeStep?.detail || ownerSetup?.detail || "Waiting for setup data from the local runtime.";
+        document.getElementById("progress-fill").style.width = `${ownerSetup?.progress_percent || 0}%`;
+
+        const toneName = installerState?.error ? "danger" : (runtime?.stage === "running" ? "success" : "warning");
+        setPill(document.getElementById("eta-pill"), ownerSetup?.eta_label || "ETA unavailable", toneName);
+      }
+
+      function renderDashboard(dashboard) {
+        const cards = dashboard?.cards || {};
+        document.getElementById("dashboard-headline").textContent =
+          dashboard?.headline || "Owner dashboard";
+        document.getElementById("dashboard-detail").textContent =
+          dashboard?.detail || "Health, earnings, heartbeat, and update state will appear here.";
+
+        ["health", "earnings", "heartbeat", "model", "uptime", "blocked", "updates"].forEach((key) => {
+          const card = cards[key] || {};
+          const pillLabel =
+            card.badge ||
+            (card.tone === "success" ? "Ready" : (card.tone === "danger" ? "Fix now" : "Watch"));
+          setPill(
+            document.getElementById(`dashboard-${key}-pill`),
+            card.value ? pillLabel : "Checking",
+            card.tone || "warning"
+          );
+          document.getElementById(`dashboard-${key}-value`).textContent = card.value || "Loading...";
+          document.getElementById(`dashboard-${key}-copy`).textContent =
+            card.detail || "Waiting for local dashboard data.";
+        });
+      }
+
       function render(payload) {
         const runtime = payload.runtime || {};
         const installer = payload.installer || {};
@@ -637,20 +794,25 @@
         const ownerSetup = payload.owner_setup || installer.owner_setup || {};
         const autostart = payload.autostart || installer.autostart || {};
         const launcher = payload.desktop_launcher || installer.desktop_launcher || {};
+        const selfHealing = payload.self_healing || {};
+        const dashboard = payload.dashboard || {};
         const claim = installerState.claim || null;
         const gpu = preflight.gpu || {};
         const disk = preflight.disk || {};
         const runningServices = (preflight.running_services || []).join(", ") || "No services detected yet.";
 
+        renderDashboard(dashboard);
         document.getElementById("next-headline").textContent = ownerSetup.headline || runtime.message || "Local node service is ready.";
         document.getElementById("next-detail").textContent = ownerSetup.detail || runtime.message || "Use Quick Start to bring this machine online.";
         document.getElementById("machine-summary").textContent =
-          gpu.detected ? `${gpu.name} detected with ${gpu.memory_gb} GB VRAM` : "GPU detection is optional for Quick Start";
+          ownerSetup.machine_plan_summary || (gpu.detected ? `${gpu.name} detected with ${gpu.memory_gb} GB VRAM` : "GPU detection is optional for Quick Start");
         document.getElementById("profile-summary").textContent =
           ownerSetup.profile_summary || config.profile_summary || "The local service will auto-tune this machine for the selected profile.";
+        renderRecommendations(ownerSetup);
         document.getElementById("service-logs").textContent = (payload.service?.logs || []).join("\n") || "Waiting for service events...";
         document.getElementById("installer-logs").textContent = (installerState.logs || []).join("\n") || "Waiting for installer events...";
         renderJourney(ownerSetup);
+        renderFlowSequence(ownerSetup, installerState, runtime);
 
         const engineReady = Boolean(preflight.docker_cli && preflight.docker_compose && preflight.docker_daemon);
         setPill(document.getElementById("engine-pill"), engineReady ? "Ready" : "Needs attention", tone(engineReady, Boolean(preflight.docker_cli || preflight.docker_compose)));
@@ -693,13 +855,34 @@
           launcher.detail || "Desktop launcher status is unavailable.";
         document.getElementById("install-launcher").disabled = !launcher.supported || Boolean(launcher.enabled);
         document.getElementById("remove-launcher").disabled = !launcher.supported || !launcher.enabled;
-        document.getElementById("repair-copy").textContent =
-          !engineReady
-            ? "Repair will restore local setup files, but Docker still needs to be installed and running before the node can come online."
-            : registrationReady
-              ? "Repair will reuse the stored node credentials, restore the launch conveniences, and restart the runtime if anything is stuck."
-              : "Repair will restore local setup files and resume Quick Start so this machine can be approved again.";
-        document.getElementById("repair-machine").disabled = Boolean(installerState.busy);
+        const selfHealStatusLabel =
+          selfHealing.status === "healthy"
+            ? "Active"
+            : selfHealing.status === "repairing"
+              ? "Fixing"
+              : selfHealing.status === "error"
+                ? "Needs attention"
+                : selfHealing.status === "attention"
+                  ? "Needs attention"
+                  : "Standing by";
+        setPill(
+          document.getElementById("self-heal-pill"),
+          selfHealStatusLabel,
+          selfHealing.status === "healthy"
+            ? "success"
+            : (selfHealing.status === "error" ? "danger" : "warning")
+        );
+        document.getElementById("self-heal-copy").textContent =
+          selfHealing.detail ||
+          (
+            !engineReady
+              ? "Self-healing can restore local setup files, but Docker still needs to be installed and running before the node can come online."
+              : registrationReady
+                ? "Self-healing will reuse the stored node credentials, restart stuck containers, and roll back unhealthy signed releases when needed."
+                : "Self-healing will restore local setup files and help this machine get back to the Quick Start path."
+          );
+        document.getElementById("fix-machine").disabled =
+          Boolean(installerState.busy) || Boolean(selfHealing.status === "repairing");
 
         if (claim && claim.approval_url) {
           claimCard.hidden = false;
@@ -726,11 +909,14 @@
           downloadLink.removeAttribute("href");
         }
 
-        if (!installerState.busy && config.setup_profile) {
-          selectProfile(config.setup_profile);
+        if (!installerState.busy && (config.setup_profile || config.recommended_setup_profile)) {
+          selectProfile(config.setup_profile || config.recommended_setup_profile);
         }
-        document.getElementById("setup-button").disabled = Boolean(installerState.busy);
-        document.getElementById("setup-button").textContent = installerState.busy ? "Quick Start is running..." : "Run Quick Start";
+        const setupButton = document.getElementById("setup-button");
+        setupButton.disabled = Boolean(installerState.busy) || runtime.stage === "running";
+        setupButton.textContent =
+          ownerSetup.primary_action_label ||
+          (installerState.error ? "Retry Quick Start" : (installerState.busy ? "Quick Start is running..." : "Run Quick Start"));
         hydrateForm(config, updates);
       }
 
@@ -769,10 +955,8 @@
         }
       }
 
-      profileButtons.forEach((button) => {
-        button.addEventListener("click", () => {
-          selectProfile(button.dataset.profile || "balanced");
-        });
+      advancedProfileSelect.addEventListener("change", () => {
+        selectProfile(advancedProfileSelect.value || "balanced");
       });
 
       setupForm.addEventListener("submit", async (event) => {
@@ -796,7 +980,7 @@
       document.getElementById("disable-autostart").addEventListener("click", async () => runAction(() => postJson("/api/autostart/disable")));
       document.getElementById("install-launcher").addEventListener("click", async () => runAction(() => postJson("/api/launcher/install")));
       document.getElementById("remove-launcher").addEventListener("click", async () => runAction(() => postJson("/api/launcher/remove")));
-      document.getElementById("repair-machine").addEventListener("click", async () => runAction(() => postJson("/api/repair")));
+      document.getElementById("fix-machine").addEventListener("click", async () => runAction(() => postJson("/api/repair")));
       document.getElementById("create-diagnostics").addEventListener("click", async () => runAction(() => postJson("/api/diagnostics")));
       openClaimButton.addEventListener("click", () => {
         if (claimUrl) {

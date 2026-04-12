@@ -203,30 +203,11 @@
         grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
       }
 
-      .profile-grid {
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-      }
-
-      .profile-option {
-        text-align: left;
-        background: rgba(255, 255, 255, 0.52);
-        color: var(--ink);
-        border: 1px solid var(--line);
-        min-height: 112px;
-      }
-
-      .profile-option.active {
-        background: var(--accent);
-        color: var(--accent-ink);
-        border-color: transparent;
-      }
-
-      .profile-option span {
+      .recommendation-value {
         display: block;
-        margin-top: 6px;
-        font-size: 0.88rem;
-        line-height: 1.45;
-        opacity: 0.88;
+        margin: 6px 0 8px;
+        font-weight: 700;
+        line-height: 1.4;
       }
 
       .journey-list {
@@ -244,7 +225,56 @@
 
       .journey-item.complete { border-left-color: var(--success); }
       .journey-item.active { border-left-color: var(--accent); }
+      .journey-item.warning { border-left-color: var(--warning); }
+      .journey-item.error { border-left-color: var(--danger); }
       .journey-item.pending { border-left-color: rgba(25, 34, 40, 0.16); }
+
+      .progress-shell {
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.42);
+        padding: 16px;
+        display: grid;
+        gap: 14px;
+      }
+
+      .progress-meta,
+      .flow-sequence {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+      }
+
+      .progress-meter {
+        height: 12px;
+        border-radius: 999px;
+        background: rgba(25, 34, 40, 0.08);
+        overflow: hidden;
+      }
+
+      .progress-fill {
+        height: 100%;
+        width: 0;
+        border-radius: 999px;
+        background: linear-gradient(90deg, #d1682f, #f09c67);
+        transition: width 220ms ease;
+      }
+
+      .flow-pill {
+        padding: 7px 11px;
+        border-radius: 999px;
+        font-size: 0.84rem;
+        font-weight: 700;
+        background: rgba(25, 34, 40, 0.08);
+        color: var(--muted);
+      }
+
+      .flow-pill.complete { background: rgba(37, 111, 75, 0.12); color: var(--success); }
+      .flow-pill.active { background: rgba(209, 104, 47, 0.16); color: var(--accent); }
+      .flow-pill.warning { background: rgba(155, 97, 7, 0.12); color: var(--warning); }
+      .flow-pill.error { background: rgba(162, 54, 41, 0.14); color: var(--danger); }
 
       .checkbox {
         display: flex;
@@ -302,9 +332,6 @@
           grid-template-columns: 1fr;
         }
 
-        .profile-grid {
-          grid-template-columns: 1fr;
-        }
       }
     </style>
   </head>
@@ -313,23 +340,31 @@
       <section class="hero">
         <p class="eyebrow">AUTONOMOUSc Edge Node Installer</p>
         <h1>Plug in, approve this machine, and let the runtime finish the rest.</h1>
-        <p class="lede">Quick Start hides the operator knobs. Pick a node name, keep the recommended profile, approve the claim in your browser, and this machine will bring itself online.</p>
+        <p class="lede">Quick Start hides the operator knobs. Give this machine a name, review what we inferred locally, approve the claim in your browser, and keep this window open while the first startup pre-pulls the runtime and fills the local model cache.</p>
         <div class="hero-steps">
           <div class="step-chip">
-            <strong>1. Check machine</strong>
-            <p class="meta">Docker, GPU detection, and disk space are verified before setup starts.</p>
+            <strong>1. Checking Docker</strong>
+            <p class="meta">Quick Start makes sure Docker Desktop and local disk space are ready first.</p>
           </div>
           <div class="step-chip">
-            <strong>2. Quick Start</strong>
-            <p class="meta">Use the recommended profile or switch to Quiet or Performance in one click.</p>
+            <strong>2. Checking GPU</strong>
+            <p class="meta">The installer reads available GPU capacity and chooses the safest runtime defaults.</p>
           </div>
           <div class="step-chip">
-            <strong>3. Approve node</strong>
-            <p class="meta">The installer creates a browser claim and waits for approval automatically.</p>
+            <strong>3. Downloading runtime</strong>
+            <p class="meta">Local settings are saved and the runtime containers are pulled automatically. The first run can take several minutes here.</p>
           </div>
           <div class="step-chip">
-            <strong>4. Go live</strong>
-            <p class="meta">The runtime starts itself and begins polling the control plane.</p>
+            <strong>4. Warming model</strong>
+            <p class="meta">The startup model is cached locally before registration finishes, and Quick Start now shows that progress instead of going quiet.</p>
+          </div>
+          <div class="step-chip">
+            <strong>5. Claiming node</strong>
+            <p class="meta">The installer opens a browser approval flow and waits for the claim automatically.</p>
+          </div>
+          <div class="step-chip">
+            <strong>6. Node live</strong>
+            <p class="meta">The node agent, vector, and vLLM services come online and start accepting work.</p>
           </div>
         </div>
       </section>
@@ -339,7 +374,7 @@
           <div class="stack">
             <div>
               <h2>Quick Start</h2>
-              <p class="supporting">This is the owner-friendly path. Advanced settings are still available, but most machines only need a name and a profile.</p>
+              <p class="supporting">This is the owner-friendly path. Advanced settings are still available, but most machines only need a name and a little patience on the first start.</p>
             </div>
             <div id="error-banner" class="error-banner" hidden></div>
           </div>
@@ -352,31 +387,12 @@
               <input id="node_label" name="node_label" placeholder="AUTONOMOUSc Edge Node">
             </label>
 
-            <div class="stack">
-              <div>
-                <h3>Performance profile</h3>
-                <p class="meta">The installer auto-tunes concurrency and runtime limits around this choice.</p>
-              </div>
-              <div class="profile-grid">
-                <button class="profile-option" data-profile="quiet" type="button">
-                  Quiet
-                  <span>Lowest heat and noise, one workload at a time.</span>
-                </button>
-                <button class="profile-option" data-profile="balanced" type="button">
-                  Balanced
-                  <span>Recommended for most machines. Good throughput without aggressive tuning.</span>
-                </button>
-                <button class="profile-option" data-profile="performance" type="button">
-                  Performance
-                  <span>Higher throughput when you want this machine working harder.</span>
-                </button>
-              </div>
-            </div>
-
             <div class="callout">
               <strong id="machine-summary">Checking local hardware...</strong>
-              <p id="profile-summary" class="supporting">The installer will choose a safe runtime profile for this machine.</p>
+              <p id="profile-summary" class="supporting">Quick Start is building an inferred runtime plan for this machine.</p>
             </div>
+
+            <div id="recommendation-grid" class="status-grid"></div>
 
             <div class="button-row">
               <button id="start-button" type="submit">Start Quick Start</button>
@@ -386,6 +402,15 @@
             <details>
               <summary>Advanced settings</summary>
               <div class="stack" style="margin-top: 14px;">
+                <label>
+                  Thermal profile
+                  <select id="advanced_setup_profile" name="advanced_setup_profile">
+                    <option value="quiet">Quiet</option>
+                    <option value="balanced">Balanced</option>
+                    <option value="performance">Performance</option>
+                  </select>
+                </label>
+
                 <label>
                   Control plane URL
                   <input id="edge_control_url" name="edge_control_url" placeholder="https://edge.autonomousc.com">
@@ -435,8 +460,22 @@
             <p id="next-detail" class="supporting">Checking this machine and preparing the next step.</p>
           </div>
 
+          <div class="progress-shell">
+            <div class="progress-meta">
+              <div>
+                <strong id="progress-step">Preparing Quick Start</strong>
+                <p id="progress-detail" class="supporting">Waiting for setup data from the local runtime.</p>
+              </div>
+              <span id="eta-pill" class="pill warning">ETA loading...</span>
+            </div>
+            <div class="progress-meter">
+              <div id="progress-fill" class="progress-fill"></div>
+            </div>
+            <div id="flow-sequence" class="flow-sequence"></div>
+          </div>
+
           <div class="journey">
-            <h3>Setup journey</h3>
+            <h3>Setup timeline</h3>
             <ul id="journey-list" class="journey-list"></ul>
           </div>
 
@@ -501,7 +540,7 @@
       const claimCard = document.getElementById("claim-card");
       const claimLink = document.getElementById("claim-link");
       const profileInput = document.getElementById("setup_profile");
-      const profileButtons = Array.from(document.querySelectorAll(".profile-option"));
+      const advancedProfileSelect = document.getElementById("advanced_setup_profile");
       let formHydrated = false;
 
       function pillTone(ok, warning = false) {
@@ -517,9 +556,7 @@
 
       function selectProfile(profile) {
         profileInput.value = profile;
-        profileButtons.forEach((button) => {
-          button.classList.toggle("active", button.dataset.profile === profile);
-        });
+        advancedProfileSelect.value = profile;
       }
 
       function formPayload() {
@@ -551,6 +588,26 @@
         formHydrated = true;
       }
 
+      function renderRecommendations(ownerSetup) {
+        const grid = document.getElementById("recommendation-grid");
+        const recommendations = ownerSetup?.recommendations || [];
+        grid.innerHTML = "";
+        if (!recommendations.length) {
+          grid.innerHTML = "<div class='status-card'><strong>Machine plan</strong><p class='meta'>Waiting for local inference data.</p></div>";
+          return;
+        }
+        recommendations.forEach((recommendation) => {
+          const card = document.createElement("div");
+          card.className = "status-card";
+          card.innerHTML = `
+            <strong>${recommendation.label || "Recommendation"}</strong>
+            <span class="recommendation-value">${recommendation.value || "Pending"}</span>
+            <p class="meta">${recommendation.detail || ""}</p>
+          `;
+          grid.appendChild(card);
+        });
+      }
+
       function renderJourney(ownerSetup) {
         const journey = document.getElementById("journey-list");
         const steps = ownerSetup?.steps || [];
@@ -565,6 +622,32 @@
           item.innerHTML = `<strong>${step.label || "Step"}</strong><div class="meta">${step.detail || ""}</div>`;
           journey.appendChild(item);
         });
+      }
+
+      function renderFlowSequence(ownerSetup, state, preflight) {
+        const sequence = document.getElementById("flow-sequence");
+        const steps = ownerSetup?.steps || [];
+        sequence.innerHTML = "";
+        if (!steps.length) return;
+        steps.forEach((step) => {
+          const pill = document.createElement("span");
+          pill.className = `flow-pill ${step.status || "pending"}`;
+          pill.textContent = step.label || "Step";
+          sequence.appendChild(pill);
+        });
+
+        const activeStep =
+          steps.find((step) => step.key === ownerSetup?.current_step) ||
+          steps.find((step) => step.status === "active" || step.status === "error") ||
+          steps[0];
+        document.getElementById("progress-step").textContent = activeStep?.label || "Preparing Quick Start";
+        document.getElementById("progress-detail").textContent =
+          activeStep?.detail || ownerSetup?.detail || "Waiting for setup data from the local runtime.";
+        document.getElementById("progress-fill").style.width = `${ownerSetup?.progress_percent || 0}%`;
+
+        const runtimeLive = Boolean((preflight?.running_services || []).includes("node-agent"));
+        const etaTone = state?.error ? "danger" : (runtimeLive ? "success" : (state?.busy ? "warning" : "warning"));
+        setPill(document.getElementById("eta-pill"), ownerSetup?.eta_label || "ETA unavailable", etaTone);
       }
 
       function render(data) {
@@ -583,10 +666,12 @@
         document.getElementById("next-detail").textContent = ownerSetup.detail || state.message || "Quick Start will guide this machine into service.";
         document.getElementById("logs").textContent = (state.logs || []).join("\n") || "Waiting for installer events...";
         document.getElementById("machine-summary").textContent =
-          gpu.detected ? `${gpu.name} detected with ${gpu.memory_gb} GB VRAM` : "GPU detection is optional for Quick Start";
+          ownerSetup.machine_plan_summary || (gpu.detected ? `${gpu.name} detected with ${gpu.memory_gb} GB VRAM` : "GPU detection is optional for Quick Start");
         document.getElementById("profile-summary").textContent =
           ownerSetup.profile_summary || config.profile_summary || "The installer will auto-tune this machine for the selected profile.";
+        renderRecommendations(ownerSetup);
         renderJourney(ownerSetup);
+        renderFlowSequence(ownerSetup, state, preflight);
 
         const dockerOk = Boolean(preflight.docker_cli && preflight.docker_compose && preflight.docker_daemon);
         setPill(document.getElementById("docker-pill"), dockerOk ? "Ready" : "Needs attention", pillTone(dockerOk, Boolean(preflight.docker_cli || preflight.docker_compose)));
@@ -633,11 +718,14 @@
           errorBanner.textContent = "";
         }
 
-        if (!state.busy && config.setup_profile) {
-          selectProfile(config.setup_profile);
+        if (!state.busy && (config.setup_profile || config.recommended_setup_profile)) {
+          selectProfile(config.setup_profile || config.recommended_setup_profile);
         }
-        startButton.disabled = Boolean(state.busy);
-        startButton.textContent = state.busy ? "Quick Start is running..." : "Start Quick Start";
+        const runtimeLive = Boolean((preflight.running_services || []).includes("node-agent"));
+        startButton.disabled = Boolean(state.busy) || runtimeLive;
+        startButton.textContent =
+          ownerSetup.primary_action_label ||
+          (state.error ? "Retry Quick Start" : (state.busy ? "Quick Start is running..." : "Start Quick Start"));
       }
 
       async function refreshStatus() {
@@ -661,10 +749,8 @@
         render(data);
       }
 
-      profileButtons.forEach((button) => {
-        button.addEventListener("click", () => {
-          selectProfile(button.dataset.profile || "balanced");
-        });
+      advancedProfileSelect.addEventListener("change", () => {
+        selectProfile(advancedProfileSelect.value || "balanced");
       });
 
       form.addEventListener("submit", async (event) => {

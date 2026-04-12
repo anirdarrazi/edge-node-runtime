@@ -3,7 +3,7 @@ services:
     image: ${NODE_AGENT_IMAGE:-anirdarrazi/autonomousc-ai-edge-runtime@sha256:4662922dd7912bbd928f0703e27472829cacc0a858732a2d48caa167a96561db}
     command: ["node-agent", "run"]
     env_file:
-      - .env
+      - ./data/service/runtime.env
     environment:
       DOCKER_IMAGE: ${NODE_AGENT_IMAGE:-anirdarrazi/autonomousc-ai-edge-runtime@sha256:4662922dd7912bbd928f0703e27472829cacc0a858732a2d48caa167a96561db}
     depends_on:

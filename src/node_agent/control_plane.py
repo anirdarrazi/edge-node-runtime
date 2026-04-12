@@ -340,6 +340,7 @@ class EdgeControlClient:
                 "runtime": {
                     "agent_version": self.settings.agent_version,
                     "docker_image": self.settings.docker_image,
+                    "current_model": self.settings.vllm_model,
                     "model_manifest_digest": model_manifest_digest,
                     "tokenizer_digest": tokenizer_digest,
                 },
@@ -347,6 +348,19 @@ class EdgeControlClient:
         )
         response.raise_for_status()
         self.clear_recovery_note()
+
+    def fetch_node_dashboard_summary(self) -> dict[str, Any]:
+        node_id, node_key = self.require_credentials()
+        response = self.client.post(
+            "/nodes/dashboard",
+            json={
+                "node_id": node_id,
+                "node_key": node_key,
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()
+        return payload if isinstance(payload, dict) else {}
 
     def pull_assignment(self) -> AssignmentEnvelope | None:
         response = self.client.post(

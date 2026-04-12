@@ -21,6 +21,7 @@ from urllib.parse import quote, unquote, urlparse
 import httpx
 
 from .autostart import AutoStartManager
+from .control_plane import EdgeControlClient
 from .desktop_launcher import DesktopLauncherManager
 from .installer import CommandRunner, GuidedInstaller, parse_env_file, run_command
 from .local_api_security import (
@@ -48,6 +49,8 @@ from .release_manifest import (
 from .runtime_layout import ensure_runtime_bundle, resolve_runtime_dir, service_access_host
 
 RUNTIME_SERVICES = ("vllm", "node-agent", "vector")
+SELF_HEAL_INTERVAL_SECONDS = 45
+REMOTE_DASHBOARD_CACHE_TTL_SECONDS = 30
 
 SENSITIVE_ENV_MARKERS = ("TOKEN", "SECRET", "KEY", "PASSWORD", "COOKIE", "CERT")
 
@@ -58,6 +61,60 @@ def now_iso() -> str:
 
 def request_id() -> str:
     return os.urandom(8).hex()
+
+
+def parse_iso_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def format_elapsed(seconds: float) -> str:
+    total_seconds = max(0, int(seconds))
+    days, remainder = divmod(total_seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, secs = divmod(remainder, 60)
+    parts: list[str] = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes and len(parts) < 2:
+        parts.append(f"{minutes}m")
+    if not parts:
+        parts.append(f"{secs}s")
+    return " ".join(parts[:2])
+
+
+def format_relative_time(value: str | None) -> str:
+    timestamp = parse_iso_timestamp(value)
+    if timestamp is None:
+        return "Waiting"
+    delta_seconds = max(0, int((datetime.now(timezone.utc) - timestamp).total_seconds()))
+    if delta_seconds < 10:
+        return "Just now"
+    if delta_seconds < 60:
+        return f"{delta_seconds}s ago"
+    if delta_seconds < 3600:
+        return f"{delta_seconds // 60}m ago"
+    if delta_seconds < 86400:
+        return f"{delta_seconds // 3600}h ago"
+    return f"{delta_seconds // 86400}d ago"
+
+
+def format_usd(amount: Any) -> str:
+    try:
+        numeric = float(amount)
+    except (TypeError, ValueError):
+        return "$0.00"
+    if numeric == 0:
+        return "$0.00"
+    if abs(numeric) >= 1:
+        return f"${numeric:,.2f}"
+    return f"${numeric:,.4f}"
 
 
 def service_html() -> str:
@@ -95,6 +152,29 @@ class DiagnosticsState:
     last_error: str | None = None
 
 
+@dataclass
+class SelfHealState:
+    enabled: bool = True
+    interval_seconds: int = SELF_HEAL_INTERVAL_SECONDS
+    status: str = "standing_by"
+    last_checked_at: str | None = None
+    last_result: str = "Self-healing is standing by."
+    last_error: str | None = None
+    last_issue: str | None = None
+    last_action: str | None = None
+    last_repaired_at: str | None = None
+    last_healthy_at: str | None = None
+    fix_available: bool = True
+    last_known_good_release_env: dict[str, str] | None = None
+
+
+@dataclass
+class RemoteDashboardCacheState:
+    fetched_at: str | None = None
+    payload: dict[str, Any] | None = None
+    last_error: str | None = None
+
+
 class NodeRuntimeService:
     def __init__(
         self,
@@ -129,9 +209,14 @@ class NodeRuntimeService:
         )
         self.lock = threading.Lock()
         self.shutdown_event = threading.Event()
+        self.repair_lock = threading.Lock()
         self.logs: list[str] = []
         self.update_state = UpdateState()
         self.diagnostics_state = DiagnosticsState()
+        self.self_heal_state = SelfHealState()
+        self.remote_dashboard_state = RemoteDashboardCacheState()
+        self.started_at = now_iso()
+        self.started_at_epoch = time.time()
         self.admin_token = generate_admin_token()
         self.sessions = LocalSessionStore()
         self.host = "127.0.0.1"
@@ -153,11 +238,13 @@ class NodeRuntimeService:
             return
         self.update_state = UpdateState(**payload.get("updates", {}))
         self.diagnostics_state = DiagnosticsState(**payload.get("diagnostics", {}))
+        self.self_heal_state = SelfHealState(**payload.get("self_healing", {}))
 
     def save_state(self) -> None:
         payload = {
             "updates": asdict(self.update_state),
             "diagnostics": asdict(self.diagnostics_state),
+            "self_healing": asdict(self.self_heal_state),
         }
         self.state_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         tighten_private_path(self.state_path)
@@ -168,10 +255,20 @@ class NodeRuntimeService:
             self.logs.append(stamped)
             self.logs = self.logs[-120:]
 
+    def update_self_heal_state(self, **updates: Any) -> None:
+        changed = False
+        for key, value in updates.items():
+            if getattr(self.self_heal_state, key) != value:
+                setattr(self.self_heal_state, key, value)
+                changed = True
+        if changed:
+            self.save_state()
+
     def compose_command(self, args: list[str]) -> list[str]:
+        self.guided_installer.sync_runtime_env()
         command = ["docker", "compose"]
-        if self.guided_installer.env_path.exists():
-            command.extend(["--env-file", str(self.guided_installer.env_path)])
+        if self.guided_installer.runtime_env_path.exists():
+            command.extend(["--env-file", str(self.guided_installer.runtime_env_path)])
         if self.release_env_path.exists():
             command.extend(["--env-file", str(self.release_env_path)])
         command.extend(args)
@@ -214,6 +311,63 @@ class NodeRuntimeService:
             return
         self.release_env_path.write_text(previous_content, encoding="utf-8")
 
+    def current_release_snapshot(self) -> dict[str, str] | None:
+        try:
+            manifest = self.signed_release_manifest()
+            return self.current_release_env(manifest)
+        except ReleaseManifestError:
+            values = parse_env_file(self.release_env_path)
+            return values or None
+
+    def remember_known_good_release(self) -> None:
+        snapshot = self.current_release_snapshot()
+        if not snapshot:
+            return
+        self.update_self_heal_state(
+            last_known_good_release_env=snapshot,
+            last_healthy_at=now_iso(),
+        )
+
+    def rollback_to_known_good_release(self, failure_reason: str) -> bool:
+        target = self.self_heal_state.last_known_good_release_env
+        if not target:
+            return False
+        current = self.current_release_snapshot()
+        if current == target:
+            return False
+
+        previous_content = self.release_env_path.read_text(encoding="utf-8") if self.release_env_path.exists() else None
+        rollback_id = request_id()
+        self.log(
+            f"[request {rollback_id}] Rolling back to the last known healthy signed release after: {failure_reason}"
+        )
+        try:
+            self.write_release_env(target)
+            self.start_runtime_services(recreate=True)
+            self.wait_for_runtime_health()
+        except Exception as error:
+            self.restore_release_env(previous_content)
+            self.log(
+                f"[request {rollback_id}] Rollback to the last known healthy signed release failed: {error}"
+            )
+            return False
+
+        self.update_state.pending_restart = False
+        self.update_state.last_error = None
+        self.update_state.last_result = "Self-healing rolled back to the last known healthy signed release."
+        self.update_self_heal_state(
+            status="healthy",
+            last_result="Self-healing rolled back to the last known healthy signed release.",
+            last_error=None,
+            last_issue=failure_reason,
+            last_action="rollback_bad_update",
+            last_repaired_at=now_iso(),
+            fix_available=False,
+        )
+        self.remember_known_good_release()
+        self.save_state()
+        return True
+
     def wait_for_runtime_health(self, timeout_seconds: float = 90.0) -> None:
         deadline = time.time() + timeout_seconds
         required_services = set(RUNTIME_SERVICES)
@@ -243,14 +397,25 @@ class NodeRuntimeService:
         installer_state: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         preflight = preflight or self.guided_installer.collect_preflight()
-        env_values = parse_env_file(self.guided_installer.env_path)
+        env_values = self.guided_installer.effective_runtime_env()
+        config_present = self.guided_installer.config_present()
         running_services = preflight.get("running_services", [])
         vllm_ready = False
+        current_model = str(env_values.get("VLLM_MODEL") or "").strip() or None
         if "vllm" in running_services:
             try:
                 response = httpx.get(f"http://{service_access_host()}:8000/v1/models", timeout=4.0)
                 vllm_ready = response.status_code < 500
-            except httpx.HTTPError:
+                if response.status_code < 500:
+                    payload = response.json()
+                    if isinstance(payload, dict):
+                        data = payload.get("data")
+                        if isinstance(data, list):
+                            for item in data:
+                                if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"].strip():
+                                    current_model = item["id"].strip()
+                                    break
+            except (ValueError, httpx.HTTPError):
                 vllm_ready = False
 
         installer_state = installer_state or self.guided_installer.state_payload()
@@ -263,7 +428,7 @@ class NodeRuntimeService:
         elif preflight.get("credentials_present"):
             stage = "ready"
             message = "Credentials are present. Start the runtime when ready."
-        elif env_values:
+        elif config_present and env_values:
             stage = "registration_required"
             message = "Node configuration is present, but this machine still needs approval."
         else:
@@ -276,14 +441,408 @@ class NodeRuntimeService:
             "preflight": preflight,
             "running_services": running_services,
             "vllm_ready": vllm_ready,
-            "config_present": self.guided_installer.env_path.exists(),
+            "current_model": current_model,
+            "config_present": config_present,
             "credentials_present": preflight.get("credentials_present", False),
+        }
+
+    def runtime_health_snapshot(self, *, installer_snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
+        installer_snapshot = installer_snapshot or self.guided_installer.status_payload()
+        preflight = installer_snapshot["preflight"]
+        installer_state = installer_snapshot["state"]
+        runtime = self.runtime_status(preflight=preflight, installer_state=installer_state)
+        running_services = set(preflight.get("running_services", []))
+        docker_ready = bool(preflight.get("docker_cli") and preflight.get("docker_compose") and preflight.get("docker_daemon"))
+        config_present = bool(runtime.get("config_present"))
+        credentials_present = bool(runtime.get("credentials_present"))
+        required_running = set(RUNTIME_SERVICES).issubset(running_services)
+        runtime_healthy = bool(
+            credentials_present
+            and runtime.get("stage") == "running"
+            and required_running
+            and runtime.get("vllm_ready")
+        )
+
+        issue_code: str | None = None
+        issue_detail: str | None = None
+        automatic_fix_available = False
+        manual_fix_available = False
+
+        if installer_state.get("busy"):
+            issue_code = "installer_busy"
+            issue_detail = "Quick Start is already running, so self-healing is waiting for it to finish first."
+        elif (
+            not config_present
+            or not self.guided_installer.runtime_settings_path.exists()
+            or not self.guided_installer.runtime_env_path.exists()
+        ):
+            issue_code = "missing_config"
+            issue_detail = "Local runtime settings are missing or incomplete on this machine."
+            automatic_fix_available = True
+            manual_fix_available = True
+        elif not docker_ready:
+            issue_code = "docker_unavailable"
+            issue_detail = str(
+                preflight.get("docker_error")
+                or "Docker needs attention before the runtime can be repaired."
+            )
+        elif credentials_present and not running_services:
+            issue_code = "runtime_stopped"
+            issue_detail = "The runtime is stopped even though this machine already has stored node credentials."
+            automatic_fix_available = True
+            manual_fix_available = True
+        elif credentials_present and not required_running:
+            missing = ", ".join(sorted(set(RUNTIME_SERVICES) - running_services)) or "unknown services"
+            issue_code = "stuck_containers"
+            issue_detail = f"Some runtime containers look stuck or missing: {missing}."
+            automatic_fix_available = True
+            manual_fix_available = True
+        elif credentials_present and not runtime.get("vllm_ready"):
+            issue_code = "runtime_unhealthy"
+            issue_detail = "The runtime containers are up, but vLLM is not responding yet."
+            automatic_fix_available = True
+            manual_fix_available = True
+        elif not credentials_present and config_present:
+            issue_code = "approval_required"
+            issue_detail = "This machine still needs approval before the runtime can come online."
+            manual_fix_available = True
+
+        return {
+            "installer_snapshot": installer_snapshot,
+            "preflight": preflight,
+            "installer_state": installer_state,
+            "runtime": runtime,
+            "issue_code": issue_code,
+            "issue_detail": issue_detail,
+            "runtime_healthy": runtime_healthy,
+            "docker_ready": docker_ready,
+            "credentials_present": credentials_present,
+            "config_present": config_present,
+            "running_services": sorted(running_services),
+            "automatic_fix_available": automatic_fix_available,
+            "manual_fix_available": manual_fix_available,
+        }
+
+    def self_heal_payload(self, health: dict[str, Any]) -> dict[str, Any]:
+        repairing = self.repair_lock.locked()
+        if repairing:
+            status = "repairing"
+            headline = "Self-healing is fixing this machine"
+            detail = self.self_heal_state.last_result or "Self-healing is applying a repair now."
+        elif health.get("issue_code"):
+            if health.get("manual_fix_available"):
+                status = "attention"
+                headline = "Self-healing found something to fix"
+            else:
+                status = "waiting"
+                headline = "Self-healing is standing by"
+            detail = str(
+                health.get("issue_detail")
+                or self.self_heal_state.last_result
+                or "Self-healing is monitoring this machine."
+            )
+        elif health.get("runtime_healthy"):
+            status = "healthy"
+            headline = "Self-healing is active"
+            detail = self.self_heal_state.last_result or "The runtime looks healthy and self-healing is monitoring it."
+        else:
+            status = "standing_by"
+            headline = "Self-healing is standing by"
+            detail = self.self_heal_state.last_result or "Self-healing is monitoring this machine."
+
+        return {
+            **asdict(self.self_heal_state),
+            "status": status,
+            "headline": headline,
+            "detail": detail,
+            "current_issue": health.get("issue_detail"),
+            "issue_code": health.get("issue_code"),
+            "manual_fix_available": bool(health.get("manual_fix_available")),
+            "automatic_fix_available": bool(health.get("automatic_fix_available")),
+            "action_label": "Fix it",
+        }
+
+    def build_control_client(self) -> EdgeControlClient | Any | None:
+        env_values = self.guided_installer.effective_runtime_env()
+        if not env_values:
+            return None
+        settings = self.guided_installer.build_installer_settings(env_values)
+        client = self.guided_installer.control_client_factory(settings)
+        raw_client = getattr(client, "client", None)
+        if raw_client is not None and hasattr(raw_client, "timeout"):
+            try:
+                raw_client.timeout = httpx.Timeout(5.0)
+            except Exception:
+                pass
+        return client
+
+    def remote_dashboard_snapshot(self, *, force: bool = False) -> dict[str, Any]:
+        with self.lock:
+            cached_state = RemoteDashboardCacheState(
+                fetched_at=self.remote_dashboard_state.fetched_at,
+                payload=self.remote_dashboard_state.payload,
+                last_error=self.remote_dashboard_state.last_error,
+            )
+        if not force and cached_state.fetched_at:
+            fetched_at = parse_iso_timestamp(cached_state.fetched_at)
+            if fetched_at and (datetime.now(timezone.utc) - fetched_at).total_seconds() < REMOTE_DASHBOARD_CACHE_TTL_SECONDS:
+                return {
+                    "summary": cached_state.payload,
+                    "synced_at": cached_state.fetched_at,
+                    "last_error": cached_state.last_error,
+                    "stale": False,
+                }
+
+        client = self.build_control_client()
+        if client is None:
+            return {
+                "summary": cached_state.payload,
+                "synced_at": cached_state.fetched_at,
+                "last_error": None,
+                "stale": bool(cached_state.payload),
+            }
+
+        try:
+            summary = client.fetch_node_dashboard_summary()
+        except RuntimeError as error:
+            message = str(error) or "Node dashboard sync is unavailable."
+            if "No stored node credentials were found" in message:
+                return {
+                    "summary": cached_state.payload,
+                    "synced_at": cached_state.fetched_at,
+                    "last_error": None,
+                    "stale": bool(cached_state.payload),
+                }
+            with self.lock:
+                self.remote_dashboard_state.last_error = message
+            return {
+                "summary": cached_state.payload,
+                "synced_at": cached_state.fetched_at,
+                "last_error": message,
+                "stale": bool(cached_state.payload),
+            }
+        except Exception as error:
+            message = str(error) or "Node dashboard sync is unavailable."
+            with self.lock:
+                self.remote_dashboard_state.last_error = message
+            return {
+                "summary": cached_state.payload,
+                "synced_at": cached_state.fetched_at,
+                "last_error": message,
+                "stale": bool(cached_state.payload),
+            }
+
+        fetched_at = now_iso()
+        with self.lock:
+            self.remote_dashboard_state = RemoteDashboardCacheState(
+                fetched_at=fetched_at,
+                payload=summary,
+                last_error=None,
+            )
+        return {
+            "summary": summary,
+            "synced_at": fetched_at,
+            "last_error": None,
+            "stale": False,
+        }
+
+    def dashboard_payload(self, health: dict[str, Any], installer_snapshot: dict[str, Any]) -> dict[str, Any]:
+        runtime = health.get("runtime", {})
+        installer_state = health.get("installer_state", {})
+        config = installer_snapshot.get("config", {})
+        updates = asdict(self.update_state)
+        remote = self.remote_dashboard_snapshot()
+        remote_summary = remote.get("summary") if isinstance(remote.get("summary"), dict) else {}
+        remote_node = remote_summary.get("node") if isinstance(remote_summary.get("node"), dict) else {}
+        remote_observability = (
+            remote_node.get("observability") if isinstance(remote_node.get("observability"), dict) else {}
+        )
+        remote_runtime = remote_node.get("runtime") if isinstance(remote_node.get("runtime"), dict) else {}
+        earnings = remote_summary.get("earnings") if isinstance(remote_summary.get("earnings"), dict) else {}
+
+        blocked_reason = (
+            remote_summary.get("blocked_reason")
+            if isinstance(remote_summary.get("blocked_reason"), str)
+            else remote_observability.get("schedulability_reason")
+        )
+        if not isinstance(blocked_reason, str) or not blocked_reason.strip():
+            blocked_reason = None
+
+        heartbeat_at = remote_node.get("last_heartbeat_at") if isinstance(remote_node.get("last_heartbeat_at"), str) else None
+        heartbeat_age_seconds: float | None = None
+        heartbeat_timestamp = parse_iso_timestamp(heartbeat_at)
+        if heartbeat_timestamp is not None:
+            heartbeat_age_seconds = max(0.0, (datetime.now(timezone.utc) - heartbeat_timestamp).total_seconds())
+
+        current_model = (
+            runtime.get("current_model")
+            or remote_runtime.get("current_model")
+            or config.get("vllm_model")
+            or config.get("recommended_model")
+        )
+        if current_model:
+            current_model = str(current_model)
+
+        accrued_value = format_usd(earnings.get("accrued_usd"))
+        transferred_value = format_usd(earnings.get("transferred_usd"))
+        last_payout = earnings.get("last_payout") if isinstance(earnings.get("last_payout"), dict) else None
+        last_payout_detail = ""
+        if last_payout is not None:
+            payout_amount = (
+                format_usd(last_payout.get("amount", {}).get("amount"))
+                if isinstance(last_payout.get("amount"), dict)
+                else "$0.00"
+            )
+            payout_status = str(last_payout.get("status") or "pending").replace("_", " ")
+            last_payout_detail = f" Last payout {payout_amount} is {payout_status}."
+
+        if health.get("runtime_healthy") and not blocked_reason:
+            health_value = "Healthy"
+            health_tone = "success"
+            health_detail = "This machine is online, healthy, and ready for work."
+        elif installer_state.get("busy"):
+            health_value = "Setting up"
+            health_tone = "warning"
+            health_detail = str(installer_state.get("message") or "Quick Start is still running.")
+        elif blocked_reason:
+            remote_status = str(remote_node.get("status") or "")
+            health_value = "Blocked"
+            health_tone = "danger" if remote_status in {"paused", "revoked"} else "warning"
+            health_detail = blocked_reason
+        elif health.get("issue_detail"):
+            health_value = "Needs attention"
+            health_tone = "danger"
+            health_detail = str(health["issue_detail"])
+        elif runtime.get("stage") in {"registration_required", "ready"}:
+            health_value = "Waiting"
+            health_tone = "warning"
+            health_detail = str(runtime.get("message") or "This machine still needs approval before it can serve work.")
+        else:
+            health_value = "Starting"
+            health_tone = "warning"
+            health_detail = str(runtime.get("message") or "The runtime is still coming online.")
+
+        if remote:
+            remote_issue = remote.get("last_error")
+            if isinstance(remote_issue, str) and remote_issue and not remote.get("summary"):
+                health_detail = f"{health_detail} Control plane sync is unavailable right now."
+
+        if earnings:
+            earnings_value = f"{accrued_value} pending"
+            earnings_detail = f"{transferred_value} transferred lifetime.{last_payout_detail}".strip()
+            earnings_tone = "success"
+        elif isinstance(remote.get("last_error"), str) and remote["last_error"]:
+            earnings_value = "Sync unavailable"
+            earnings_detail = str(remote["last_error"])
+            earnings_tone = "warning"
+        else:
+            earnings_value = "$0.00 pending"
+            earnings_detail = "Claim this node and keep it online to start accruing earnings."
+            earnings_tone = "warning"
+
+        if heartbeat_at:
+            heartbeat_value = format_relative_time(heartbeat_at)
+            heartbeat_detail = (
+                f"Last heartbeat at {heartbeat_at}. Queue depth {remote_node.get('queue_depth', 0)}. "
+                f"Active assignments {remote_node.get('active_assignments', 0)}."
+            )
+            heartbeat_tone = (
+                "success"
+                if heartbeat_age_seconds is not None and heartbeat_age_seconds <= 120
+                else "warning" if heartbeat_age_seconds is not None and heartbeat_age_seconds <= 300 else "danger"
+            )
+        elif isinstance(remote.get("last_error"), str) and remote["last_error"]:
+            heartbeat_value = "Sync unavailable"
+            heartbeat_detail = str(remote["last_error"])
+            heartbeat_tone = "warning"
+        else:
+            heartbeat_value = "Waiting"
+            heartbeat_detail = "The control plane has not recorded a heartbeat from this node yet."
+            heartbeat_tone = "warning"
+
+        if current_model:
+            model_value = current_model
+            model_detail = (
+                "This model is loaded in the local runtime."
+                if runtime.get("stage") == "running"
+                else "Quick Start will use this startup model on this machine."
+            )
+            model_tone = "success" if runtime.get("stage") == "running" else "warning"
+        else:
+            model_value = "Pending"
+            model_detail = "The local runtime has not selected a startup model yet."
+            model_tone = "warning"
+
+        uptime_value = format_elapsed(time.time() - self.started_at_epoch)
+        uptime_detail = f"Local service online since {self.started_at}."
+        uptime_tone = "success"
+
+        if blocked_reason:
+            blocked_value = "Action needed"
+            blocked_detail = blocked_reason
+            blocked_tone = "danger" if str(remote_node.get("status") or "") in {"paused", "revoked"} else "warning"
+        else:
+            blocked_value = "None"
+            blocked_detail = "The control plane is not currently blocking this node."
+            blocked_tone = "success"
+
+        if updates.get("last_error"):
+            update_value = "Needs attention"
+            update_detail = str(updates["last_error"])
+            update_tone = "danger"
+        elif updates.get("pending_restart"):
+            update_value = "Restart needed"
+            update_detail = str(updates.get("last_result") or "A signed runtime update is ready to take over after a restart.")
+            update_tone = "warning"
+        elif updates.get("release_version"):
+            update_value = "Up to date"
+            update_detail = str(
+                updates.get("last_result")
+                or f"Signed release {updates['release_version']} is active on this machine."
+            )
+            update_tone = "success"
+        else:
+            update_value = "Manual"
+            update_detail = str(updates.get("last_result") or "No signed update checks have run yet.")
+            update_tone = "warning"
+
+        if health_value == "Healthy":
+            headline = "Node live"
+            detail = "Health, earnings, heartbeat, and update state are all visible here."
+        elif health_value == "Setting up":
+            headline = "Quick Start is in progress"
+            detail = health_detail
+        elif health_value == "Blocked":
+            headline = "Node needs attention"
+            detail = health_detail
+        else:
+            headline = "Owner dashboard"
+            detail = health_detail
+
+        return {
+            "headline": headline,
+            "detail": detail,
+            "sync": {
+                "synced_at": remote.get("synced_at"),
+                "last_error": remote.get("last_error"),
+                "stale": bool(remote.get("stale")),
+            },
+            "cards": {
+                "health": {"value": health_value, "detail": health_detail, "tone": health_tone},
+                "earnings": {"value": earnings_value, "detail": earnings_detail, "tone": earnings_tone},
+                "heartbeat": {"value": heartbeat_value, "detail": heartbeat_detail, "tone": heartbeat_tone},
+                "model": {"value": model_value, "detail": model_detail, "tone": model_tone},
+                "uptime": {"value": uptime_value, "detail": uptime_detail, "tone": uptime_tone},
+                "blocked": {"value": blocked_value, "detail": blocked_detail, "tone": blocked_tone},
+                "updates": {"value": update_value, "detail": update_detail, "tone": update_tone},
+            },
         }
 
     def status_payload(self) -> dict[str, Any]:
         installer_snapshot = self.guided_installer.status_payload()
         preflight = installer_snapshot["preflight"]
         installer_state = installer_snapshot["state"]
+        health = self.runtime_health_snapshot(installer_snapshot=installer_snapshot)
         try:
             self.signed_release_manifest()
         except ReleaseManifestError:
@@ -297,82 +856,196 @@ class NodeRuntimeService:
                 "url": f"http://{self.host}:{self.port}",
                 "logs": service_logs,
             },
-            "runtime": self.runtime_status(preflight=preflight, installer_state=installer_state),
+            "runtime": health["runtime"],
             "installer": installer_snapshot,
             "owner_setup": installer_snapshot.get("owner_setup", {}),
+            "dashboard": self.dashboard_payload(health, installer_snapshot),
             "autostart": self.autostart_manager.status(),
             "desktop_launcher": self.desktop_launcher_manager.status(),
             "updates": asdict(self.update_state),
             "diagnostics": asdict(self.diagnostics_state),
+            "self_healing": self.self_heal_payload(health),
         }
 
-    def repair_runtime(self) -> dict[str, Any]:
-        self.log("Starting local repair for this machine...")
+    def ensure_local_config(self) -> bool:
         self.ensure_dirs()
         self.guided_installer.ensure_data_dirs()
 
-        if not self.guided_installer.env_path.exists():
+        repaired = False
+        env_values = self.guided_installer.effective_runtime_env()
+        if not env_values:
             env_values = self.guided_installer.build_env({"setup_mode": "quickstart"})
-            self.guided_installer.write_env_file(env_values)
-            self.log("Recreated the missing .env using Quick Start defaults and detected hardware.")
 
-        try:
-            autostart = self.autostart_manager.ensure_enabled()
-            self.log(str(autostart.get("detail") or "Automatic start status is unavailable."))
-        except Exception as error:
-            self.log(f"Automatic start could not be repaired automatically: {error}")
+        if not self.guided_installer.runtime_settings_path.exists():
+            self.guided_installer.write_runtime_settings(env_values)
+            repaired = True
+        if not self.guided_installer.runtime_env_path.exists():
+            self.guided_installer.write_runtime_env(env_values)
+            repaired = True
+        elif repaired:
+            self.guided_installer.sync_runtime_env()
 
-        try:
-            launcher = self.desktop_launcher_manager.ensure_enabled()
-            self.log(str(launcher.get("detail") or "Desktop launcher status is unavailable."))
-        except Exception as error:
-            self.log(f"The desktop launcher could not be repaired automatically: {error}")
+        if repaired:
+            self.log("Self-healing recreated the local node settings and generated a fresh runtime config.")
+        return repaired
 
-        installer_state = self.guided_installer.state_payload()
-        if installer_state.get("busy"):
-            self.log("Quick Start is already running. Waiting for the current setup flow to finish.")
-            return self.status_payload()
+    def start_runtime_services(self, *, recreate: bool) -> None:
+        if recreate:
+            self.log("Restarting runtime services...")
+            self.compose(["up", "-d", "--force-recreate", "vllm", "node-agent", "vector"])
+            self.update_state.pending_restart = False
+            self.save_state()
+            self.log("Runtime services restarted.")
+            return
 
-        preflight = self.guided_installer.collect_preflight()
-        if not (preflight.get("docker_cli") and preflight.get("docker_compose") and preflight.get("docker_daemon")):
-            self.log(preflight.get("docker_error") or "Docker needs attention before repair can continue.")
-            return self.status_payload()
-
-        runtime = self.runtime_status(preflight=preflight, installer_state=installer_state)
-        running_services = set(preflight.get("running_services", []))
-        runtime_healthy = (
-            runtime.get("stage") == "running"
-            and set(RUNTIME_SERVICES).issubset(running_services)
-            and bool(runtime.get("vllm_ready"))
-        )
-        if runtime_healthy:
-            self.log("Repair finished. The local runtime is already healthy.")
-            return self.status_payload()
-
-        if preflight.get("credentials_present"):
-            if running_services:
-                self.log("Repair is recreating the runtime services using stored node credentials.")
-                payload = self.restart_runtime()
-            else:
-                self.log("Repair is starting the runtime with stored node credentials.")
-                payload = self.start_runtime()
-            self.log("Repair finished. The runtime should be back online shortly.")
-            return payload
-
-        repair_config = self.guided_installer.current_config()
-        repair_config["setup_mode"] = "quickstart"
-        repair_config["setup_profile"] = str(
-            repair_config.get("setup_profile")
-            or repair_config.get("recommended_setup_profile")
-            or "balanced"
-        )
-        self.log("Repair is resuming Quick Start so this machine can be approved again.")
-        return self.guided_installer.start_install(repair_config)
-
-    def start_runtime(self) -> dict[str, Any]:
         self.log("Starting runtime services...")
         self.compose(["up", "-d", "vllm", "node-agent", "vector"])
         self.log("Runtime services started.")
+
+    def attempt_runtime_recovery(self, *, recreate: bool, failure_reason: str) -> tuple[bool, str, str]:
+        self.start_runtime_services(recreate=recreate)
+        try:
+            self.wait_for_runtime_health()
+        except Exception as error:
+            detail = str(error) or failure_reason
+            if self.rollback_to_known_good_release(detail):
+                return True, "Self-healing rolled back to the last known healthy signed release.", "rollback_bad_update"
+            return False, detail, "restart_runtime" if recreate else "start_runtime"
+
+        self.remember_known_good_release()
+        return True, "The runtime is healthy again.", "restart_runtime" if recreate else "start_runtime"
+
+    def repair_runtime(self, *, allow_quickstart_resume: bool = True) -> dict[str, Any]:
+        if not self.repair_lock.acquire(blocking=False):
+            self.log("A repair is already in progress for this machine.")
+            return self.status_payload()
+
+        payload: dict[str, Any] | None = None
+        use_status_payload = True
+        try:
+            self.log("Starting local repair for this machine...")
+            self.update_self_heal_state(
+                status="repairing",
+                last_checked_at=now_iso(),
+                last_result="Self-healing is fixing this machine now.",
+                last_error=None,
+                last_action="repair_runtime",
+                fix_available=True,
+            )
+            self.ensure_local_config()
+
+            try:
+                autostart = self.autostart_manager.ensure_enabled()
+                self.log(str(autostart.get("detail") or "Automatic start status is unavailable."))
+            except Exception as error:
+                self.log(f"Automatic start could not be repaired automatically: {error}")
+
+            try:
+                launcher = self.desktop_launcher_manager.ensure_enabled()
+                self.log(str(launcher.get("detail") or "Desktop launcher status is unavailable."))
+            except Exception as error:
+                self.log(f"The desktop launcher could not be repaired automatically: {error}")
+
+            health = self.runtime_health_snapshot()
+            installer_state = health["installer_state"]
+            preflight = health["preflight"]
+
+            if installer_state.get("busy"):
+                self.update_self_heal_state(
+                    status="standing_by",
+                    last_result="Quick Start is already running, so repair is waiting for that setup flow to finish.",
+                    last_issue=str(health.get("issue_detail") or ""),
+                    last_error=None,
+                    last_action="waiting_for_quick_start",
+                    fix_available=False,
+                )
+                use_status_payload = True
+            elif not health["docker_ready"]:
+                message = str(health.get("issue_detail") or "Docker needs attention before repair can continue.")
+                self.log(message)
+                self.update_self_heal_state(
+                    status="attention",
+                    last_result=message,
+                    last_issue=message,
+                    last_error=None,
+                    last_action="waiting_for_docker",
+                    fix_available=False,
+                )
+                use_status_payload = True
+            elif health["runtime_healthy"]:
+                self.remember_known_good_release()
+                self.update_self_heal_state(
+                    status="healthy",
+                    last_result="The runtime already looks healthy. Self-healing is standing by.",
+                    last_issue=None,
+                    last_error=None,
+                    last_action="monitor",
+                    last_repaired_at=now_iso(),
+                    fix_available=False,
+                )
+                use_status_payload = True
+            elif health["credentials_present"]:
+                recreate = bool(preflight.get("running_services")) or self.update_state.pending_restart
+                if recreate:
+                    self.log("Repair is recreating the runtime services using stored node credentials.")
+                else:
+                    self.log("Repair is starting the runtime with stored node credentials.")
+                success, message, action = self.attempt_runtime_recovery(
+                    recreate=recreate,
+                    failure_reason=str(health.get("issue_detail") or "The runtime did not recover."),
+                )
+                self.update_self_heal_state(
+                    status="healthy" if success else "error",
+                    last_result=(
+                        "Self-healing fixed the runtime and it should be healthy again."
+                        if success
+                        else f"Self-healing could not recover the runtime automatically: {message}"
+                    ),
+                    last_issue=str(health.get("issue_detail") or ""),
+                    last_error=None if success else message,
+                    last_action=action,
+                    last_repaired_at=now_iso() if success else self.self_heal_state.last_repaired_at,
+                    fix_available=not success,
+                )
+                use_status_payload = True
+            elif not allow_quickstart_resume:
+                self.update_self_heal_state(
+                    status="attention",
+                    last_result="Local setup files were repaired, but this machine still needs approval before it can come online.",
+                    last_issue=str(health.get("issue_detail") or ""),
+                    last_error=None,
+                    last_action="waiting_for_approval",
+                    fix_available=True,
+                )
+                use_status_payload = True
+            else:
+                repair_config = self.guided_installer.current_config()
+                repair_config["setup_mode"] = "quickstart"
+                repair_config["setup_profile"] = str(
+                    repair_config.get("setup_profile")
+                    or repair_config.get("recommended_setup_profile")
+                    or "balanced"
+                )
+                self.log("Repair is resuming Quick Start so this machine can be approved again.")
+                self.update_self_heal_state(
+                    status="repairing",
+                    last_result="Quick Start is resuming so this machine can be approved again.",
+                    last_issue=str(health.get("issue_detail") or ""),
+                    last_error=None,
+                    last_action="resume_quick_start",
+                    fix_available=True,
+                )
+                payload = self.guided_installer.start_install(repair_config)
+                use_status_payload = False
+        finally:
+            self.repair_lock.release()
+
+        if use_status_payload:
+            return self.status_payload()
+        return payload if payload is not None else self.status_payload()
+
+    def start_runtime(self) -> dict[str, Any]:
+        self.start_runtime_services(recreate=False)
         return self.status_payload()
 
     def stop_runtime(self) -> dict[str, Any]:
@@ -382,11 +1055,7 @@ class NodeRuntimeService:
         return self.status_payload()
 
     def restart_runtime(self) -> dict[str, Any]:
-        self.log("Restarting runtime services...")
-        self.compose(["up", "-d", "--force-recreate", "vllm", "node-agent", "vector"])
-        self.update_state.pending_restart = False
-        self.save_state()
-        self.log("Runtime services restarted.")
+        self.start_runtime_services(recreate=True)
         return self.status_payload()
 
     def docker_image_id(self, image: str) -> str | None:
@@ -484,6 +1153,7 @@ class NodeRuntimeService:
 
             self.update_state.last_result = f"Signed release {manifest.version} was applied successfully."
             self.update_state.pending_restart = False
+            self.remember_known_good_release()
             self.log(f"[request {rollout_id}] Signed runtime release {manifest.version} is now active.")
             self.save_state()
             return self.status_payload()
@@ -520,11 +1190,7 @@ class NodeRuntimeService:
         return self.status_payload()
 
     def redacted_env(self) -> str:
-        env_values = parse_env_file(
-            self.guided_installer.env_path
-            if self.guided_installer.env_path.exists()
-            else self.guided_installer.example_env_path
-        )
+        env_values = self.guided_installer.effective_runtime_env()
         lines: list[str] = []
         for key, value in env_values.items():
             if any(marker in key for marker in SENSITIVE_ENV_MARKERS):
@@ -533,6 +1199,21 @@ class NodeRuntimeService:
             else:
                 lines.append(f"{key}={value}")
         return "\n".join(lines) + ("\n" if lines else "")
+
+    def redacted_runtime_settings(self) -> str:
+        payload = self.guided_installer.load_runtime_settings()
+        if not payload:
+            return ""
+
+        config = payload.get("config")
+        if isinstance(config, dict):
+            redacted = dict(config)
+            for key in list(redacted):
+                if any(marker.lower() in key.lower() for marker in SENSITIVE_ENV_MARKERS):
+                    redacted[key] = "***REDACTED***" if redacted[key] else ""
+            payload = dict(payload)
+            payload["config"] = redacted
+        return json.dumps(payload, indent=2) + "\n"
 
     def command_output(self, args: list[str]) -> str:
         try:
@@ -555,6 +1236,8 @@ class NodeRuntimeService:
         with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             archive.writestr("status.json", json.dumps(payload, indent=2))
             archive.writestr("env.redacted", self.redacted_env())
+            if self.guided_installer.runtime_settings_path.exists():
+                archive.writestr("runtime-settings.redacted.json", self.redacted_runtime_settings())
             archive.writestr("service.log", "\n".join(payload["service"]["logs"]) + "\n")
             archive.writestr("installer.log", "\n".join(payload["installer"]["state"]["logs"]) + "\n")
             archive.writestr(
@@ -606,7 +1289,7 @@ class NodeRuntimeService:
     def auto_update_loop(self) -> None:
         while not self.shutdown_event.is_set():
             try:
-                if self.update_state.auto_update_enabled:
+                if self.update_state.auto_update_enabled and not self.repair_lock.locked():
                     due = False
                     if not self.update_state.last_checked_at:
                         due = True
@@ -625,6 +1308,77 @@ class NodeRuntimeService:
                 self.log(f"[request {loop_request_id}] Automatic signed runtime release check failed: {error}")
             self.shutdown_event.wait(60)
 
+    def self_heal_check(self) -> dict[str, Any]:
+        health = self.runtime_health_snapshot()
+        self.update_self_heal_state(
+            last_checked_at=now_iso(),
+            fix_available=bool(health.get("manual_fix_available")),
+        )
+
+        if health["runtime_healthy"]:
+            self.remember_known_good_release()
+            self.update_self_heal_state(
+                status="healthy",
+                last_result="The runtime looks healthy and self-healing is monitoring it.",
+                last_issue=None,
+                last_error=None,
+                last_action="monitor",
+                fix_available=False,
+            )
+            return self.status_payload()
+
+        if health["issue_code"] == "installer_busy":
+            self.update_self_heal_state(
+                status="standing_by",
+                last_result=str(health.get("issue_detail") or "Quick Start is still running."),
+                last_issue=str(health.get("issue_detail") or ""),
+                last_error=None,
+                last_action="waiting_for_quick_start",
+                fix_available=False,
+            )
+            return self.status_payload()
+
+        if not health["automatic_fix_available"]:
+            self.update_self_heal_state(
+                status="attention",
+                last_result=str(
+                    health.get("issue_detail")
+                    or "Self-healing found something it cannot repair automatically yet."
+                ),
+                last_issue=str(health.get("issue_detail") or ""),
+                last_error=None,
+                last_action="waiting_for_owner",
+                fix_available=bool(health.get("manual_fix_available")),
+            )
+            return self.status_payload()
+
+        self.log(
+            "Self-healing detected a runtime issue and is attempting an automatic repair: "
+            f"{health.get('issue_detail') or health.get('issue_code') or 'runtime issue'}"
+        )
+        return self.repair_runtime(allow_quickstart_resume=False)
+
+    def self_heal_loop(self) -> None:
+        while not self.shutdown_event.is_set():
+            try:
+                if self.self_heal_state.enabled and not self.repair_lock.locked():
+                    self.self_heal_check()
+            except Exception as error:  # pragma: no cover
+                loop_request_id = request_id()
+                self.update_self_heal_state(
+                    status="error",
+                    last_checked_at=now_iso(),
+                    last_result=(
+                        "Automatic self-healing hit an unexpected error. "
+                        f"Check the local service log with request id {loop_request_id}."
+                    ),
+                    last_error=str(error),
+                    last_action="self_heal_loop",
+                    fix_available=True,
+                )
+                self.log(f"[request {loop_request_id}] Automatic self-healing failed: {error}")
+            self.shutdown_event.wait(self.self_heal_state.interval_seconds)
+
     def request_shutdown(self) -> dict[str, Any]:
         self.log("Shutdown requested for node runtime service.")
         self.shutdown_event.set()
@@ -638,6 +1392,7 @@ class NodeRuntimeService:
                     "pid": os.getpid(),
                     "host": self.host,
                     "port": self.port,
+                    "started_at": self.started_at,
                     "admin_token": self.admin_token,
                 },
                 indent=2,
@@ -930,6 +1685,8 @@ def command_run(host: str, port: int) -> int:
     server_ref["server"] = server
     auto_thread = threading.Thread(target=service.auto_update_loop, daemon=True)
     auto_thread.start()
+    self_heal_thread = threading.Thread(target=service.self_heal_loop, daemon=True)
+    self_heal_thread.start()
 
     def request_stop(signum: int, _frame: Any) -> None:
         service.log(f"Node runtime service received signal {signum}.")
@@ -1039,7 +1796,7 @@ def command_repair(runtime_dir: Path, host: str, port: int, open_ui_flag: bool) 
     target_port = int(meta.get("port", port))
     admin_token = str(meta.get("admin_token", "") or "")
     headers = {ADMIN_TOKEN_HEADER: admin_token} if admin_token else None
-    response = httpx.post(f"http://{target_host}:{target_port}/api/repair", timeout=20.0, headers=headers)
+    response = httpx.post(f"http://{target_host}:{target_port}/api/repair", timeout=75.0, headers=headers)
     payload = response.json()
     if response.status_code >= 400 or payload.get("error"):
         detail = payload.get("error", {})
@@ -1051,7 +1808,11 @@ def command_repair(runtime_dir: Path, host: str, port: int, open_ui_flag: bool) 
         raise RuntimeError(str(message))
     if open_ui_flag:
         open_browser(target_host, target_port, admin_token or None)
-    print(payload.get("runtime", {}).get("message", "Local repair started."))
+    print(
+        payload.get("self_healing", {}).get("detail")
+        or payload.get("runtime", {}).get("message")
+        or "Local repair started."
+    )
     return 0
 
 

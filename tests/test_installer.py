@@ -14,6 +14,17 @@ def completed(args: list[str], stdout: str = "") -> subprocess.CompletedProcess[
     return subprocess.CompletedProcess(args=args, returncode=0, stdout=stdout, stderr="")
 
 
+def normalize_compose_args(args: list[str]) -> list[str]:
+    if args[:2] != ["docker", "compose"]:
+        return args
+    normalized = ["docker", "compose"]
+    index = 2
+    while index + 1 < len(args) and args[index] == "--env-file":
+        index += 2
+    normalized.extend(args[index:])
+    return normalized
+
+
 def write_example_env(runtime_dir: Path) -> None:
     (runtime_dir / ".env.example").write_text(
         "\n".join(
@@ -43,6 +54,23 @@ def write_example_env(runtime_dir: Path) -> None:
     )
 
 
+@pytest.fixture(autouse=True)
+def stable_machine_inference(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        installer_module,
+        "infer_node_region",
+        lambda: ("eu-se-1", "Recommended from the local locale (SE)."),
+    )
+    monkeypatch.setattr(
+        installer_module,
+        "detect_attestation_provider",
+        lambda *_args, **_kwargs: (
+            "simulated",
+            "This machine does not expose a ready hardware attestation device yet.",
+        ),
+    )
+
+
 def test_current_config_prefills_detected_gpu(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     runtime_dir = tmp_path
     write_example_env(runtime_dir)
@@ -52,6 +80,8 @@ def test_current_config_prefills_detected_gpu(tmp_path: Path, monkeypatch: pytes
     def runner(args: list[str], _cwd: Path) -> subprocess.CompletedProcess[str]:
         if args[0] == "nvidia-smi":
             return completed(args, stdout="RTX 4090, 24564\n")
+        if args[0] == "powershell":
+            return completed(args, stdout="simulated\n")
         if args[:3] == ["docker", "compose", "version"]:
             return completed(args)
         if args[:2] == ["docker", "info"]:
@@ -67,6 +97,9 @@ def test_current_config_prefills_detected_gpu(tmp_path: Path, monkeypatch: pytes
     assert config["gpu_memory_gb"] == "24.0"
     assert config["max_concurrent_assignments"] == "2"
     assert config["setup_profile"] == "balanced"
+    assert config["recommended_model"] == "meta-llama/Llama-3.1-8B-Instruct"
+    assert config["recommended_node_region"] == "eu-se-1"
+    assert config["premium_eligibility_label"] == "Community capacity enabled"
     assert "everyday setting" in config["profile_summary"]
 
 
@@ -77,6 +110,8 @@ def test_build_env_uses_quickstart_profile_defaults(tmp_path: Path, monkeypatch:
     def runner(args: list[str], _cwd: Path) -> subprocess.CompletedProcess[str]:
         if args[0] == "nvidia-smi":
             return completed(args, stdout="RTX 4090, 24564\n")
+        if args[0] == "powershell":
+            return completed(args, stdout="simulated\n")
         raise AssertionError(f"Unexpected command: {args}")
 
     installer = installer_module.GuidedInstaller(runtime_dir=tmp_path, command_runner=runner)
@@ -94,6 +129,10 @@ def test_build_env_uses_quickstart_profile_defaults(tmp_path: Path, monkeypatch:
     assert env_values["THERMAL_HEADROOM"] == "0.92"
     assert env_values["MAX_BATCH_TOKENS"] == "65000"
     assert env_values["NODE_LABEL"] == "AUTONOMOUSc RTX 4090 Node"
+    assert env_values["NODE_REGION"] == "eu-se-1"
+    assert env_values["TRUST_TIER"] == "standard"
+    assert env_values["RESTRICTED_CAPABLE"] == "false"
+    assert env_values["VLLM_MODEL"] == "meta-llama/Llama-3.1-8B-Instruct"
 
 
 def test_collect_preflight_reports_missing_docker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -119,15 +158,20 @@ def test_run_install_creates_claim_and_starts_runtime(tmp_path: Path, monkeypatc
 
     def runner(args: list[str], _cwd: Path) -> subprocess.CompletedProcess[str]:
         commands.append(args)
+        normalized = normalize_compose_args(args)
         if args[0] == "nvidia-smi":
             return completed(args, stdout="RTX 4090, 24564\n")
-        if args[:3] == ["docker", "compose", "version"]:
+        if args[0] == "powershell":
+            return completed(args, stdout="simulated\n")
+        if normalized[:3] == ["docker", "compose", "version"]:
             return completed(args)
         if args[:2] == ["docker", "info"]:
             return completed(args)
-        if args[:4] == ["docker", "compose", "ps", "--services"]:
+        if normalized[:4] == ["docker", "compose", "ps", "--services"]:
             return completed(args, stdout="")
-        if args[:3] == ["docker", "compose", "up"]:
+        if normalized[:3] == ["docker", "compose", "pull"]:
+            return completed(args)
+        if normalized[:3] == ["docker", "compose", "up"]:
             return completed(args)
         raise AssertionError(f"Unexpected command: {args}")
 
@@ -215,7 +259,7 @@ def test_run_install_creates_claim_and_starts_runtime(tmp_path: Path, monkeypatc
         desktop_launcher_manager=launcher,
         sleep=lambda _seconds: None,
     )
-    installer.wait_for_vllm = lambda timeout_seconds=240.0: None  # type: ignore[method-assign]
+    installer.wait_for_vllm = lambda timeout_seconds=240.0, model=None: None  # type: ignore[method-assign]
 
     installer.run_install(
         {
@@ -232,10 +276,20 @@ def test_run_install_creates_claim_and_starts_runtime(tmp_path: Path, monkeypatc
 
     assert installer.state.stage == "running"
     assert installer.credentials_path.exists()
-    assert ["docker", "compose", "up", "-d", "vllm"] in commands
-    assert ["docker", "compose", "up", "-d", "node-agent", "vector"] in commands
-    assert "Nordic Heat Compute" in (runtime_dir / ".env").read_text(encoding="utf-8")
-    assert "SETUP_PROFILE=balanced" in (runtime_dir / ".env").read_text(encoding="utf-8")
+    assert any(normalize_compose_args(command) == ["docker", "compose", "pull", "vllm"] for command in commands)
+    assert any(normalize_compose_args(command) == ["docker", "compose", "pull", "node-agent"] for command in commands)
+    assert any(normalize_compose_args(command) == ["docker", "compose", "pull", "vector"] for command in commands)
+    assert any(normalize_compose_args(command) == ["docker", "compose", "up", "-d", "vllm"] for command in commands)
+    assert any(
+        normalize_compose_args(command) == ["docker", "compose", "up", "-d", "node-agent", "vector"]
+        for command in commands
+    )
+    assert not (runtime_dir / ".env").exists()
+    assert "Nordic Heat Compute" in installer.runtime_env_path.read_text(encoding="utf-8")
+    assert "SETUP_PROFILE=balanced" in installer.runtime_env_path.read_text(encoding="utf-8")
+    settings_payload = json.loads(installer.runtime_settings_path.read_text(encoding="utf-8"))
+    assert settings_payload["config"]["node_label"] == "Nordic Heat Compute"
+    assert settings_payload["config"]["setup_profile"] == "balanced"
     assert autostart.ensure_calls == 1
     assert launcher.ensure_calls == 1
 
@@ -249,13 +303,16 @@ def test_run_install_skips_claim_when_credentials_exist(tmp_path: Path, monkeypa
 
     def runner(args: list[str], _cwd: Path) -> subprocess.CompletedProcess[str]:
         commands.append(args)
-        if args[:3] == ["docker", "compose", "version"]:
+        normalized = normalize_compose_args(args)
+        if args[0] == "powershell":
+            return completed(args, stdout="simulated\n")
+        if normalized[:3] == ["docker", "compose", "version"]:
             return completed(args)
         if args[:2] == ["docker", "info"]:
             return completed(args)
-        if args[:4] == ["docker", "compose", "ps", "--services"]:
+        if normalized[:4] == ["docker", "compose", "ps", "--services"]:
             return completed(args, stdout="")
-        if args[:3] == ["docker", "compose", "up"]:
+        if normalized[:3] == ["docker", "compose", "up"]:
             return completed(args)
         raise AssertionError(f"Unexpected command: {args}")
 
@@ -277,7 +334,10 @@ def test_run_install_skips_claim_when_credentials_exist(tmp_path: Path, monkeypa
     )
 
     assert installer.state.stage == "running"
-    assert ["docker", "compose", "up", "-d", "vllm", "node-agent", "vector"] in commands
+    assert any(
+        normalize_compose_args(command) == ["docker", "compose", "up", "-d", "vllm", "node-agent", "vector"]
+        for command in commands
+    )
 
 
 def test_installer_rejects_remote_bind_even_if_remote_flag_is_requested() -> None:
@@ -333,5 +393,142 @@ def test_status_payload_includes_owner_setup_guidance(tmp_path: Path, monkeypatc
     payload = installer.status_payload()
 
     assert payload["owner_setup"]["headline"] == "Start Docker Desktop"
-    assert payload["owner_setup"]["steps"][0]["label"] == "Check this machine"
+    assert [step["label"] for step in payload["owner_setup"]["steps"]] == [
+        "Checking Docker",
+        "Checking GPU",
+        "Downloading runtime",
+        "Warming model",
+        "Claiming node",
+        "Node live",
+    ]
+    assert payload["owner_setup"]["current_step"] == "checking_docker"
+    assert payload["owner_setup"]["eta_label"] == "Continue once this machine is ready."
+    assert payload["owner_setup"]["primary_action_label"] == "Start Quick Start"
     assert "desktop_launcher" in payload
+
+
+def test_status_payload_marks_download_step_active_when_machine_is_ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    write_example_env(tmp_path)
+
+    monkeypatch.setattr(installer_module.shutil, "which", lambda name: "docker" if name == "docker" else "nvidia-smi")
+
+    class FakeManager:
+        def status(self) -> dict[str, object]:
+            return {
+                "supported": True,
+                "enabled": False,
+                "label": "Available",
+                "detail": "Available.",
+            }
+
+    def runner(args: list[str], _cwd: Path) -> subprocess.CompletedProcess[str]:
+        if args[0] == "nvidia-smi":
+            return completed(args, stdout="RTX 4090, 24564\n")
+        if args[0] == "powershell":
+            return completed(args, stdout="simulated\n")
+        if args[:3] == ["docker", "compose", "version"]:
+            return completed(args)
+        if args[:2] == ["docker", "info"]:
+            return completed(args)
+        if args[:4] == ["docker", "compose", "ps", "--services"]:
+            return completed(args, stdout="")
+        raise AssertionError(f"Unexpected command: {args}")
+
+    installer = installer_module.GuidedInstaller(
+        runtime_dir=tmp_path,
+        command_runner=runner,
+        autostart_manager=FakeManager(),
+        desktop_launcher_manager=FakeManager(),
+    )
+    payload = installer.status_payload()
+
+    assert payload["owner_setup"]["current_step"] == "downloading_runtime"
+    assert payload["owner_setup"]["steps"][0]["status"] == "complete"
+    assert payload["owner_setup"]["steps"][1]["status"] == "complete"
+    assert payload["owner_setup"]["steps"][2]["status"] == "active"
+    recommendations = {item["key"]: item for item in payload["owner_setup"]["recommendations"]}
+    assert recommendations["startup_model"]["value"] == "meta-llama/Llama-3.1-8B-Instruct"
+    assert recommendations["concurrency"]["value"] == "2 active workloads"
+    assert recommendations["thermal_profile"]["value"] == "Balanced"
+    assert recommendations["region"]["value"] == "eu-se-1"
+    assert recommendations["startup_mode"]["value"] == "Launch on sign-in"
+    assert recommendations["premium_eligibility"]["value"] == "Community capacity enabled"
+
+
+def test_status_payload_shows_model_cache_progress_during_warmup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    write_example_env(tmp_path)
+    monkeypatch.setattr(installer_module.shutil, "which", lambda name: "docker" if name == "docker" else "nvidia-smi")
+
+    class FakeManager:
+        def status(self) -> dict[str, object]:
+            return {
+                "supported": True,
+                "enabled": True,
+                "label": "Enabled",
+                "detail": "Enabled.",
+            }
+
+    def runner(args: list[str], _cwd: Path) -> subprocess.CompletedProcess[str]:
+        if args[0] == "nvidia-smi":
+            return completed(args, stdout="RTX 4090, 24564\n")
+        if args[0] == "powershell":
+            return completed(args, stdout="simulated\n")
+        if args[:3] == ["docker", "compose", "version"]:
+            return completed(args)
+        if args[:2] == ["docker", "info"]:
+            return completed(args)
+        if args[:4] == ["docker", "compose", "ps", "--services"]:
+            return completed(args, stdout="")
+        raise AssertionError(f"Unexpected command: {args}")
+
+    installer = installer_module.GuidedInstaller(
+        runtime_dir=tmp_path,
+        command_runner=runner,
+        autostart_manager=FakeManager(),
+        desktop_launcher_manager=FakeManager(),
+    )
+    installer.state = installer_module.InstallerState(
+        stage="warming_model",
+        busy=True,
+        message="Warming the startup model and checking the local cache.",
+        stage_context={
+            "warm_model": "meta-llama/Llama-3.1-8B-Instruct",
+            "warm_expected_bytes": 1024**3,
+            "warm_downloaded_bytes": 512 * 1024**2,
+            "warm_progress_percent": 50,
+            "warm_reusing_cache": False,
+            "warm_observed_cache_bytes": 512 * 1024**2,
+        },
+    )
+
+    payload = installer.status_payload()
+
+    assert payload["owner_setup"]["current_step"] == "warming_model"
+    assert payload["owner_setup"]["eta_label"] == "First startup can take several minutes while the local model cache fills."
+    assert payload["owner_setup"]["steps"][3]["detail"].startswith("Caching meta-llama/Llama-3.1-8B-Instruct locally:")
+    assert payload["owner_setup"]["progress_percent"] > 50
+
+
+def test_wait_for_vllm_tracks_cache_progress_before_ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    write_example_env(tmp_path)
+    installer = installer_module.GuidedInstaller(runtime_dir=tmp_path, sleep=lambda _seconds: None)
+    installer.state = installer_module.InstallerState(stage="warming_model", busy=True)
+
+    observed_sizes = iter([0, 256 * 1024**2, 1024**3, 1024**3])
+
+    class FakeResponse:
+        def __init__(self, status_code: int) -> None:
+            self.status_code = status_code
+
+    responses = iter([FakeResponse(503), FakeResponse(200)])
+
+    monkeypatch.setattr(installer_module, "startup_model_artifact", lambda _model: object())
+    monkeypatch.setattr(installer_module, "artifact_total_size_bytes", lambda _artifact: 1024**3)
+    monkeypatch.setattr(installer_module, "directory_size_bytes", lambda _path: next(observed_sizes))
+    monkeypatch.setattr(installer_module.httpx, "get", lambda _url, timeout=5.0: next(responses))
+
+    installer.wait_for_vllm(model="meta-llama/Llama-3.1-8B-Instruct")
+
+    assert installer.state.stage_context["warm_progress_percent"] == 100
+    assert any("First startup is downloading about 1.0 GB" in message for message in installer.state.logs)
+    assert any("Model cache progress" in message for message in installer.state.logs)
