@@ -17,9 +17,62 @@ Contents:
 - `src/node_agent`: node enrollment, polling, assignment execution, and reporting
 - `Dockerfile`: container image build for the node agent
 - `Dockerfile.service`: owner-facing runtime manager image
+- `Dockerfile.single`: single-container runtime for Vast.ai Docker-style hosts
 - `docker-compose.yml`: local appliance runtime with `vllm` and `vector`
 - `.env.example`: advanced-mode environment override template
 - `build-manager-image.ps1` / `build-manager-image.sh`: build the runtime manager image
+
+## Single-container runtime
+
+Use `Dockerfile.single` when the node host gives you one Docker container, such as a Vast.ai Docker instance. This image runs `vllm` and `node-agent` in the same container, stores credentials and model cache in mounted volumes, and does not require Docker Compose or `/var/run/docker.sock`.
+
+Build locally:
+
+```bash
+docker build -f Dockerfile.single -t autonomousc-edge-node-single:dev .
+```
+
+Run with an operator token for first-time enrollment:
+
+```bash
+docker run --gpus all --rm \
+  -p 8000:8000 \
+  -e EDGE_CONTROL_URL=https://edge.autonomousc.com \
+  -e OPERATOR_TOKEN=<operator-token> \
+  -e NODE_LABEL="Vast test node" \
+  -e NODE_REGION=us-vast-1 \
+  -e VLLM_MODEL=meta-llama/Llama-3.1-8B-Instruct \
+  -e SUPPORTED_MODELS=meta-llama/Llama-3.1-8B-Instruct,BAAI/bge-large-en-v1.5 \
+  -e HUGGING_FACE_HUB_TOKEN=<hf-token-if-needed> \
+  -v autonomousc-edge-credentials:/var/lib/autonomousc/credentials \
+  -v autonomousc-edge-scratch:/var/lib/autonomousc/scratch \
+  -v autonomousc-hf-cache:/root/.cache/huggingface \
+  autonomousc-edge-node-single:dev
+```
+
+Run with pre-issued node credentials instead of an operator token:
+
+```bash
+docker run --gpus all --rm \
+  -p 8000:8000 \
+  -e EDGE_CONTROL_URL=https://edge.autonomousc.com \
+  -e NODE_ID=<node-id> \
+  -e NODE_KEY=<node-key> \
+  -e VLLM_MODEL=meta-llama/Llama-3.1-8B-Instruct \
+  -v autonomousc-edge-credentials:/var/lib/autonomousc/credentials \
+  -v autonomousc-edge-scratch:/var/lib/autonomousc/scratch \
+  -v autonomousc-hf-cache:/root/.cache/huggingface \
+  autonomousc-edge-node-single:dev
+```
+
+Useful single-container overrides:
+
+- `VLLM_EXTRA_ARGS` adds vLLM server flags, for example `--gpu-memory-utilization 0.85 --max-model-len 8192`.
+- `START_VLLM=false` skips the bundled vLLM process and points `node-agent` at `VLLM_BASE_URL`.
+- `NODE_AGENT_COMMAND` defaults to `node-agent start`; set it only for advanced debugging.
+- `VLLM_STARTUP_TIMEOUT_SECONDS` defaults to `600` because first model warm-up can be slow.
+
+The owner-manager UI remains the best local desktop path. `Dockerfile.single` is the best one-container path for rented GPU containers.
 
 ## Owner Install Target
 

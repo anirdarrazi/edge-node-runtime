@@ -381,6 +381,30 @@ class EdgeControlClient:
         payload = response.json()
         return payload if isinstance(payload, dict) else {}
 
+    def submit_support_bundle(
+        self,
+        bundle_name: str,
+        bundle_bytes: bytes,
+        *,
+        generated_at: str | None = None,
+    ) -> dict[str, Any]:
+        node_id, node_key = self.require_credentials()
+        response = self.client.post(
+            "/nodes/support-bundles",
+            json={
+                "node_id": node_id,
+                "node_key": node_key,
+                "bundle_name": bundle_name,
+                "bundle_content_base64": base64.b64encode(bundle_bytes).decode("ascii"),
+                "bundle_size_bytes": len(bundle_bytes),
+                "bundle_sha256": hashlib.sha256(bundle_bytes).hexdigest(),
+                "generated_at": generated_at,
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()
+        return payload if isinstance(payload, dict) else {}
+
     def pull_assignment(self) -> AssignmentEnvelope | None:
         response = self.client.post(
             "/nodes/assignments/pull",

@@ -1,6 +1,7 @@
 import subprocess
 import threading
 import zipfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -157,6 +158,78 @@ def test_create_diagnostics_bundle_redacts_sensitive_config(tmp_path: Path, monk
         installer_log = archive.read("installer.log").decode("utf-8")
         assert "Service started." in service_log
         assert "Installer is waiting for approval." in installer_log
+
+
+def test_send_support_bundle_uploads_bundle_and_records_case_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_example_env(tmp_path)
+    commands: list[list[str]] = []
+
+    class FakeControlClient:
+        def __init__(self, _settings) -> None:
+            self.calls: list[tuple[str, bytes, str | None]] = []
+
+        def submit_support_bundle(
+            self,
+            bundle_name: str,
+            bundle_bytes: bytes,
+            *,
+            generated_at: str | None = None,
+        ) -> dict[str, object]:
+            self.calls.append((bundle_name, bundle_bytes, generated_at))
+            return {
+                "case_id": "support_123",
+                "status": "received",
+                "bundle_name": bundle_name,
+                "received_at": "2026-04-12T12:00:00+00:00",
+            }
+
+    monkeypatch.setattr(installer_module.shutil, "which", lambda name: "docker" if name == "docker" else "nvidia-smi")
+
+    service = service_module.NodeRuntimeService(
+        runtime_dir=tmp_path,
+        command_runner=base_runner_factory(commands),
+    )
+    service.guided_installer.credentials_path.parent.mkdir(parents=True, exist_ok=True)
+    service.guided_installer.credentials_path.write_text("{}", encoding="utf-8")
+    fake_client = FakeControlClient(None)
+    service.guided_installer.control_client_factory = lambda _settings: fake_client  # type: ignore[method-assign]
+
+    payload = service.send_support_bundle()
+
+    assert service.diagnostics_state.last_case_id == "support_123"
+    assert service.diagnostics_state.last_bundle_name is not None
+    assert service.diagnostics_state.last_bundle_sent_at == "2026-04-12T12:00:00+00:00"
+    assert "support bundle sent successfully" in service.diagnostics_state.last_result.lower()
+    assert len(fake_client.calls) == 1
+    bundle_name, bundle_bytes, generated_at = fake_client.calls[0]
+    assert bundle_name == service.diagnostics_state.last_bundle_name
+    assert bundle_bytes[:2] == b"PK"
+    assert generated_at == service.diagnostics_state.last_bundle_created_at
+    assert payload["diagnostics"]["last_case_id"] == "support_123"
+
+
+def test_send_support_bundle_keeps_local_download_when_upload_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_example_env(tmp_path)
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(installer_module.shutil, "which", lambda name: "docker" if name == "docker" else "nvidia-smi")
+
+    service = service_module.NodeRuntimeService(
+        runtime_dir=tmp_path,
+        command_runner=base_runner_factory(commands),
+    )
+
+    payload = service.send_support_bundle()
+
+    assert service.diagnostics_state.last_bundle_name is not None
+    assert service.diagnostics_state.last_case_id is None
+    assert service.diagnostics_state.last_error is not None
+    assert "ready to download" in service.diagnostics_state.last_result.lower()
+    assert payload["diagnostics"]["last_bundle_name"] == service.diagnostics_state.last_bundle_name
 
 
 def test_check_for_updates_marks_runtime_for_restart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -319,9 +392,23 @@ def test_status_payload_merges_remote_owner_dashboard_summary(tmp_path: Path, mo
     monkeypatch.setattr(installer_module.shutil, "which", lambda name: "docker" if name == "docker" else "nvidia-smi")
     monkeypatch.setattr(service_module.httpx, "get", lambda url, timeout=4.0: FakeModelResponse())
 
+    class FakeManager:
+        def ensure_enabled(self) -> dict[str, object]:
+            return self.status()
+
+        def status(self) -> dict[str, object]:
+            return {
+                "supported": True,
+                "enabled": True,
+                "label": "Ready",
+                "detail": "Ready.",
+            }
+
     service = service_module.NodeRuntimeService(
         runtime_dir=tmp_path,
         command_runner=base_runner_factory(commands, running_services="vllm\nnode-agent\nvector\n"),
+        autostart_manager=FakeManager(),
+        desktop_launcher_manager=FakeManager(),
     )
     service.started_at = "2026-04-12T09:00:00+00:00"
     service.started_at_epoch = max(1.0, service.started_at_epoch - 3600)
@@ -340,8 +427,428 @@ def test_status_payload_merges_remote_owner_dashboard_summary(tmp_path: Path, mo
     assert "transferred lifetime" in dashboard["earnings"]["detail"]
     assert dashboard["heartbeat"]["value"]
     assert dashboard["model"]["value"] == "meta-llama/Llama-3.1-8B-Instruct"
-    assert dashboard["blocked"]["value"] == "None"
+    assert dashboard["idle"]["value"] == "Premium jobs unavailable on this machine"
+    assert "community capacity" in dashboard["idle"]["detail"].lower()
+    assert dashboard["changes"]["value"] == "No recent changes"
     assert dashboard["uptime"]["value"]
+
+
+def test_dashboard_payload_reports_waiting_for_approval(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    write_example_env(tmp_path)
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(installer_module.shutil, "which", lambda name: "docker" if name == "docker" else "nvidia-smi")
+
+    service = service_module.NodeRuntimeService(
+        runtime_dir=tmp_path,
+        command_runner=base_runner_factory(commands, running_services=""),
+    )
+    service.ensure_local_config()
+    installer_snapshot = service.guided_installer.status_payload()
+    health = service.runtime_health_snapshot(installer_snapshot=installer_snapshot)
+    dashboard = service.dashboard_payload(health, installer_snapshot)["cards"]
+
+    assert dashboard["idle"]["value"] == "Waiting for approval"
+    assert "approval" in dashboard["idle"]["detail"].lower()
+
+
+def test_dashboard_payload_reports_no_matching_jobs_when_idle_and_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_example_env(tmp_path)
+    commands: list[list[str]] = []
+
+    class FakeModelResponse:
+        status_code = 200
+
+        def json(self) -> dict[str, object]:
+            return {"data": [{"id": "meta-llama/Llama-3.1-8B-Instruct"}]}
+
+    monkeypatch.setattr(installer_module.shutil, "which", lambda name: "docker" if name == "docker" else "nvidia-smi")
+    monkeypatch.setattr(service_module.httpx, "get", lambda url, timeout=4.0: FakeModelResponse())
+    monkeypatch.setattr(
+        installer_module,
+        "detect_attestation_provider",
+        lambda *_args, **_kwargs: (
+            "hardware",
+            "This machine is ready for premium capacity after approval.",
+        ),
+    )
+
+    service = service_module.NodeRuntimeService(
+        runtime_dir=tmp_path,
+        command_runner=base_runner_factory(commands, running_services="vllm\nnode-agent\nvector\n"),
+    )
+    service.guided_installer.credentials_path.parent.mkdir(parents=True, exist_ok=True)
+    service.guided_installer.credentials_path.write_text(
+        '{"node_id":"node_123","node_key":"key_123456789012345678901234"}',
+        encoding="utf-8",
+    )
+    env_values = service.guided_installer.effective_runtime_env()
+    assert env_values is not None
+    env_values["ATTESTATION_PROVIDER"] = "hardware"
+    service.guided_installer.write_runtime_settings(env_values)
+    service.guided_installer.write_runtime_env(env_values)
+    service.remote_dashboard_snapshot = lambda force=False: {  # type: ignore[method-assign]
+        "summary": {
+            "node": {
+                "id": "node_123",
+                "status": "active",
+                "approval_status": "approved",
+                "queue_depth": 0,
+                "active_assignments": 0,
+                "last_heartbeat_at": "2026-04-12T10:00:00+00:00",
+                "runtime": {"current_model": "meta-llama/Llama-3.1-8B-Instruct"},
+                "observability": {
+                    "schedulable": True,
+                    "schedulability_reason": None,
+                },
+            },
+            "earnings": {},
+            "schedulable": True,
+            "blocked_reason": None,
+        },
+        "synced_at": "2026-04-12T10:00:00+00:00",
+        "last_error": None,
+        "stale": False,
+    }
+
+    payload = service.status_payload()
+    dashboard = payload["dashboard"]["cards"]
+
+    assert dashboard["idle"]["value"] == "No matching jobs right now"
+    assert "matching job" in dashboard["idle"]["detail"].lower()
+
+
+def test_dashboard_payload_explains_model_cache_reuse(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    write_example_env(tmp_path)
+    commands: list[list[str]] = []
+    cached_model_dir = (
+        tmp_path
+        / "data"
+        / "model-cache"
+        / "hub"
+        / "models--meta-llama--Llama-3.1-8B-Instruct"
+        / "blobs"
+    )
+    cached_model_dir.mkdir(parents=True)
+    (cached_model_dir / "model.safetensors").write_bytes(b"x" * 1024)
+
+    class FakeModelResponse:
+        status_code = 200
+
+        def json(self) -> dict[str, object]:
+            return {"data": [{"id": "meta-llama/Llama-3.1-8B-Instruct"}]}
+
+    monkeypatch.setattr(installer_module.shutil, "which", lambda name: "docker" if name == "docker" else "nvidia-smi")
+    monkeypatch.setattr(service_module.httpx, "get", lambda url, timeout=4.0: FakeModelResponse())
+
+    class FakeManager:
+        def ensure_enabled(self) -> dict[str, object]:
+            return self.status()
+
+        def status(self) -> dict[str, object]:
+            return {
+                "supported": True,
+                "enabled": True,
+                "label": "Ready",
+                "detail": "Ready.",
+            }
+
+    service = service_module.NodeRuntimeService(
+        runtime_dir=tmp_path,
+        command_runner=base_runner_factory(commands, running_services="vllm\nnode-agent\nvector\n"),
+        autostart_manager=FakeManager(),
+        desktop_launcher_manager=FakeManager(),
+    )
+    service.guided_installer.credentials_path.parent.mkdir(parents=True, exist_ok=True)
+    service.guided_installer.credentials_path.write_text(
+        '{"node_id":"node_123","node_key":"key_123456789012345678901234"}',
+        encoding="utf-8",
+    )
+    service.remote_dashboard_snapshot = lambda force=False: {  # type: ignore[method-assign]
+        "summary": {},
+        "synced_at": None,
+        "last_error": None,
+        "stale": False,
+    }
+
+    payload = service.status_payload()
+    model_cache = payload["dashboard"]["cards"]["model_cache"]
+
+    assert model_cache["value"] == "Warm"
+    assert "local cache" in model_cache["detail"].lower()
+    assert "future warm-ups should be faster" in model_cache["detail"].lower()
+    assert payload["model_cache"]["likely_model"] == "meta-llama/Llama-3.1-8B-Instruct"
+    assert payload["model_cache"]["likely_model_cache_bytes"] == 1024
+
+
+def test_self_heal_check_prewarms_control_plane_likely_model_when_idle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_example_env(tmp_path)
+    commands: list[list[str]] = []
+
+    class FakeModelResponse:
+        status_code = 200
+
+        def json(self) -> dict[str, object]:
+            return {"data": [{"id": "meta-llama/Llama-3.1-8B-Instruct"}]}
+
+    monkeypatch.setattr(installer_module.shutil, "which", lambda name: "docker" if name == "docker" else "nvidia-smi")
+    monkeypatch.setattr(service_module.httpx, "get", lambda url, timeout=4.0: FakeModelResponse())
+
+    class FakeReadyManager:
+        def ensure_enabled(self) -> dict[str, object]:
+            return self.status()
+
+        def status(self) -> dict[str, object]:
+            return {
+                "supported": True,
+                "enabled": True,
+                "label": "Ready",
+                "detail": "Ready.",
+            }
+
+    service = service_module.NodeRuntimeService(
+        runtime_dir=tmp_path,
+        command_runner=base_runner_factory(commands, running_services="vllm\nnode-agent\nvector\n"),
+        autostart_manager=FakeReadyManager(),
+        desktop_launcher_manager=FakeReadyManager(),
+    )
+    service.guided_installer.credentials_path.parent.mkdir(parents=True, exist_ok=True)
+    service.guided_installer.credentials_path.write_text(
+        '{"node_id":"node_123","node_key":"key_123456789012345678901234"}',
+        encoding="utf-8",
+    )
+    service.ensure_local_config()
+    service.remote_dashboard_snapshot = lambda force=False: {  # type: ignore[method-assign]
+        "summary": {
+            "node": {
+                "id": "node_123",
+                "status": "active",
+                "approval_status": "approved",
+                "queue_depth": 3,
+                "active_assignments": 0,
+                "runtime": {"current_model": "meta-llama/Llama-3.1-8B-Instruct"},
+                "observability": {
+                    "schedulable": True,
+                    "schedulability_reason": None,
+                },
+            },
+            "model_demand": {
+                "source": "queued_matching_work",
+                "recommended_model": "BAAI/bge-large-en-v1.5",
+                "models": [
+                    {
+                        "model": "BAAI/bge-large-en-v1.5",
+                        "ready_count": 4,
+                        "item_count": 4,
+                    }
+                ],
+            },
+        },
+        "synced_at": "2026-04-12T10:00:00+00:00",
+        "last_error": None,
+        "stale": False,
+    }
+    monkeypatch.setattr(service, "wait_for_runtime_health", lambda timeout_seconds=90.0: None)
+
+    payload = service.self_heal_check()
+
+    env_text = service.guided_installer.runtime_env_path.read_text(encoding="utf-8")
+    assert "VLLM_MODEL=BAAI/bge-large-en-v1.5" in env_text
+    assert service.model_cache_state.last_warmed_model == "BAAI/bge-large-en-v1.5"
+    assert service.self_heal_state.last_action == "model_cache_prewarm"
+    assert any(
+        command[:2] == ["docker", "compose"] and "--force-recreate" in command
+        for command in commands
+    )
+    assert payload["dashboard"]["cards"]["model_cache"]["value"]
+
+
+def test_prewarm_rolls_back_bad_model_switch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    write_example_env(tmp_path)
+    commands: list[list[str]] = []
+    monkeypatch.setattr(installer_module.shutil, "which", lambda name: "docker" if name == "docker" else "nvidia-smi")
+
+    service = service_module.NodeRuntimeService(
+        runtime_dir=tmp_path,
+        command_runner=base_runner_factory(commands, running_services="vllm\nnode-agent\nvector\n"),
+    )
+    service.ensure_local_config()
+    attempts = {"count": 0}
+
+    def fail_then_recover(timeout_seconds: float = 90.0) -> None:
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise RuntimeError("new model failed to warm")
+
+    monkeypatch.setattr(service, "wait_for_runtime_health", fail_then_recover)
+
+    with pytest.raises(RuntimeError, match="new model failed"):
+        service.prewarm_likely_model("BAAI/bge-large-en-v1.5", "meta-llama/Llama-3.1-8B-Instruct")
+
+    env_text = service.guided_installer.runtime_env_path.read_text(encoding="utf-8")
+    assert "VLLM_MODEL=meta-llama/Llama-3.1-8B-Instruct" in env_text
+    assert attempts["count"] == 2
+    assert sum(1 for command in commands if command[:2] == ["docker", "compose"] and "--force-recreate" in command) == 2
+
+
+def test_evict_cold_model_cache_preserves_current_and_likely_models(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_example_env(tmp_path)
+    commands: list[list[str]] = []
+    monkeypatch.setattr(installer_module.shutil, "which", lambda name: "docker" if name == "docker" else "nvidia-smi")
+
+    service = service_module.NodeRuntimeService(
+        runtime_dir=tmp_path,
+        command_runner=base_runner_factory(commands),
+    )
+    hot_path = (
+        tmp_path
+        / "data"
+        / "model-cache"
+        / "hub"
+        / "models--meta-llama--Llama-3.1-8B-Instruct"
+        / "blobs"
+    )
+    cold_path = (
+        tmp_path
+        / "data"
+        / "model-cache"
+        / "hub"
+        / "models--BAAI--bge-large-en-v1.5"
+        / "blobs"
+    )
+    hot_path.mkdir(parents=True)
+    cold_path.mkdir(parents=True)
+    (hot_path / "model.safetensors").write_bytes(b"hot")
+    (cold_path / "model.safetensors").write_bytes(b"cold-cache")
+
+    now = datetime(2026, 4, 12, tzinfo=timezone.utc)
+    service.model_cache_state.last_used_by_model = {
+        "meta-llama/Llama-3.1-8B-Instruct": now.isoformat(),
+        "BAAI/bge-large-en-v1.5": (now - timedelta(days=9)).isoformat(),
+    }
+
+    evicted_model, evicted_bytes = service.evict_cold_model_cache(
+        protected_models={"meta-llama/Llama-3.1-8B-Instruct"},
+        cache_pressure=True,
+        now=now,
+    )
+
+    assert evicted_model == "BAAI/bge-large-en-v1.5"
+    assert evicted_bytes == len(b"cold-cache")
+    assert hot_path.exists()
+    assert not cold_path.parent.exists()
+
+
+def test_dashboard_payload_reports_staged_update_as_idle_reason(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    write_example_env(tmp_path)
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(installer_module.shutil, "which", lambda name: "docker" if name == "docker" else "nvidia-smi")
+
+    service = service_module.NodeRuntimeService(
+        runtime_dir=tmp_path,
+        command_runner=base_runner_factory(commands, running_services=""),
+    )
+    service.update_state.pending_restart = True
+    service.update_state.last_checked_at = "2026-04-12T10:05:00+00:00"
+    service.update_state.last_result = "Signed release 2026.04.12 was downloaded and is ready to apply."
+
+    installer_snapshot = service.guided_installer.status_payload()
+    health = service.runtime_health_snapshot(installer_snapshot=installer_snapshot)
+    dashboard = service.dashboard_payload(health, installer_snapshot)["cards"]
+
+    assert dashboard["idle"]["value"] == "Update staged, restart pending"
+    assert dashboard["changes"]["value"] == "Signed update staged"
+    assert "ready to apply" in dashboard["changes"]["detail"].lower()
+
+
+def test_runtime_health_snapshot_reports_low_disk_guidance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    write_example_env(tmp_path)
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(installer_module.shutil, "which", lambda name: "docker" if name == "docker" else "nvidia-smi")
+
+    service = service_module.NodeRuntimeService(
+        runtime_dir=tmp_path,
+        command_runner=base_runner_factory(commands),
+    )
+    service.ensure_local_config()
+
+    installer_snapshot = service.guided_installer.status_payload()
+    installer_snapshot["preflight"]["disk"] = {
+        "free_gb": 12,
+        "total_gb": 100,
+        "recommended_free_gb": 30,
+        "ok": False,
+    }
+
+    health = service.runtime_health_snapshot(installer_snapshot=installer_snapshot)
+    self_healing = service.self_heal_payload(health)
+
+    assert health["issue_code"] == "disk_low"
+    assert "free up at least 30 gb" in str(health["issue_detail"]).lower()
+    assert self_healing["action_label"] == "Check storage"
+
+
+def test_runtime_health_snapshot_reports_docker_not_running_guidance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_example_env(tmp_path)
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(installer_module.shutil, "which", lambda name: "docker" if name == "docker" else "nvidia-smi")
+
+    service = service_module.NodeRuntimeService(
+        runtime_dir=tmp_path,
+        command_runner=base_runner_factory(commands),
+    )
+    service.ensure_local_config()
+
+    installer_snapshot = service.guided_installer.status_payload()
+    installer_snapshot["preflight"]["docker_cli"] = True
+    installer_snapshot["preflight"]["docker_compose"] = True
+    installer_snapshot["preflight"]["docker_daemon"] = False
+    installer_snapshot["preflight"]["docker_error"] = "Docker Desktop is installed, but the engine is not running."
+
+    health = service.runtime_health_snapshot(installer_snapshot=installer_snapshot)
+    self_healing = service.self_heal_payload(health)
+
+    assert health["issue_code"] == "docker_not_running"
+    assert "docker" in str(health["issue_detail"]).lower()
+    assert self_healing["action_label"] == "Check Docker"
+
+
+def test_runtime_health_snapshot_reports_missing_gpu_guidance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    write_example_env(tmp_path)
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(installer_module.shutil, "which", lambda name: "docker" if name == "docker" else "nvidia-smi")
+
+    service = service_module.NodeRuntimeService(
+        runtime_dir=tmp_path,
+        command_runner=base_runner_factory(commands),
+    )
+    service.ensure_local_config()
+
+    installer_snapshot = service.guided_installer.status_payload()
+    installer_snapshot["preflight"]["gpu"] = {
+        "detected": False,
+        "name": "",
+        "memory_gb": None,
+    }
+
+    health = service.runtime_health_snapshot(installer_snapshot=installer_snapshot)
+    self_healing = service.self_heal_payload(health)
+
+    assert health["issue_code"] == "gpu_missing"
+    assert "nvidia gpu" in str(health["issue_detail"]).lower()
+    assert self_healing["action_label"] == "Check GPU"
 
 
 def test_repair_runtime_recreates_env_and_restarts_claimed_runtime(
@@ -540,6 +1047,92 @@ def test_self_heal_check_rolls_back_bad_signed_release(tmp_path: Path, monkeypat
         if command[:2] == ["docker", "compose"] and "--force-recreate" in command
     ) >= 2
     assert payload["self_healing"]["headline"]
+
+
+def test_self_heal_check_repairs_windows_startup_when_runtime_is_healthy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_example_env(tmp_path)
+    commands: list[list[str]] = []
+
+    class FakeModelResponse:
+        status_code = 200
+
+        def json(self) -> dict[str, object]:
+            return {"data": [{"id": "meta-llama/Llama-3.1-8B-Instruct"}]}
+
+    class FakeAutoStartManager:
+        platform_name = "nt"
+
+        def __init__(self) -> None:
+            self.enabled = False
+            self.ensure_calls = 0
+
+        def ensure_enabled(self) -> dict[str, object]:
+            self.ensure_calls += 1
+            self.enabled = True
+            return self.status()
+
+        def status(self) -> dict[str, object]:
+            return {
+                "supported": True,
+                "enabled": self.enabled,
+                "label": "Enabled" if self.enabled else "Disabled",
+                "detail": (
+                    "Automatic start is enabled."
+                    if self.enabled
+                    else "Automatic start is disabled."
+                ),
+            }
+
+    class FakeDesktopLauncherManager:
+        def __init__(self) -> None:
+            self.enabled = False
+            self.ensure_calls = 0
+
+        def ensure_enabled(self) -> dict[str, object]:
+            self.ensure_calls += 1
+            self.enabled = True
+            return self.status()
+
+        def status(self) -> dict[str, object]:
+            return {
+                "supported": True,
+                "enabled": self.enabled,
+                "label": "Installed" if self.enabled else "Missing",
+                "detail": (
+                    "The desktop launcher is installed."
+                    if self.enabled
+                    else "The desktop launcher is missing."
+                ),
+            }
+
+    autostart = FakeAutoStartManager()
+    launcher = FakeDesktopLauncherManager()
+
+    monkeypatch.setattr(installer_module.shutil, "which", lambda name: "docker" if name == "docker" else "nvidia-smi")
+    monkeypatch.setattr(service_module.httpx, "get", lambda url, timeout=4.0: FakeModelResponse())
+
+    service = service_module.NodeRuntimeService(
+        runtime_dir=tmp_path,
+        command_runner=base_runner_factory(commands, running_services="node-agent\nvllm\nvector\n"),
+        autostart_manager=autostart,
+        desktop_launcher_manager=launcher,
+    )
+    service.guided_installer.credentials_path.parent.mkdir(parents=True, exist_ok=True)
+    service.guided_installer.credentials_path.write_text("{}", encoding="utf-8")
+
+    payload = service.self_heal_check()
+
+    assert autostart.ensure_calls == 1
+    assert launcher.ensure_calls == 1
+    assert service.self_heal_state.last_action == "repair_startup"
+    assert "windows startup" in str(service.self_heal_state.last_result).lower()
+    assert payload["self_healing"]["status"] == "healthy"
+    assert not any(
+        command[:3] == ["docker", "compose", "up"]
+        for command in commands
+    )
 
 
 def test_self_heal_check_repairs_missing_config_without_resuming_quick_start(

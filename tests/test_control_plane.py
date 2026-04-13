@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import os
 from pathlib import Path
@@ -233,6 +234,22 @@ class DashboardClient:
         )
 
 
+class SupportClient:
+    def __init__(self):
+        self.calls = []
+
+    def post(self, path, json):
+        self.calls.append((path, json))
+        return DummyResponse(
+            {
+                "case_id": "support_123",
+                "status": "received",
+                "bundle_name": json["bundle_name"],
+                "received_at": "2026-04-12T12:00:00Z",
+            }
+        )
+
+
 def test_fetch_node_dashboard_summary_uses_stored_credentials(tmp_path: Path):
     credentials_path = tmp_path / "credentials" / "node.json"
     settings = build_settings(credentials_path, operator_token=None)
@@ -253,6 +270,32 @@ def test_fetch_node_dashboard_summary_uses_stored_credentials(tmp_path: Path):
             },
         )
     ]
+
+
+def test_submit_support_bundle_uses_stored_credentials(tmp_path: Path):
+    credentials_path = tmp_path / "credentials" / "node.json"
+    settings = build_settings(credentials_path, operator_token=None)
+    client = EdgeControlClient(settings)
+    client.persist_credentials("node_123", "key_123456789012345678901234")
+    support_client = SupportClient()
+    client.client = support_client
+
+    payload = client.submit_support_bundle(
+        "diagnostics-20260412-120000.zip",
+        b"zip-bytes",
+        generated_at="2026-04-12T11:59:00Z",
+    )
+
+    assert payload["case_id"] == "support_123"
+    path, body = support_client.calls[0]
+    assert path == "/nodes/support-bundles"
+    assert body["node_id"] == "node_123"
+    assert body["node_key"] == "key_123456789012345678901234"
+    assert body["bundle_name"] == "diagnostics-20260412-120000.zip"
+    assert body["bundle_size_bytes"] == len(b"zip-bytes")
+    assert body["bundle_sha256"] == hashlib.sha256(b"zip-bytes").hexdigest()
+    assert body["generated_at"] == "2026-04-12T11:59:00Z"
+    assert base64.b64decode(body["bundle_content_base64"]) == b"zip-bytes"
 
 
 class ArtifactResponse:

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import signal
+import shutil
 import subprocess
 import sys
 import threading
@@ -23,7 +25,16 @@ import httpx
 from .autostart import AutoStartManager
 from .control_plane import EdgeControlClient
 from .desktop_launcher import DesktopLauncherManager
-from .installer import CommandRunner, GuidedInstaller, parse_env_file, run_command
+from .installer import (
+    CommandRunner,
+    GuidedInstaller,
+    artifact_total_size_bytes,
+    directory_size_bytes,
+    format_bytes,
+    parse_env_file,
+    run_command,
+    startup_model_artifact,
+)
 from .local_api_security import (
     ADMIN_TOKEN_HEADER,
     LOCAL_SESSION_COOKIE,
@@ -51,6 +62,7 @@ from .runtime_layout import ensure_runtime_bundle, resolve_runtime_dir, service_
 RUNTIME_SERVICES = ("vllm", "node-agent", "vector")
 SELF_HEAL_INTERVAL_SECONDS = 45
 REMOTE_DASHBOARD_CACHE_TTL_SECONDS = 30
+MODEL_CACHE_COLD_SECONDS = 7 * 24 * 60 * 60
 
 SENSITIVE_ENV_MARKERS = ("TOKEN", "SECRET", "KEY", "PASSWORD", "COOKIE", "CERT")
 
@@ -117,6 +129,13 @@ def format_usd(amount: Any) -> str:
     return f"${numeric:,.4f}"
 
 
+def coerce_nonnegative_int(value: Any) -> int:
+    try:
+        return max(0, int(float(str(value).strip())))
+    except (TypeError, ValueError):
+        return 0
+
+
 def service_html() -> str:
     return Path(__file__).with_name("service_ui.html").read_text(encoding="utf-8")
 
@@ -149,6 +168,9 @@ class UpdateState:
 class DiagnosticsState:
     last_bundle_name: str | None = None
     last_bundle_created_at: str | None = None
+    last_bundle_sent_at: str | None = None
+    last_case_id: str | None = None
+    last_result: str = "No support bundle has been sent yet."
     last_error: str | None = None
 
 
@@ -173,6 +195,23 @@ class RemoteDashboardCacheState:
     fetched_at: str | None = None
     payload: dict[str, Any] | None = None
     last_error: str | None = None
+
+
+@dataclass
+class ModelCacheState:
+    enabled: bool = True
+    last_checked_at: str | None = None
+    last_result: str = "Model cache management is standing by."
+    last_error: str | None = None
+    likely_model: str | None = None
+    likely_model_source: str | None = None
+    last_warmed_model: str | None = None
+    last_warmed_at: str | None = None
+    last_evicted_model: str | None = None
+    last_evicted_bytes: int = 0
+    last_evicted_at: str | None = None
+    cache_bytes: int = 0
+    last_used_by_model: dict[str, str] = field(default_factory=dict)
 
 
 class NodeRuntimeService:
@@ -217,6 +256,7 @@ class NodeRuntimeService:
         self.diagnostics_state = DiagnosticsState()
         self.self_heal_state = SelfHealState()
         self.remote_dashboard_state = RemoteDashboardCacheState()
+        self.model_cache_state = ModelCacheState()
         self.started_at = now_iso()
         self.started_at_epoch = time.time()
         self.admin_token = generate_admin_token()
@@ -241,12 +281,14 @@ class NodeRuntimeService:
         self.update_state = UpdateState(**payload.get("updates", {}))
         self.diagnostics_state = DiagnosticsState(**payload.get("diagnostics", {}))
         self.self_heal_state = SelfHealState(**payload.get("self_healing", {}))
+        self.model_cache_state = ModelCacheState(**payload.get("model_cache", {}))
 
     def save_state(self) -> None:
         payload = {
             "updates": asdict(self.update_state),
             "diagnostics": asdict(self.diagnostics_state),
             "self_healing": asdict(self.self_heal_state),
+            "model_cache": asdict(self.model_cache_state),
         }
         self.state_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         tighten_private_path(self.state_path)
@@ -448,6 +490,53 @@ class NodeRuntimeService:
             "credentials_present": preflight.get("credentials_present", False),
         }
 
+    def startup_health_payload(
+        self,
+        *,
+        autostart: dict[str, Any],
+        desktop_launcher: dict[str, Any],
+        config_present: bool,
+        credentials_present: bool,
+    ) -> dict[str, Any] | None:
+        platform_name = str(getattr(self.autostart_manager, "platform_name", os.name))
+        if platform_name != "nt" or not (credentials_present or config_present):
+            return None
+
+        autostart_supported = bool(autostart.get("supported"))
+        autostart_enabled = bool(autostart.get("enabled"))
+        launcher_supported = bool(desktop_launcher.get("supported"))
+        launcher_enabled = bool(desktop_launcher.get("enabled"))
+
+        if autostart_supported and autostart_enabled:
+            return None
+
+        if not autostart_supported:
+            detail = str(
+                autostart.get("detail")
+                or "Windows sign-in launch is unavailable on this machine right now."
+            )
+            return {
+                "issue_code": "startup_unavailable",
+                "issue_detail": detail,
+                "automatic_fix_available": False,
+                "manual_fix_available": True,
+                "issue_action_label": "Check startup",
+            }
+
+        detail = (
+            "Windows sign-in launch is disabled or missing for this node. "
+            "Self-healing can reinstall it automatically so the node comes back after you sign in."
+        )
+        if launcher_supported and not launcher_enabled:
+            detail += " The desktop launcher can be repaired at the same time."
+        return {
+            "issue_code": "startup_not_configured",
+            "issue_detail": detail,
+            "automatic_fix_available": True,
+            "manual_fix_available": True,
+            "issue_action_label": "Fix startup",
+        }
+
     def runtime_health_snapshot(self, *, installer_snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
         installer_snapshot = installer_snapshot or self.guided_installer.status_payload()
         preflight = installer_snapshot["preflight"]
@@ -457,6 +546,18 @@ class NodeRuntimeService:
         docker_ready = bool(preflight.get("docker_cli") and preflight.get("docker_compose") and preflight.get("docker_daemon"))
         config_present = bool(runtime.get("config_present"))
         credentials_present = bool(runtime.get("credentials_present"))
+        disk = preflight.get("disk") if isinstance(preflight.get("disk"), dict) else {}
+        gpu = preflight.get("gpu") if isinstance(preflight.get("gpu"), dict) else {}
+        autostart = (
+            installer_snapshot.get("autostart")
+            if isinstance(installer_snapshot.get("autostart"), dict)
+            else self.autostart_manager.status()
+        )
+        desktop_launcher = (
+            installer_snapshot.get("desktop_launcher")
+            if isinstance(installer_snapshot.get("desktop_launcher"), dict)
+            else self.desktop_launcher_manager.status()
+        )
         required_running = set(RUNTIME_SERVICES).issubset(running_services)
         runtime_healthy = bool(
             credentials_present
@@ -469,6 +570,13 @@ class NodeRuntimeService:
         issue_detail: str | None = None
         automatic_fix_available = False
         manual_fix_available = False
+        issue_action_label = "Fix it"
+        startup_issue = self.startup_health_payload(
+            autostart=autostart if isinstance(autostart, dict) else {},
+            desktop_launcher=desktop_launcher if isinstance(desktop_launcher, dict) else {},
+            config_present=config_present,
+            credentials_present=credentials_present,
+        )
 
         if installer_state.get("busy"):
             issue_code = "installer_busy"
@@ -482,12 +590,40 @@ class NodeRuntimeService:
             issue_detail = "Local runtime settings are missing or incomplete on this machine."
             automatic_fix_available = True
             manual_fix_available = True
-        elif not docker_ready:
-            issue_code = "docker_unavailable"
-            issue_detail = str(
-                preflight.get("docker_error")
-                or "Docker needs attention before the runtime can be repaired."
+        elif disk and not bool(disk.get("ok", True)):
+            free_gb = coerce_nonnegative_int(disk.get("free_gb"))
+            recommended_free_gb = coerce_nonnegative_int(disk.get("recommended_free_gb"))
+            issue_code = "disk_low"
+            issue_detail = (
+                f"Only {free_gb} GB is free on this machine. Free up at least {recommended_free_gb} GB so "
+                "runtime images, model cache, and repairs can finish safely."
             )
+            manual_fix_available = True
+            issue_action_label = "Check storage"
+        elif not docker_ready:
+            if bool(preflight.get("docker_cli")) and bool(preflight.get("docker_compose")) and not bool(preflight.get("docker_daemon")):
+                issue_code = "docker_not_running"
+                issue_detail = str(
+                    preflight.get("docker_error")
+                    or "Docker Desktop is installed, but the Docker engine is not running yet. "
+                    "Start Docker Desktop and wait for the engine to be ready."
+                )
+            else:
+                issue_code = "docker_unavailable"
+                issue_detail = str(
+                    preflight.get("docker_error")
+                    or "Docker needs attention before the runtime can be repaired."
+                )
+            manual_fix_available = True
+            issue_action_label = "Check Docker"
+        elif not bool(gpu.get("detected")):
+            issue_code = "gpu_missing"
+            issue_detail = (
+                "No compatible NVIDIA GPU was detected. Check that the GPU is visible to Windows, "
+                "NVIDIA drivers are installed, and Docker Desktop GPU support is enabled."
+            )
+            manual_fix_available = True
+            issue_action_label = "Check GPU"
         elif credentials_present and not running_services:
             issue_code = "runtime_stopped"
             issue_detail = "The runtime is stopped even though this machine already has stored node credentials."
@@ -504,10 +640,17 @@ class NodeRuntimeService:
             issue_detail = "The runtime containers are up, but vLLM is not responding yet."
             automatic_fix_available = True
             manual_fix_available = True
+        elif startup_issue is not None:
+            issue_code = str(startup_issue["issue_code"])
+            issue_detail = str(startup_issue["issue_detail"])
+            automatic_fix_available = bool(startup_issue["automatic_fix_available"])
+            manual_fix_available = bool(startup_issue["manual_fix_available"])
+            issue_action_label = str(startup_issue.get("issue_action_label") or "Fix it")
         elif not credentials_present and config_present:
             issue_code = "approval_required"
             issue_detail = "This machine still needs approval before the runtime can come online."
             manual_fix_available = True
+            issue_action_label = "Resume setup"
 
         return {
             "installer_snapshot": installer_snapshot,
@@ -516,10 +659,13 @@ class NodeRuntimeService:
             "runtime": runtime,
             "issue_code": issue_code,
             "issue_detail": issue_detail,
+            "issue_action_label": issue_action_label,
             "runtime_healthy": runtime_healthy,
             "docker_ready": docker_ready,
             "credentials_present": credentials_present,
             "config_present": config_present,
+            "autostart": autostart,
+            "desktop_launcher": desktop_launcher,
             "running_services": sorted(running_services),
             "automatic_fix_available": automatic_fix_available,
             "manual_fix_available": manual_fix_available,
@@ -561,7 +707,7 @@ class NodeRuntimeService:
             "issue_code": health.get("issue_code"),
             "manual_fix_available": bool(health.get("manual_fix_available")),
             "automatic_fix_available": bool(health.get("automatic_fix_available")),
-            "action_label": "Fix it",
+            "action_label": str(health.get("issue_action_label") or "Fix it"),
         }
 
     def build_control_client(self) -> EdgeControlClient | Any | None:
@@ -709,6 +855,602 @@ class NodeRuntimeService:
             "history": state.get("history") if isinstance(state.get("history"), list) else [],
         }
 
+    def supported_models_from_config(self, config: dict[str, Any]) -> set[str]:
+        supported = str(config.get("supported_models") or "").split(",")
+        models = {model.strip() for model in supported if model.strip()}
+        env_values = self.guided_installer.effective_runtime_env()
+        if env_values:
+            models.update(
+                model.strip()
+                for model in str(env_values.get("SUPPORTED_MODELS") or "").split(",")
+                if model.strip()
+            )
+            for key in ("VLLM_MODEL",):
+                value = str(env_values.get(key) or "").strip()
+                if value:
+                    models.add(value)
+        for key in ("vllm_model", "recommended_model"):
+            value = str(config.get(key) or "").strip()
+            if value:
+                models.add(value)
+        return models
+
+    def ranked_demand_models(self, demand: Any) -> list[tuple[str, float]]:
+        entries: list[tuple[str, float]] = []
+
+        def add_model(model: Any, score: float) -> None:
+            if isinstance(model, str) and model.strip():
+                entries.append((model.strip(), score))
+
+        def score_from_payload(payload: dict[str, Any], fallback: float) -> float:
+            for key in ("score", "queue_depth", "pending_count", "ready_count", "item_count"):
+                value = payload.get(key)
+                if isinstance(value, (int, float)):
+                    return float(value)
+                try:
+                    return float(str(value))
+                except (TypeError, ValueError):
+                    continue
+            return fallback
+
+        if isinstance(demand, dict):
+            for key in ("recommended_model", "likely_model", "hot_model", "model"):
+                add_model(demand.get(key), 100.0)
+            ranked = demand.get("models") or demand.get("ranked_models") or demand.get("queues")
+            if isinstance(ranked, list):
+                for index, item in enumerate(ranked):
+                    if isinstance(item, str):
+                        add_model(item, 50.0 - index)
+                    elif isinstance(item, dict):
+                        add_model(item.get("model"), score_from_payload(item, 50.0 - index))
+        elif isinstance(demand, list):
+            for index, item in enumerate(demand):
+                if isinstance(item, str):
+                    add_model(item, 50.0 - index)
+                elif isinstance(item, dict):
+                    add_model(item.get("model"), score_from_payload(item, 50.0 - index))
+
+        return sorted(entries, key=lambda entry: entry[1], reverse=True)
+
+    def select_likely_model(
+        self,
+        *,
+        runtime: dict[str, Any],
+        config: dict[str, Any],
+        remote_summary: dict[str, Any],
+        remote_node: dict[str, Any],
+        autopilot: dict[str, Any],
+    ) -> tuple[str | None, str]:
+        supported_models = self.supported_models_from_config(config)
+
+        def supported(model: str | None) -> str | None:
+            if not model:
+                return None
+            model = model.strip()
+            if not model:
+                return None
+            if supported_models and model not in supported_models:
+                return None
+            return model
+
+        demand_sources = (
+            remote_summary.get("model_demand"),
+            remote_node.get("model_demand"),
+            (remote_node.get("runtime") or {}).get("model_demand")
+            if isinstance(remote_node.get("runtime"), dict)
+            else None,
+        )
+        for demand in demand_sources:
+            for model, _score in self.ranked_demand_models(demand):
+                candidate = supported(model)
+                if candidate:
+                    return candidate, "control_plane_demand"
+
+        recommendation = autopilot.get("recommendation") if isinstance(autopilot.get("recommendation"), dict) else {}
+        for model, source in (
+            (str(recommendation.get("startup_model") or "").strip(), "autopilot"),
+            (str(runtime.get("current_model") or "").strip(), "current_runtime"),
+            (str(config.get("vllm_model") or "").strip(), "local_settings"),
+            (str(config.get("recommended_model") or "").strip(), "installer_recommendation"),
+        ):
+            candidate = supported(model)
+            if candidate:
+                return candidate, source
+        return None, "unknown"
+
+    def model_cache_paths(self, model: str) -> list[Path]:
+        cache_key = f"models--{model.replace('/', '--')}"
+        cache_dir = self.data_dir / "model-cache"
+        return [
+            cache_dir / "hub" / cache_key,
+            cache_dir / cache_key,
+        ]
+
+    def model_cache_bytes_for_model(self, model: str | None) -> int:
+        if not model:
+            return 0
+        return sum(directory_size_bytes(path) for path in self.model_cache_paths(model))
+
+    def cached_model_names(self) -> set[str]:
+        cache_dir = self.data_dir / "model-cache"
+        models: set[str] = set()
+        for root in (cache_dir / "hub", cache_dir):
+            if not root.exists():
+                continue
+            for path in root.iterdir():
+                if path.is_dir() and path.name.startswith("models--"):
+                    model = path.name.removeprefix("models--").replace("--", "/")
+                    if model:
+                        models.add(model)
+        return models
+
+    def touch_model_usage(self, *models: str | None) -> None:
+        timestamp = now_iso()
+        for model in models:
+            if isinstance(model, str) and model.strip():
+                self.model_cache_state.last_used_by_model[model.strip()] = timestamp
+
+    def model_cache_payload(
+        self,
+        *,
+        health: dict[str, Any],
+        runtime: dict[str, Any],
+        config: dict[str, Any],
+        remote_summary: dict[str, Any],
+        remote_node: dict[str, Any],
+        autopilot: dict[str, Any],
+    ) -> dict[str, Any]:
+        cache_dir = self.data_dir / "model-cache"
+        cache_bytes = directory_size_bytes(cache_dir)
+        likely_model, likely_source = self.select_likely_model(
+            runtime=runtime,
+            config=config,
+            remote_summary=remote_summary,
+            remote_node=remote_node,
+            autopilot=autopilot,
+        )
+        current_model = str(runtime.get("current_model") or config.get("vllm_model") or "").strip() or None
+        likely_cache_bytes = self.model_cache_bytes_for_model(likely_model)
+        expected_bytes = artifact_total_size_bytes(startup_model_artifact(likely_model)) if likely_model else None
+        reuse_percent: int | None = None
+        if expected_bytes and expected_bytes > 0:
+            reuse_percent = max(0, min(100, int((likely_cache_bytes / expected_bytes) * 100)))
+
+        self.model_cache_state.cache_bytes = cache_bytes
+        self.model_cache_state.likely_model = likely_model
+        self.model_cache_state.likely_model_source = likely_source
+
+        if not likely_model:
+            value = "Checking cache"
+            detail = "The runtime is still deciding which model is most likely to be needed next."
+            tone = "warning"
+        elif current_model == likely_model and runtime.get("stage") == "running" and health.get("runtime_healthy"):
+            value = "Warm"
+            detail = (
+                f"{likely_model} is already loaded. The local cache has {format_bytes(likely_cache_bytes or cache_bytes)} "
+                "ready to reuse across restarts, so future warm-ups should be faster."
+            )
+            tone = "success"
+        elif likely_cache_bytes > 0:
+            cache_label = format_bytes(likely_cache_bytes)
+            if reuse_percent is not None and reuse_percent < 90:
+                value = "Partly cached"
+                detail = (
+                    f"The next likely model is {likely_model}. Reusing {cache_label} already in the local model cache "
+                    f"({reuse_percent}% of the expected snapshot), then filling the rest when it warms."
+                )
+                tone = "warning"
+            else:
+                value = "Cache ready"
+                detail = (
+                    f"The next likely model is {likely_model}. Reusing {cache_label} from the local model cache, "
+                    "so the next warm-up should avoid most of the first-run download."
+                )
+                tone = "success"
+        else:
+            value = "Will warm on first use"
+            expected_label = f" about {format_bytes(expected_bytes)}" if expected_bytes else ""
+            detail = (
+                f"The next likely model is {likely_model}. No reusable local cache was found yet, so the first warm-up "
+                f"may download{expected_label}; after that, this machine will reuse the local cache automatically."
+            )
+            tone = "warning"
+
+        return {
+            "enabled": self.model_cache_state.enabled,
+            "value": value,
+            "detail": detail,
+            "tone": tone,
+            "cache_dir": str(cache_dir),
+            "cache_bytes": cache_bytes,
+            "cache_label": format_bytes(cache_bytes),
+            "likely_model": likely_model,
+            "likely_model_source": likely_source,
+            "current_model": current_model,
+            "likely_model_cache_bytes": likely_cache_bytes,
+            "likely_model_cache_label": format_bytes(likely_cache_bytes),
+            "expected_bytes": expected_bytes,
+            "expected_label": format_bytes(expected_bytes),
+            "reuse_percent": reuse_percent,
+            "last_checked_at": self.model_cache_state.last_checked_at,
+            "last_warmed_model": self.model_cache_state.last_warmed_model,
+            "last_warmed_at": self.model_cache_state.last_warmed_at,
+            "last_evicted_model": self.model_cache_state.last_evicted_model,
+            "last_evicted_bytes": self.model_cache_state.last_evicted_bytes,
+            "last_evicted_at": self.model_cache_state.last_evicted_at,
+            "cached_models": sorted(self.cached_model_names()),
+        }
+
+    def safe_model_cache_path(self, path: Path) -> bool:
+        try:
+            cache_root = (self.data_dir / "model-cache").resolve()
+            target = path.resolve()
+            return os.path.commonpath([str(cache_root), str(target)]) == str(cache_root)
+        except (OSError, ValueError):
+            return False
+
+    def evict_cold_model_cache(
+        self,
+        *,
+        protected_models: set[str],
+        cache_pressure: bool,
+        now: datetime | None = None,
+    ) -> tuple[str | None, int]:
+        if not cache_pressure or not self.model_cache_state.enabled:
+            return None, 0
+        current_time = now or datetime.now(timezone.utc)
+        for model in sorted(self.cached_model_names()):
+            if model in protected_models:
+                continue
+            last_used = parse_iso_timestamp(self.model_cache_state.last_used_by_model.get(model))
+            if last_used and (current_time - last_used).total_seconds() < MODEL_CACHE_COLD_SECONDS:
+                continue
+            evicted_bytes = 0
+            for path in self.model_cache_paths(model):
+                if not path.exists() or not self.safe_model_cache_path(path):
+                    continue
+                evicted_bytes += directory_size_bytes(path)
+                shutil.rmtree(path, ignore_errors=True)
+            if evicted_bytes > 0:
+                return model, evicted_bytes
+        return None, 0
+
+    def prewarm_likely_model(self, likely_model: str, current_model: str | None) -> tuple[bool, str]:
+        env_values = self.guided_installer.effective_runtime_env()
+        if not env_values:
+            return False, "Model cache management is waiting for local runtime settings."
+        supported_models = {model.strip() for model in env_values.get("SUPPORTED_MODELS", "").split(",") if model.strip()}
+        if supported_models and likely_model not in supported_models:
+            return False, f"{likely_model} is not advertised by this machine, so pre-warm was skipped."
+        if current_model == likely_model and env_values.get("VLLM_MODEL") == likely_model:
+            return False, f"{likely_model} is already the warm startup model."
+
+        previous_env = dict(env_values)
+        next_env = dict(env_values)
+        next_env["VLLM_MODEL"] = likely_model
+        try:
+            self.guided_installer.write_runtime_settings(next_env)
+            self.guided_installer.write_runtime_env(next_env)
+            self.log(
+                f"Demand-aware model management is pre-warming {likely_model} while the node is idle. "
+                "Existing local cache will be reused where possible."
+            )
+            self.start_runtime_services(recreate=True)
+            self.wait_for_runtime_health(timeout_seconds=240.0)
+        except Exception:
+            self.guided_installer.write_runtime_settings(previous_env)
+            self.guided_installer.write_runtime_env(previous_env)
+            self.log(
+                f"Demand-aware pre-warm for {likely_model} failed. Rolling back to "
+                f"{previous_env.get('VLLM_MODEL') or 'the previous startup model'}."
+            )
+            try:
+                self.start_runtime_services(recreate=True)
+                self.wait_for_runtime_health(timeout_seconds=90.0)
+            except Exception as rollback_error:
+                self.log(f"Rollback after demand-aware pre-warm also needs attention: {rollback_error}")
+            raise
+        warmed_at = now_iso()
+        self.model_cache_state.last_warmed_model = likely_model
+        self.model_cache_state.last_warmed_at = warmed_at
+        self.model_cache_state.last_error = None
+        self.touch_model_usage(likely_model)
+        return True, f"Pre-warmed {likely_model} because it is the most likely next model for this node."
+
+    def manage_model_cache(self, *, health: dict[str, Any], installer_snapshot: dict[str, Any]) -> tuple[bool, str, str]:
+        if not self.model_cache_state.enabled:
+            return False, "Model cache management is disabled.", "model_cache_disabled"
+
+        runtime = health.get("runtime", {})
+        config = installer_snapshot.get("config", {})
+        autopilot = self.autopilot_payload()
+        remote = self.remote_dashboard_snapshot()
+        remote_summary = remote.get("summary") if isinstance(remote.get("summary"), dict) else {}
+        remote_node = remote_summary.get("node") if isinstance(remote_summary.get("node"), dict) else {}
+        model_cache = self.model_cache_payload(
+            health=health,
+            runtime=runtime,
+            config=config,
+            remote_summary=remote_summary,
+            remote_node=remote_node,
+            autopilot=autopilot,
+        )
+        likely_model = model_cache.get("likely_model") if isinstance(model_cache.get("likely_model"), str) else None
+        current_model = model_cache.get("current_model") if isinstance(model_cache.get("current_model"), str) else None
+        self.touch_model_usage(current_model, likely_model)
+
+        disk = health.get("preflight", {}).get("disk") if isinstance(health.get("preflight"), dict) else {}
+        cache_pressure = bool(isinstance(disk, dict) and not bool(disk.get("ok", True)))
+        protected_models = {model for model in (current_model, likely_model) if model}
+        evicted_model, evicted_bytes = self.evict_cold_model_cache(
+            protected_models=protected_models,
+            cache_pressure=cache_pressure,
+        )
+        if evicted_model:
+            self.model_cache_state.last_checked_at = now_iso()
+            self.model_cache_state.last_evicted_model = evicted_model
+            self.model_cache_state.last_evicted_bytes = evicted_bytes
+            self.model_cache_state.last_evicted_at = self.model_cache_state.last_checked_at
+            self.model_cache_state.last_result = (
+                f"Evicted {format_bytes(evicted_bytes)} of cold cache for {evicted_model} to protect disk space."
+            )
+            self.model_cache_state.last_error = None
+            self.save_state()
+            self.log(self.model_cache_state.last_result)
+            return True, self.model_cache_state.last_result, "model_cache_eviction"
+
+        active_assignments = coerce_nonnegative_int(remote_node.get("active_assignments"))
+        can_prewarm = (
+            health.get("runtime_healthy")
+            and likely_model
+            and current_model != likely_model
+            and model_cache.get("likely_model_source") == "control_plane_demand"
+            and active_assignments == 0
+            and not self.update_state.pending_restart
+            and not bool(health.get("installer_state", {}).get("busy"))
+        )
+        if can_prewarm:
+            try:
+                applied, message = self.prewarm_likely_model(likely_model, current_model)
+            except Exception as error:
+                message = f"Model pre-warm could not finish automatically: {error}"
+                self.model_cache_state.last_error = message
+                self.model_cache_state.last_result = message
+                self.model_cache_state.last_checked_at = now_iso()
+                self.save_state()
+                self.log(message)
+                return False, message, "model_cache_prewarm_failed"
+            self.model_cache_state.last_checked_at = now_iso()
+            self.model_cache_state.last_result = message
+            self.model_cache_state.last_error = None
+            self.save_state()
+            return applied, message, "model_cache_prewarm" if applied else "model_cache_monitor"
+
+        self.model_cache_state.last_checked_at = now_iso()
+        self.model_cache_state.last_result = str(model_cache.get("detail") or "Model cache is being monitored.")
+        self.model_cache_state.last_error = None
+        self.save_state()
+        return False, self.model_cache_state.last_result, "model_cache_monitor"
+
+    def idle_reason_payload(
+        self,
+        *,
+        health: dict[str, Any],
+        runtime: dict[str, Any],
+        config: dict[str, Any],
+        updates: dict[str, Any],
+        autopilot: dict[str, Any],
+        remote: dict[str, Any],
+        remote_summary: dict[str, Any],
+        remote_node: dict[str, Any],
+        remote_observability: dict[str, Any],
+        blocked_reason: str | None,
+    ) -> dict[str, str]:
+        issue_code = str(health.get("issue_code") or "")
+        remote_status = str(remote_node.get("status") or "")
+        approval_status = str(remote_node.get("approval_status") or "")
+        queue_depth = coerce_nonnegative_int(remote_node.get("queue_depth"))
+        active_assignments = coerce_nonnegative_int(remote_node.get("active_assignments"))
+        schedulable_raw = remote_summary.get("schedulable")
+        if isinstance(schedulable_raw, bool):
+            schedulable = schedulable_raw
+        else:
+            schedulable = bool(remote_observability.get("schedulable"))
+        premium_status = str(config.get("premium_eligibility_status") or "")
+        premium_detail = str(
+            config.get("premium_eligibility_detail")
+            or "Community capacity stays enabled, but premium jobs are unavailable on this machine right now."
+        )
+        premium_unavailable = premium_status in {"community_enabled", "premium_unavailable"}
+        remote_error = remote.get("last_error") if isinstance(remote.get("last_error"), str) else None
+        autopilot_pending_restart = bool(
+            autopilot.get("status") == "restart_pending"
+            or (
+                isinstance(autopilot.get("recommendation"), dict)
+                and autopilot["recommendation"].get("pending_restart") is True
+            )
+        )
+
+        if updates.get("pending_restart") or autopilot_pending_restart:
+            detail = str(
+                updates.get("last_result")
+                or "A staged runtime change is waiting for a restart before this machine can use it."
+            )
+            return {
+                "value": "Update staged, restart pending",
+                "detail": detail,
+                "tone": "warning",
+            }
+
+        waiting_for_approval = (
+            issue_code == "approval_required"
+            or approval_status == "pending"
+            or remote_status == "pending_attestation"
+            or runtime.get("stage") in {"ready", "registration_required"}
+        )
+        if waiting_for_approval or (blocked_reason and "approval" in blocked_reason.lower()):
+            detail = str(
+                blocked_reason
+                or runtime.get("message")
+                or health.get("issue_detail")
+                or "Open the approval page to finish bringing this machine online."
+            )
+            return {
+                "value": "Waiting for approval",
+                "detail": detail,
+                "tone": "warning",
+            }
+
+        if remote_status in {"paused", "revoked"} and blocked_reason:
+            return {
+                "value": "Action needed",
+                "detail": blocked_reason,
+                "tone": "danger",
+            }
+
+        if active_assignments > 0:
+            detail = f"This machine is serving {active_assignments} assignment"
+            if active_assignments != 1:
+                detail += "s"
+            detail += " right now."
+            if queue_depth > active_assignments:
+                detail += f" {queue_depth} matching jobs are still waiting in the network queue."
+            return {
+                "value": "Serving jobs right now",
+                "detail": detail,
+                "tone": "success",
+            }
+
+        if premium_unavailable and queue_depth > 0 and schedulable and health.get("runtime_healthy"):
+            return {
+                "value": "Premium jobs unavailable on this machine",
+                "detail": premium_detail,
+                "tone": "warning",
+            }
+
+        if health.get("runtime_healthy") and schedulable:
+            detail = "This machine is healthy and online. Work will start automatically when a matching job arrives."
+            if queue_depth > 0:
+                detail = "The network has work, but nothing currently matches this machine."
+            elif premium_unavailable:
+                detail = (
+                    f"{premium_detail} Community jobs will still start automatically when they match this machine."
+                )
+            return {
+                "value": "No matching jobs right now",
+                "detail": detail,
+                "tone": "success",
+            }
+
+        if blocked_reason:
+            return {
+                "value": "Action needed",
+                "detail": blocked_reason,
+                "tone": "warning",
+            }
+
+        if remote_error and not remote_summary:
+            return {
+                "value": "Waiting for control plane sync",
+                "detail": "The local service is online, but the control-plane summary is temporarily unavailable.",
+                "tone": "warning",
+            }
+
+        if health.get("issue_detail"):
+            return {
+                "value": "Still starting up",
+                "detail": str(health.get("issue_detail")),
+                "tone": "warning",
+            }
+
+        return {
+            "value": "Checking node activity",
+            "detail": "The local service is still collecting enough state to explain this machine's idle time.",
+            "tone": "warning",
+        }
+
+    def change_summary_payload(self, *, updates: dict[str, Any], autopilot: dict[str, Any]) -> dict[str, str]:
+        def describe_with_time(detail: str, timestamp: str | None) -> str:
+            if not timestamp:
+                return detail
+            relative = format_relative_time(timestamp)
+            if relative == "Waiting":
+                return detail
+            return f"{detail} Last change {relative}."
+
+        if updates.get("pending_restart"):
+            detail = str(
+                updates.get("last_result") or "A signed runtime update was downloaded and is waiting for a restart."
+            )
+            return {
+                "value": "Signed update staged",
+                "detail": describe_with_time(detail, updates.get("last_checked_at")),
+                "tone": "warning",
+            }
+
+        if updates.get("last_error"):
+            return {
+                "value": "Update check needs attention",
+                "detail": describe_with_time(str(updates["last_error"]), updates.get("last_checked_at")),
+                "tone": "warning",
+            }
+
+        self_heal_action = str(self.self_heal_state.last_action or "")
+        if self_heal_action and self_heal_action not in {"monitor", "waiting_for_quick_start"}:
+            change_value = {
+                "autopilot_tuning": "Autopilot retuned this machine",
+                "start_runtime": "Runtime started",
+                "restart_runtime": "Runtime restarted",
+                "rollback_bad_update": "Rolled back to the last healthy release",
+                "resume_quick_start": "Quick Start resumed",
+                "waiting_for_approval": "Waiting for approval",
+            }.get(self_heal_action, "Local runtime changed")
+            change_tone = "warning" if self_heal_action in {"waiting_for_approval", "resume_quick_start"} else "success"
+            return {
+                "value": change_value,
+                "detail": describe_with_time(
+                    str(self.self_heal_state.last_result or "The local runtime changed."),
+                    self.self_heal_state.last_repaired_at or self.self_heal_state.last_checked_at,
+                ),
+                "tone": change_tone,
+            }
+
+        history = autopilot.get("history") if isinstance(autopilot.get("history"), list) else []
+        last_history = history[-1] if history and isinstance(history[-1], dict) else {}
+        if last_history:
+            target_model = str(last_history.get("startup_model") or "the current startup model")
+            reason = str(last_history.get("reason") or "Autopilot updated the machine plan.")
+            return {
+                "value": "Autopilot updated the machine plan",
+                "detail": describe_with_time(f"{reason} Target model: {target_model}.", last_history.get("at")),
+                "tone": "success",
+            }
+
+        update_result = str(updates.get("last_result") or "")
+        if update_result and update_result not in {
+            "No update checks have run yet.",
+            "Runtime already matches signed release None.",
+        }:
+            lowered = update_result.lower()
+            if "applied successfully" in lowered:
+                change_value = "Signed runtime updated"
+            elif "rolled back" in lowered or "restored" in lowered:
+                change_value = "Signed runtime restored"
+            else:
+                change_value = "No recent changes"
+            if change_value != "No recent changes":
+                return {
+                    "value": change_value,
+                    "detail": describe_with_time(update_result, updates.get("last_checked_at")),
+                    "tone": "success",
+                }
+
+        return {
+            "value": "No recent changes",
+            "detail": "This machine is still running with its current local plan.",
+            "tone": "success",
+        }
+
     def apply_autopilot_tuning(self) -> tuple[bool, str]:
         state = self.load_autopilot_state()
         if not state:
@@ -768,6 +1510,14 @@ class NodeRuntimeService:
         )
         remote_runtime = remote_node.get("runtime") if isinstance(remote_node.get("runtime"), dict) else {}
         earnings = remote_summary.get("earnings") if isinstance(remote_summary.get("earnings"), dict) else {}
+        model_cache = self.model_cache_payload(
+            health=health,
+            runtime=runtime,
+            config=config,
+            remote_summary=remote_summary,
+            remote_node=remote_node,
+            autopilot=autopilot,
+        )
 
         blocked_reason = (
             remote_summary.get("blocked_reason")
@@ -776,6 +1526,19 @@ class NodeRuntimeService:
         )
         if not isinstance(blocked_reason, str) or not blocked_reason.strip():
             blocked_reason = None
+        idle_reason = self.idle_reason_payload(
+            health=health,
+            runtime=runtime,
+            config=config,
+            updates=updates,
+            autopilot=autopilot,
+            remote=remote,
+            remote_summary=remote_summary,
+            remote_node=remote_node,
+            remote_observability=remote_observability,
+            blocked_reason=blocked_reason,
+        )
+        change_summary = self.change_summary_payload(updates=updates, autopilot=autopilot)
 
         heartbeat_at = remote_node.get("last_heartbeat_at") if isinstance(remote_node.get("last_heartbeat_at"), str) else None
         heartbeat_age_seconds: float | None = None
@@ -886,47 +1649,18 @@ class NodeRuntimeService:
         uptime_detail = f"Local service online since {self.started_at}."
         uptime_tone = "success"
 
-        if blocked_reason:
-            blocked_value = "Action needed"
-            blocked_detail = blocked_reason
-            blocked_tone = "danger" if str(remote_node.get("status") or "") in {"paused", "revoked"} else "warning"
-        else:
-            blocked_value = "None"
-            blocked_detail = "The control plane is not currently blocking this node."
-            blocked_tone = "success"
-
-        if updates.get("last_error"):
-            update_value = "Needs attention"
-            update_detail = str(updates["last_error"])
-            update_tone = "danger"
-        elif updates.get("pending_restart"):
-            update_value = "Restart needed"
-            update_detail = str(updates.get("last_result") or "A signed runtime update is ready to take over after a restart.")
-            update_tone = "warning"
-        elif updates.get("release_version"):
-            update_value = "Up to date"
-            update_detail = str(
-                updates.get("last_result")
-                or f"Signed release {updates['release_version']} is active on this machine."
-            )
-            update_tone = "success"
-        else:
-            update_value = "Manual"
-            update_detail = str(updates.get("last_result") or "No signed update checks have run yet.")
-            update_tone = "warning"
-
         if health_value == "Healthy":
             headline = "Node live"
-            detail = "Health, earnings, heartbeat, and update state are all visible here."
+            detail = idle_reason["detail"]
         elif health_value == "Setting up":
             headline = "Quick Start is in progress"
             detail = health_detail
         elif health_value == "Blocked":
             headline = "Node needs attention"
-            detail = health_detail
+            detail = idle_reason["detail"]
         else:
             headline = "Owner dashboard"
-            detail = health_detail
+            detail = idle_reason["detail"] if idle_reason["detail"] else health_detail
 
         return {
             "headline": headline,
@@ -942,15 +1676,25 @@ class NodeRuntimeService:
                 "heartbeat": {"value": heartbeat_value, "detail": heartbeat_detail, "tone": heartbeat_tone},
                 "model": {"value": model_value, "detail": model_detail, "tone": model_tone},
                 "uptime": {"value": uptime_value, "detail": uptime_detail, "tone": uptime_tone},
-                "blocked": {"value": blocked_value, "detail": blocked_detail, "tone": blocked_tone},
-                "updates": {"value": update_value, "detail": update_detail, "tone": update_tone},
+                "idle": {"value": idle_reason["value"], "detail": idle_reason["detail"], "tone": idle_reason["tone"]},
+                "changes": {
+                    "value": change_summary["value"],
+                    "detail": change_summary["detail"],
+                    "tone": change_summary["tone"],
+                },
                 "autopilot": {
                     "value": autopilot["value"],
                     "detail": autopilot["detail"],
                     "tone": autopilot["tone"],
                 },
+                "model_cache": {
+                    "value": model_cache["value"],
+                    "detail": model_cache["detail"],
+                    "tone": model_cache["tone"],
+                },
             },
             "autopilot": autopilot,
+            "model_cache": model_cache,
         }
 
     def status_payload(self) -> dict[str, Any]:
@@ -964,6 +1708,7 @@ class NodeRuntimeService:
             pass
         with self.lock:
             service_logs = list(self.logs)
+        dashboard = self.dashboard_payload(health, installer_snapshot)
         return {
             "service": {
                 "host": self.host,
@@ -974,7 +1719,8 @@ class NodeRuntimeService:
             "runtime": health["runtime"],
             "installer": installer_snapshot,
             "owner_setup": installer_snapshot.get("owner_setup", {}),
-            "dashboard": self.dashboard_payload(health, installer_snapshot),
+            "dashboard": dashboard,
+            "model_cache": dashboard.get("model_cache", {}),
             "autostart": self.autostart_manager.status(),
             "desktop_launcher": self.desktop_launcher_manager.status(),
             "updates": asdict(self.update_state),
@@ -1047,17 +1793,32 @@ class NodeRuntimeService:
                 last_action="repair_runtime",
                 fix_available=True,
             )
+            pre_repair_health = self.runtime_health_snapshot()
+            autostart_before = (
+                pre_repair_health.get("autostart")
+                if isinstance(pre_repair_health.get("autostart"), dict)
+                else {}
+            )
+            launcher_before = (
+                pre_repair_health.get("desktop_launcher")
+                if isinstance(pre_repair_health.get("desktop_launcher"), dict)
+                else {}
+            )
+            startup_repaired = False
+            launcher_repaired = False
             self.ensure_local_config()
 
             try:
                 autostart = self.autostart_manager.ensure_enabled()
                 self.log(str(autostart.get("detail") or "Automatic start status is unavailable."))
+                startup_repaired = bool(autostart_before.get("supported")) and not bool(autostart_before.get("enabled")) and bool(autostart.get("enabled"))
             except Exception as error:
                 self.log(f"Automatic start could not be repaired automatically: {error}")
 
             try:
                 launcher = self.desktop_launcher_manager.ensure_enabled()
                 self.log(str(launcher.get("detail") or "Desktop launcher status is unavailable."))
+                launcher_repaired = bool(launcher_before.get("supported")) and not bool(launcher_before.get("enabled")) and bool(launcher.get("enabled"))
             except Exception as error:
                 self.log(f"The desktop launcher could not be repaired automatically: {error}")
 
@@ -1087,17 +1848,104 @@ class NodeRuntimeService:
                     fix_available=False,
                 )
                 use_status_payload = True
-            elif health["runtime_healthy"]:
-                self.remember_known_good_release()
+            elif health.get("issue_code") in {"disk_low"}:
+                message = str(health.get("issue_detail") or "Free up disk space before this machine can recover.")
+                self.log(message)
                 self.update_self_heal_state(
-                    status="healthy",
-                    last_result="The runtime already looks healthy. Self-healing is standing by.",
-                    last_issue=None,
+                    status="attention",
+                    last_result=message,
+                    last_issue=message,
                     last_error=None,
-                    last_action="monitor",
-                    last_repaired_at=now_iso(),
+                    last_action="waiting_for_disk_space",
                     fix_available=False,
                 )
+                use_status_payload = True
+            elif health.get("issue_code") in {"docker_unavailable", "docker_not_running"}:
+                message = str(health.get("issue_detail") or "Docker needs attention before repair can continue.")
+                self.log(message)
+                self.update_self_heal_state(
+                    status="attention",
+                    last_result=message,
+                    last_issue=message,
+                    last_error=None,
+                    last_action="waiting_for_docker",
+                    fix_available=False,
+                )
+                use_status_payload = True
+            elif health.get("issue_code") == "gpu_missing":
+                message = str(
+                    health.get("issue_detail")
+                    or "A compatible GPU was not detected, so this machine cannot recover into serving mode yet."
+                )
+                self.log(message)
+                self.update_self_heal_state(
+                    status="attention",
+                    last_result=message,
+                    last_issue=message,
+                    last_error=None,
+                    last_action="waiting_for_gpu",
+                    fix_available=False,
+                )
+                use_status_payload = True
+            elif health.get("issue_code") == "startup_unavailable":
+                message = str(
+                    health.get("issue_detail")
+                    or "Windows sign-in launch is unavailable and needs manual attention."
+                )
+                self.log(message)
+                self.update_self_heal_state(
+                    status="attention",
+                    last_result=message,
+                    last_issue=message,
+                    last_error=None,
+                    last_action="waiting_for_startup_support",
+                    fix_available=True,
+                )
+                use_status_payload = True
+            elif health.get("issue_code") == "startup_not_configured":
+                message = str(
+                    health.get("issue_detail")
+                    or "Windows sign-in launch still needs to be repaired on this machine."
+                )
+                self.log(message)
+                self.update_self_heal_state(
+                    status="attention",
+                    last_result=message,
+                    last_issue=message,
+                    last_error=None,
+                    last_action="repair_startup",
+                    fix_available=True,
+                )
+                use_status_payload = True
+            elif health["runtime_healthy"]:
+                self.remember_known_good_release()
+                if startup_repaired or launcher_repaired:
+                    startup_result = "Self-healing repaired Windows startup"
+                    if startup_repaired and launcher_repaired:
+                        startup_result += " and refreshed the desktop launcher."
+                    elif startup_repaired:
+                        startup_result += " so this node can relaunch after sign-in."
+                    else:
+                        startup_result += " support and refreshed the desktop launcher."
+                    self.update_self_heal_state(
+                        status="healthy",
+                        last_result=startup_result,
+                        last_issue=None,
+                        last_error=None,
+                        last_action="repair_startup",
+                        last_repaired_at=now_iso(),
+                        fix_available=False,
+                    )
+                else:
+                    self.update_self_heal_state(
+                        status="healthy",
+                        last_result="The runtime already looks healthy. Self-healing is standing by.",
+                        last_issue=None,
+                        last_error=None,
+                        last_action="monitor",
+                        last_repaired_at=now_iso(),
+                        fix_available=False,
+                    )
                 use_status_payload = True
             elif health["credentials_present"]:
                 recreate = bool(preflight.get("running_services")) or self.update_state.pending_restart
@@ -1339,14 +2187,15 @@ class NodeRuntimeService:
         except RuntimeError as error:
             return f"<command failed>\n{error}"
 
-    def create_diagnostics_bundle(self) -> dict[str, Any]:
+    def write_diagnostics_bundle(self) -> tuple[Path, str, str]:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         bundle_name = f"diagnostics-{timestamp}.zip"
         bundle_path = self.diagnostics_dir / bundle_name
+        generated_at = now_iso()
         self.log("Creating diagnostics bundle...")
 
         payload = self.status_payload()
-        payload["generated_at"] = now_iso()
+        payload["generated_at"] = generated_at
 
         with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             archive.writestr("status.json", json.dumps(payload, indent=2))
@@ -1372,10 +2221,53 @@ class NodeRuntimeService:
                 archive.writestr("recovery-note.txt", recovery_note.read_text(encoding="utf-8"))
 
         self.diagnostics_state.last_bundle_name = bundle_name
-        self.diagnostics_state.last_bundle_created_at = now_iso()
+        self.diagnostics_state.last_bundle_created_at = generated_at
         self.diagnostics_state.last_error = None
         self.save_state()
         self.log(f"Diagnostics bundle created: {bundle_name}")
+        return bundle_path, bundle_name, generated_at
+
+    def create_diagnostics_bundle(self) -> dict[str, Any]:
+        _bundle_path, bundle_name, _generated_at = self.write_diagnostics_bundle()
+        self.diagnostics_state.last_result = f"{bundle_name} is ready to download from this machine."
+        self.save_state()
+        return self.status_payload()
+
+    def send_support_bundle(self) -> dict[str, Any]:
+        bundle_path, bundle_name, generated_at = self.write_diagnostics_bundle()
+        client = self.build_control_client()
+        if client is None:
+            self.diagnostics_state.last_error = (
+                "Support upload needs a saved control-plane connection before this machine can send bundles automatically."
+            )
+            self.diagnostics_state.last_result = f"{bundle_name} was created locally and is ready to download."
+            self.save_state()
+            self.log("Support upload is unavailable because the control plane is not configured for this machine yet.")
+            return self.status_payload()
+
+        try:
+            payload = client.submit_support_bundle(
+                bundle_name,
+                bundle_path.read_bytes(),
+                generated_at=generated_at,
+            )
+        except Exception as error:
+            self.diagnostics_state.last_error = (
+                "Support upload could not be completed automatically. Download the local bundle if manual sharing is needed."
+            )
+            self.diagnostics_state.last_result = f"{bundle_name} was created locally and is ready to download."
+            self.save_state()
+            self.log(f"Support bundle upload failed: {error}")
+            return self.status_payload()
+
+        case_id = str(payload.get("case_id") or "").strip() or f"local-{hashlib.sha256(bundle_name.encode('utf-8')).hexdigest()[:12]}"
+        received_at = str(payload.get("received_at") or generated_at)
+        self.diagnostics_state.last_case_id = case_id
+        self.diagnostics_state.last_bundle_sent_at = received_at
+        self.diagnostics_state.last_result = f"Support bundle sent successfully. Case ID: {case_id}."
+        self.diagnostics_state.last_error = None
+        self.save_state()
+        self.log(f"Support bundle sent successfully. Case ID: {case_id}.")
         return self.status_payload()
 
     def open_ui(self) -> None:
@@ -1430,7 +2322,27 @@ class NodeRuntimeService:
             fix_available=bool(health.get("manual_fix_available")),
         )
 
-        if health["runtime_healthy"]:
+        if health.get("issue_code") == "disk_low":
+            installer_snapshot = (
+                health.get("installer_snapshot") if isinstance(health.get("installer_snapshot"), dict) else self.guided_installer.status_payload()
+            )
+            cache_changed, cache_result, cache_action = self.manage_model_cache(
+                health=health,
+                installer_snapshot=installer_snapshot,
+            )
+            if cache_changed:
+                self.update_self_heal_state(
+                    status="healthy" if not health.get("issue_code") else "attention",
+                    last_result=cache_result,
+                    last_issue=str(health.get("issue_detail") or ""),
+                    last_error=None,
+                    last_action=cache_action,
+                    last_repaired_at=now_iso(),
+                    fix_available=True,
+                )
+                return self.status_payload()
+
+        if health["runtime_healthy"] and not health.get("issue_code"):
             self.remember_known_good_release()
             applied, autopilot_result = self.apply_autopilot_tuning()
             if applied:
@@ -1440,6 +2352,24 @@ class NodeRuntimeService:
                     last_issue=None,
                     last_error=None,
                     last_action="autopilot_tuning",
+                    fix_available=False,
+                )
+                return self.status_payload()
+            installer_snapshot = (
+                health.get("installer_snapshot") if isinstance(health.get("installer_snapshot"), dict) else self.guided_installer.status_payload()
+            )
+            cache_changed, cache_result, cache_action = self.manage_model_cache(
+                health=health,
+                installer_snapshot=installer_snapshot,
+            )
+            if cache_changed:
+                self.update_self_heal_state(
+                    status="healthy",
+                    last_result=cache_result,
+                    last_issue=None,
+                    last_error=None,
+                    last_action=cache_action,
+                    last_repaired_at=now_iso(),
                     fix_available=False,
                 )
                 return self.status_payload()
@@ -1715,6 +2645,9 @@ def make_handler(service: NodeRuntimeService, server_ref: dict[str, ThreadingHTT
                     return
                 if path == "/api/diagnostics":
                     self._send_json(service.create_diagnostics_bundle())
+                    return
+                if path == "/api/support/send":
+                    self._send_json(service.send_support_bundle())
                     return
                 if path == "/api/shutdown":
                     self._send_json(service.request_shutdown())

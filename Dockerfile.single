@@ -1,0 +1,24 @@
+ARG VLLM_BASE_IMAGE=vllm/vllm-openai@sha256:d9a5c1c1614c959fde8d2a4d68449db184572528a6055afdd0caf1e66fb51504
+FROM ${VLLM_BASE_IMAGE}
+
+WORKDIR /app
+
+COPY pyproject.toml /app/pyproject.toml
+COPY src /app/src
+
+RUN python -m pip install --no-cache-dir --upgrade pip \
+    && python -m pip install --no-cache-dir .
+
+ENV VLLM_BASE_URL=http://127.0.0.1:8000
+ENV VLLM_HOST=0.0.0.0
+ENV VLLM_PORT=8000
+ENV HF_HOME=/root/.cache/huggingface
+ENV CREDENTIALS_PATH=/var/lib/autonomousc/credentials/node-credentials.json
+ENV ATTESTATION_STATE_PATH=/var/lib/autonomousc/credentials/attestation-state.json
+ENV RECOVERY_NOTE_PATH=/var/lib/autonomousc/credentials/recovery-note.txt
+ENV AUTOPILOT_STATE_PATH=/var/lib/autonomousc/scratch/autopilot-state.json
+
+VOLUME ["/root/.cache/huggingface", "/var/lib/autonomousc/credentials", "/var/lib/autonomousc/scratch"]
+EXPOSE 8000
+
+ENTRYPOINT ["node-agent-single-container"]

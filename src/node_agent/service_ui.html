@@ -364,7 +364,7 @@
           </div>
           <div class="step-chip">
             <strong>Support</strong>
-            <p class="meta">Create a diagnostics bundle without touching Docker commands or terminals.</p>
+            <p class="meta">Send a redacted support bundle and get a case ID without touching Docker commands, zip files, or terminals.</p>
           </div>
         </div>
       </section>
@@ -374,7 +374,7 @@
           <div class="stack">
             <div>
               <h2>Quick Start</h2>
-              <p class="supporting">Use this for first-time setup or to retune the machine. Advanced settings are hidden by default so normal owners can stay on the happy path, even when first startup takes a while.</p>
+              <p class="supporting">Use this for first-time setup or to retune the machine. Normal owners only need to name the node and start Quick Start. Hardware, region, startup model, and capacity settings stay automatic unless operator/admin mode is turned on.</p>
             </div>
             <div id="error-banner" class="error-banner" hidden></div>
           </div>
@@ -399,31 +399,43 @@
               <button id="refresh-button" type="button" class="secondary">Refresh status</button>
             </div>
 
-            <details>
-              <summary>Advanced settings</summary>
-              <div class="stack" style="margin-top: 14px;">
-                <label>Thermal profile
-                  <select id="advanced_setup_profile">
-                    <option value="quiet">Quiet</option>
-                    <option value="balanced">Balanced</option>
-                    <option value="performance">Performance</option>
-                  </select>
-                </label>
-                <label>Control plane URL<input id="edge_control_url" placeholder="https://edge.autonomousc.com"></label>
-                <label>Region<input id="node_region" placeholder="eu-se-1"></label>
-                <label>Trust tier
-                  <select id="trust_tier">
-                    <option value="standard">Standard</option>
-                    <option value="confidential">Confidential</option>
-                    <option value="restricted">Restricted</option>
-                  </select>
-                </label>
-                <label class="checkbox"><input id="restricted_capable" type="checkbox">Restricted workloads capable</label>
-                <label>vLLM startup model<input id="vllm_model" placeholder="meta-llama/Llama-3.1-8B-Instruct"></label>
-                <label>Supported models<textarea id="supported_models"></textarea></label>
-                <label>Max concurrent assignments<input id="max_concurrent_assignments" type="number" min="1" max="16"></label>
+            <div class="callout">
+              <strong id="operator-mode-title">Normal owner mode</strong>
+              <p id="operator-mode-copy" class="supporting">Quick Start will keep routing, startup model, concurrency, and capacity settings automatic on this machine.</p>
+              <div class="button-row">
+                <button id="toggle-operator-mode" type="button" class="secondary">Open operator/admin mode</button>
               </div>
-            </details>
+            </div>
+
+            <div id="operator-settings-shell" class="callout" hidden>
+              <strong>Operator/admin settings</strong>
+              <p class="supporting">Use this for support, self-hosted control plane changes, or manual routing and model overrides. Normal owners should usually leave these alone.</p>
+              <details id="operator-settings">
+                <summary>Show advanced controls</summary>
+                <div class="stack" style="margin-top: 14px;">
+                  <label>Thermal profile
+                    <select id="advanced_setup_profile">
+                      <option value="quiet">Quiet</option>
+                      <option value="balanced">Balanced</option>
+                      <option value="performance">Performance</option>
+                    </select>
+                  </label>
+                  <label>Control plane URL<input id="edge_control_url" placeholder="https://edge.autonomousc.com"></label>
+                  <label>Region<input id="node_region" placeholder="eu-se-1"></label>
+                  <label>Trust tier
+                    <select id="trust_tier">
+                      <option value="standard">Standard</option>
+                      <option value="confidential">Confidential</option>
+                      <option value="restricted">Restricted</option>
+                    </select>
+                  </label>
+                  <label class="checkbox"><input id="restricted_capable" type="checkbox">Restricted workloads capable</label>
+                  <label>vLLM startup model<input id="vllm_model" placeholder="meta-llama/Llama-3.1-8B-Instruct"></label>
+                  <label>Supported models<textarea id="supported_models"></textarea></label>
+                  <label>Max concurrent assignments<input id="max_concurrent_assignments" type="number" min="1" max="16"></label>
+                </div>
+              </details>
+            </div>
           </form>
 
           <div id="claim-card" class="claim-card" hidden>
@@ -485,22 +497,28 @@
               <p id="dashboard-uptime-copy" class="meta"></p>
             </div>
             <div class="status-card">
-              <strong>Blocked reason</strong>
-              <span id="dashboard-blocked-pill" class="pill">Checking</span>
-              <span id="dashboard-blocked-value" class="metric-value">Loading...</span>
-              <p id="dashboard-blocked-copy" class="meta"></p>
+              <strong>Why idle</strong>
+              <span id="dashboard-idle-pill" class="pill">Checking</span>
+              <span id="dashboard-idle-value" class="metric-value">Loading...</span>
+              <p id="dashboard-idle-copy" class="meta"></p>
             </div>
             <div class="status-card">
-              <strong>Update state</strong>
-              <span id="dashboard-updates-pill" class="pill">Checking</span>
-              <span id="dashboard-updates-value" class="metric-value">Loading...</span>
-              <p id="dashboard-updates-copy" class="meta"></p>
+              <strong>What changed</strong>
+              <span id="dashboard-changes-pill" class="pill">Checking</span>
+              <span id="dashboard-changes-value" class="metric-value">Loading...</span>
+              <p id="dashboard-changes-copy" class="meta"></p>
             </div>
             <div class="status-card">
               <strong>Autopilot</strong>
               <span id="dashboard-autopilot-pill" class="pill">Checking</span>
               <span id="dashboard-autopilot-value" class="metric-value">Loading...</span>
               <p id="dashboard-autopilot-copy" class="meta"></p>
+            </div>
+            <div class="status-card">
+              <strong>Model cache</strong>
+              <span id="dashboard-model_cache-pill" class="pill">Checking</span>
+              <span id="dashboard-model_cache-value" class="metric-value">Loading...</span>
+              <p id="dashboard-model_cache-copy" class="meta"></p>
             </div>
           </div>
 
@@ -593,7 +611,7 @@
             <div class="callout">
               <strong>Self-healing</strong>
               <span id="self-heal-pill" class="pill warning">Standing by</span>
-              <p id="self-heal-copy" class="supporting">Self-healing watches for missing config, stuck containers, and bad restarts, then fixes what it can automatically.</p>
+              <p id="self-heal-copy" class="supporting">Self-healing watches for missing config, Docker trouble, low disk space, missing GPU access, bad Windows startup, and unhealthy containers, then fixes what it can automatically.</p>
               <div class="button-row">
                 <button id="fix-machine" type="button">Fix it</button>
               </div>
@@ -612,10 +630,12 @@
             </div>
 
             <div class="callout">
-              <strong>Diagnostics bundle</strong>
-              <p class="supporting">Create a support bundle with status, logs, and a redacted config snapshot.</p>
+              <strong>Support bundle</strong>
+              <p id="support-copy" class="supporting">Send a redacted support bundle with one click. A case ID will appear here automatically so you can reference it if support follows up.</p>
+              <p id="support-case" class="meta">No support case has been created yet.</p>
               <div class="button-row">
-                <button id="create-diagnostics" type="button">Create bundle</button>
+                <button id="send-support-bundle" type="button">Send support bundle</button>
+                <button id="create-diagnostics" type="button" class="secondary">Create bundle only</button>
               </div>
               <a id="download-link" class="download-link" hidden>Download latest diagnostics bundle</a>
             </div>
@@ -642,8 +662,14 @@
       const downloadLink = document.getElementById("download-link");
       const profileInput = document.getElementById("setup_profile");
       const advancedProfileSelect = document.getElementById("advanced_setup_profile");
+      const operatorModeToggle = document.getElementById("toggle-operator-mode");
+      const operatorModeTitle = document.getElementById("operator-mode-title");
+      const operatorModeCopy = document.getElementById("operator-mode-copy");
+      const operatorSettingsShell = document.getElementById("operator-settings-shell");
+      const operatorSettings = document.getElementById("operator-settings");
       let formHydrated = false;
       let claimUrl = "";
+      let operatorModeEnabled = false;
 
       function showApiError(message) {
         errorBanner.hidden = false;
@@ -669,6 +695,22 @@
       function selectProfile(profile) {
         profileInput.value = profile;
         advancedProfileSelect.value = profile;
+      }
+
+      function setOperatorMode(enabled) {
+        operatorModeEnabled = Boolean(enabled);
+        operatorSettingsShell.hidden = !operatorModeEnabled;
+        operatorSettings.open = operatorModeEnabled;
+        operatorModeTitle.textContent = operatorModeEnabled ? "Operator/admin mode is on" : "Normal owner mode";
+        operatorModeCopy.textContent = operatorModeEnabled
+          ? "Advanced routing, startup model, capacity, and control-plane settings are visible for this machine."
+          : "Quick Start will keep routing, startup model, concurrency, and capacity settings automatic on this machine.";
+        operatorModeToggle.textContent = operatorModeEnabled ? "Hide operator/admin mode" : "Open operator/admin mode";
+        try {
+          window.localStorage.setItem("edge-node-operator-mode", operatorModeEnabled ? "true" : "false");
+        } catch (_error) {
+          // Local storage can be unavailable in restricted browsers. The UI still works without persistence.
+        }
       }
 
       function setupPayload() {
@@ -771,9 +813,9 @@
         document.getElementById("dashboard-headline").textContent =
           dashboard?.headline || "Owner dashboard";
         document.getElementById("dashboard-detail").textContent =
-          dashboard?.detail || "Health, earnings, heartbeat, and update state will appear here.";
+          dashboard?.detail || "Health, earnings, idle reason, and recent changes will appear here.";
 
-        ["health", "earnings", "heartbeat", "model", "uptime", "blocked", "updates", "autopilot"].forEach((key) => {
+        ["health", "earnings", "heartbeat", "model", "uptime", "idle", "changes", "autopilot", "model_cache"].forEach((key) => {
           const card = cards[key] || {};
           const pillLabel =
             card.badge ||
@@ -882,11 +924,12 @@
           selfHealing.detail ||
           (
             !engineReady
-              ? "Self-healing can restore local setup files, but Docker still needs to be installed and running before the node can come online."
+              ? "Self-healing can restore local setup files and re-check Docker, disk space, GPU access, and Windows startup, but Docker still needs to be installed and running before the node can come online."
               : registrationReady
-                ? "Self-healing will reuse the stored node credentials, restart stuck containers, and roll back unhealthy signed releases when needed."
-                : "Self-healing will restore local setup files and help this machine get back to the Quick Start path."
+                ? "Self-healing will reuse the stored node credentials, restart stuck containers, guide Docker, disk, GPU, and startup recovery, and roll back unhealthy signed releases when needed."
+                : "Self-healing will restore local setup files, re-check the machine basics, and help this machine get back to the Quick Start path."
           );
+        document.getElementById("fix-machine").textContent = selfHealing.action_label || "Fix it";
         document.getElementById("fix-machine").disabled =
           Boolean(installerState.busy) || Boolean(selfHealing.status === "repairing");
 
@@ -914,6 +957,17 @@
           downloadLink.hidden = true;
           downloadLink.removeAttribute("href");
         }
+
+        document.getElementById("support-copy").textContent =
+          diagnostics.last_error ||
+          diagnostics.last_result ||
+          "Send a redacted support bundle with one click. A case ID will appear here automatically so you can reference it if support follows up.";
+        document.getElementById("support-case").textContent =
+          diagnostics.last_case_id
+            ? `Latest case ID: ${diagnostics.last_case_id}${diagnostics.last_bundle_sent_at ? ` · sent ${diagnostics.last_bundle_sent_at}` : ""}`
+            : diagnostics.last_bundle_created_at
+              ? `Latest local bundle: ${diagnostics.last_bundle_name || "support bundle"} · created ${diagnostics.last_bundle_created_at}`
+              : "No support case has been created yet.";
 
         if (!installerState.busy && (config.setup_profile || config.recommended_setup_profile)) {
           selectProfile(config.setup_profile || config.recommended_setup_profile);
@@ -964,6 +1018,9 @@
       advancedProfileSelect.addEventListener("change", () => {
         selectProfile(advancedProfileSelect.value || "balanced");
       });
+      operatorModeToggle.addEventListener("click", () => {
+        setOperatorMode(!operatorModeEnabled);
+      });
 
       setupForm.addEventListener("submit", async (event) => {
         event.preventDefault();
@@ -987,12 +1044,19 @@
       document.getElementById("install-launcher").addEventListener("click", async () => runAction(() => postJson("/api/launcher/install")));
       document.getElementById("remove-launcher").addEventListener("click", async () => runAction(() => postJson("/api/launcher/remove")));
       document.getElementById("fix-machine").addEventListener("click", async () => runAction(() => postJson("/api/repair")));
+      document.getElementById("send-support-bundle").addEventListener("click", async () => runAction(() => postJson("/api/support/send")));
       document.getElementById("create-diagnostics").addEventListener("click", async () => runAction(() => postJson("/api/diagnostics")));
       openClaimButton.addEventListener("click", () => {
         if (claimUrl) {
           window.open(claimUrl, "_blank", "noopener,noreferrer");
         }
       });
+
+      try {
+        setOperatorMode(window.localStorage.getItem("edge-node-operator-mode") === "true");
+      } catch (_error) {
+        setOperatorMode(false);
+      }
 
       void refreshStatus();
       window.setInterval(() => { void refreshStatus(); }, 5000);
