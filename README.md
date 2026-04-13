@@ -32,6 +32,32 @@ Build locally:
 docker build -f Dockerfile.single -t autonomousc-edge-node-single:dev .
 ```
 
+Build the published NVIDIA single-container image tag for Docker Hub:
+
+```bash
+bash build-single-image.sh
+```
+
+Windows PowerShell:
+
+```powershell
+.\build-single-image.ps1
+```
+
+Publish the NVIDIA single-container image to Docker Hub without changing the existing manager `latest` tag:
+
+```bash
+bash publish-single-image.sh
+```
+
+Windows PowerShell:
+
+```powershell
+.\publish-single-image.ps1
+```
+
+The default published tag is `anirdarrazi/autonomousc-ai-edge-runtime:single-cuda-latest`.
+
 Run with an operator token for first-time enrollment:
 
 ```bash
@@ -48,6 +74,24 @@ docker run --gpus all --rm \
   -v autonomousc-edge-scratch:/var/lib/autonomousc/scratch \
   -v autonomousc-hf-cache:/root/.cache/huggingface \
   autonomousc-edge-node-single:dev
+```
+
+Or pull the published NVIDIA single-container image directly:
+
+```bash
+docker run --gpus all --rm \
+  -p 8000:8000 \
+  -e EDGE_CONTROL_URL=https://edge.autonomousc.com \
+  -e OPERATOR_TOKEN=<operator-token> \
+  -e NODE_LABEL="Vast test node" \
+  -e NODE_REGION=us-vast-1 \
+  -e VLLM_MODEL=meta-llama/Llama-3.1-8B-Instruct \
+  -e SUPPORTED_MODELS=meta-llama/Llama-3.1-8B-Instruct,BAAI/bge-large-en-v1.5 \
+  -e HUGGING_FACE_HUB_TOKEN=<hf-token-if-needed> \
+  -v autonomousc-edge-credentials:/var/lib/autonomousc/credentials \
+  -v autonomousc-edge-scratch:/var/lib/autonomousc/scratch \
+  -v autonomousc-hf-cache:/root/.cache/huggingface \
+  anirdarrazi/autonomousc-ai-edge-runtime:single-cuda-latest
 ```
 
 Run with pre-issued node credentials instead of an operator token:

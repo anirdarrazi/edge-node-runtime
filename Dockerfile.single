@@ -6,8 +6,9 @@ WORKDIR /app
 COPY pyproject.toml /app/pyproject.toml
 COPY src /app/src
 
-RUN python -m pip install --no-cache-dir --upgrade pip \
-    && python -m pip install --no-cache-dir .
+RUN ln -sf /usr/bin/python3 /usr/local/bin/python \
+    && python3 -m pip install --no-cache-dir --upgrade pip \
+    && python3 -m pip install --no-cache-dir .
 
 ENV VLLM_BASE_URL=http://127.0.0.1:8000
 ENV VLLM_HOST=0.0.0.0
