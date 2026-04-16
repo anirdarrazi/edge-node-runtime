@@ -16,10 +16,25 @@ class VLLMRuntime:
             return [self._embedding_result(model, item) for item in items]
         return [self._response_result(model, item) for item in items]
 
+    def _normalize_embedding_input(self, item_input: Any) -> tuple[str | list[str], int]:
+        if isinstance(item_input, str):
+            return item_input, 1
+        if isinstance(item_input, list) and all(isinstance(entry, str) for entry in item_input):
+            return item_input, len(item_input)
+        if isinstance(item_input, dict):
+            texts = item_input.get("texts")
+            if isinstance(texts, list) and all(isinstance(entry, str) for entry in texts):
+                return texts, len(texts)
+            text = item_input.get("text")
+            if isinstance(text, str):
+                return text, 1
+        raise ValueError("Embeddings input must be a string, a list of strings, or an object with text/texts.")
+
     def _embedding_result(self, model: str, item: dict[str, Any]) -> dict[str, Any]:
+        embedding_input, input_texts = self._normalize_embedding_input(item["input"])
         response = self.client.post(
             "/v1/embeddings",
-            json={"model": model, "input": item["input"]},
+            json={"model": model, "input": embedding_input},
         )
         response.raise_for_status()
         payload = response.json()
@@ -32,7 +47,7 @@ class VLLMRuntime:
             "status": "completed",
             "usage": {
                 "input_tokens": usage.get("prompt_tokens", 0),
-                "input_texts": 1,
+                "input_texts": input_texts,
                 "total_tokens": usage.get("total_tokens", usage.get("prompt_tokens", 0)),
             },
             "cost": {
