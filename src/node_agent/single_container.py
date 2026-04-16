@@ -7,7 +7,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -19,12 +19,18 @@ def env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
     if value is None:
         return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
+    stripped = value.strip()
+    if not stripped:
+        return default
+    return stripped.lower() in {"1", "true", "yes", "on"}
 
 
 def env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return default
     try:
-        return int(str(os.getenv(name, str(default))).strip())
+        return int(str(raw).strip())
     except ValueError:
         return default
 
@@ -52,8 +58,8 @@ class SingleContainerConfig:
             return values.get(name, default)
 
         return cls(
-            vllm_model=str(read("VLLM_MODEL", "meta-llama/Llama-3.1-8B-Instruct")).strip(),
-            vllm_host=str(read("VLLM_HOST", "0.0.0.0")).strip() or "0.0.0.0",
+            vllm_model=nonempty_value(values, "VLLM_MODEL", "meta-llama/Llama-3.1-8B-Instruct"),
+            vllm_host=nonempty_value(values, "VLLM_HOST", "0.0.0.0"),
             vllm_port=env_int_from_mapping(values, "VLLM_PORT", 8000),
             vllm_startup_timeout_seconds=env_int_from_mapping(values, "VLLM_STARTUP_TIMEOUT_SECONDS", 600),
             vllm_server_command=tuple(
@@ -98,14 +104,72 @@ def env_bool_from_mapping(env: Mapping[str, str], name: str, default: bool) -> b
     value = env.get(name)
     if value is None:
         return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
+    stripped = value.strip()
+    if not stripped:
+        return default
+    return stripped.lower() in {"1", "true", "yes", "on"}
 
 
 def env_int_from_mapping(env: Mapping[str, str], name: str, default: int) -> int:
+    raw = env.get(name)
+    if raw is None or not str(raw).strip():
+        return default
     try:
-        return int(str(env.get(name, str(default))).strip())
+        return int(str(raw).strip())
     except ValueError:
         return default
+
+
+def nonempty_value(values: Mapping[str, str], name: str, default: str) -> str:
+    value = values.get(name)
+    if value is None:
+        return default
+    stripped = str(value).strip()
+    return stripped or default
+
+
+def value_is_blank(values: Mapping[str, str], name: str) -> bool:
+    value = values.get(name)
+    return value is None or not str(value).strip()
+
+
+def force_when_blank_or(values: MutableMapping[str, str], name: str, default: str, legacy_values: set[str]) -> None:
+    current = str(values.get(name, "")).strip()
+    normalized = current.lower().replace("-", "_")
+    if not current or normalized in legacy_values:
+        values[name] = default
+
+
+def apply_single_container_runtime_defaults(
+    values: MutableMapping[str, str],
+    *,
+    local_inference_url: str | None = None,
+) -> None:
+    values["VLLM_MODEL"] = nonempty_value(values, "VLLM_MODEL", "meta-llama/Llama-3.1-8B-Instruct")
+    values["VLLM_HOST"] = nonempty_value(values, "VLLM_HOST", "0.0.0.0")
+    values["VLLM_PORT"] = str(env_int_from_mapping(values, "VLLM_PORT", 8000))
+
+    force_when_blank_or(
+        values,
+        "RUNTIME_PROFILE",
+        "vast_vllm_safetensors",
+        {"auto", "home_llama_cpp_gguf", "home_embeddings_llama_cpp"},
+    )
+    force_when_blank_or(values, "DEPLOYMENT_TARGET", "vast_ai", {"auto", "home_edge"})
+    force_when_blank_or(values, "INFERENCE_ENGINE", "vllm", {"auto", "llama_cpp"})
+    force_when_blank_or(values, "CAPACITY_CLASS", "elastic_burst", {"home_heat", "generic"})
+    force_when_blank_or(values, "TEMPORARY_NODE", "true", {"false", "0", "no", "off"})
+    force_when_blank_or(values, "BURST_PROVIDER", "vast_ai", set())
+    force_when_blank_or(values, "BURST_LEASE_PHASE", "accept_burst_work", set())
+    force_when_blank_or(values, "BURST_COST_CEILING_USD", "0.25", set())
+
+    start_vllm = env_bool_from_mapping(values, "START_VLLM", True)
+    inference_url = local_inference_url or f"http://127.0.0.1:{values['VLLM_PORT']}"
+    compose_service_urls = {"http://inference-runtime:8000", "http://vllm:8000"}
+    for key in ("INFERENCE_BASE_URL", "VLLM_BASE_URL"):
+        current = str(values.get(key, "")).strip()
+        if value_is_blank(values, key) or (start_vllm and current in compose_service_urls):
+            values[key] = inference_url
 
 
 def wait_for_inference_runtime_ready(config: SingleContainerConfig, process: subprocess.Popen[str] | None) -> None:
@@ -175,22 +239,7 @@ class EmbeddedRuntimeSupervisor:
 
     def env_values(self) -> dict[str, str]:
         values = dict(self.env_provider())
-        values.setdefault("VLLM_MODEL", values.get("VLLM_MODEL", "meta-llama/Llama-3.1-8B-Instruct"))
-        values.setdefault("RUNTIME_PROFILE", values.get("RUNTIME_PROFILE", "vast_vllm_safetensors"))
-        values.setdefault("DEPLOYMENT_TARGET", values.get("DEPLOYMENT_TARGET", "vast_ai"))
-        values.setdefault("INFERENCE_ENGINE", values.get("INFERENCE_ENGINE", "vllm"))
-        values.setdefault("CAPACITY_CLASS", values.get("CAPACITY_CLASS", "elastic_burst"))
-        values.setdefault("TEMPORARY_NODE", values.get("TEMPORARY_NODE", "true"))
-        values.setdefault("BURST_PROVIDER", values.get("BURST_PROVIDER", "vast_ai"))
-        values.setdefault("BURST_LEASE_PHASE", values.get("BURST_LEASE_PHASE", "accept_burst_work"))
-        values.setdefault("BURST_COST_CEILING_USD", values.get("BURST_COST_CEILING_USD", "0.25"))
-        values.setdefault("VLLM_HOST", values.get("VLLM_HOST", "0.0.0.0"))
-        values.setdefault("VLLM_PORT", values.get("VLLM_PORT", "8000"))
-        inference_base_url = values.get("INFERENCE_BASE_URL") or values.get("VLLM_BASE_URL")
-        if not inference_base_url:
-            inference_base_url = f"http://127.0.0.1:{values['VLLM_PORT']}"
-        values.setdefault("INFERENCE_BASE_URL", inference_base_url)
-        values.setdefault("VLLM_BASE_URL", values["INFERENCE_BASE_URL"])
+        apply_single_container_runtime_defaults(values)
         values.setdefault("CREDENTIALS_PATH", str(self.credentials_dir / "node-credentials.json"))
         values.setdefault("ATTESTATION_STATE_PATH", str(self.credentials_dir / "attestation-state.json"))
         values.setdefault("RECOVERY_NOTE_PATH", str(self.credentials_dir / "recovery-note.txt"))
@@ -341,16 +390,7 @@ class EmbeddedRuntimeSupervisor:
 
 def main() -> int:
     config = SingleContainerConfig.from_env()
-    os.environ.setdefault("RUNTIME_PROFILE", "vast_vllm_safetensors")
-    os.environ.setdefault("DEPLOYMENT_TARGET", "vast_ai")
-    os.environ.setdefault("INFERENCE_ENGINE", "vllm")
-    os.environ.setdefault("CAPACITY_CLASS", "elastic_burst")
-    os.environ.setdefault("TEMPORARY_NODE", "true")
-    os.environ.setdefault("BURST_PROVIDER", "vast_ai")
-    os.environ.setdefault("BURST_LEASE_PHASE", "accept_burst_work")
-    os.environ.setdefault("BURST_COST_CEILING_USD", "0.25")
-    os.environ.setdefault("INFERENCE_BASE_URL", config.local_inference_url)
-    os.environ.setdefault("VLLM_BASE_URL", os.environ["INFERENCE_BASE_URL"])
+    apply_single_container_runtime_defaults(os.environ, local_inference_url=config.local_inference_url)
     os.environ.setdefault("CREDENTIALS_PATH", "/var/lib/autonomousc/credentials/node-credentials.json")
     os.environ.setdefault("ATTESTATION_STATE_PATH", "/var/lib/autonomousc/credentials/attestation-state.json")
     os.environ.setdefault("RECOVERY_NOTE_PATH", "/var/lib/autonomousc/credentials/recovery-note.txt")

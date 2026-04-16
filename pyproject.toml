@@ -30,7 +30,11 @@ node-agent-single-container = "node_agent.single_container:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-node_agent = ["*.html", "runtime_bundle/*"]
+node_agent = [
+  "*.html",
+  "runtime_bundle/*",
+  "runtime_bundle/.env.example"
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

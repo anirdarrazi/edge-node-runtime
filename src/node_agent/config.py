@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .inference_engine import (
@@ -84,6 +84,38 @@ class NodeAgentSettings(BaseSettings):
     tokenizer_digest: str | None = None
     attestation_provider: Literal["simulated", "hardware"] = "simulated"
     restricted_attestation_max_age_seconds: int = 3600
+
+    @field_validator(
+        "operator_token",
+        "node_id",
+        "node_key",
+        "inference_base_url",
+        "runtime_image",
+        "vllm_image",
+        "vllm_base_url",
+        "owner_target_model",
+        "owner_target_supported_models",
+        "llama_cpp_pooling",
+        "capacity_class",
+        "burst_provider",
+        "burst_lease_id",
+        "burst_lease_phase",
+        "burst_cost_ceiling_usd",
+        "room_temp_c",
+        "target_temp_c",
+        "gpu_temp_c",
+        "power_watts",
+        "estimated_heat_output_watts",
+        "energy_price_kwh",
+        "model_manifest_digest",
+        "tokenizer_digest",
+        mode="before",
+    )
+    @classmethod
+    def _blank_optional_env_as_none(cls, value: Any) -> Any:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     @property
     def runtime_backend(self) -> str:

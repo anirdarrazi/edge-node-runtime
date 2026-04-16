@@ -71,6 +71,40 @@ def test_embedded_runtime_defaults_to_vast_burst_capacity(tmp_path) -> None:
     assert values["VLLM_BASE_URL"] == "http://127.0.0.1:8000"
 
 
+def test_embedded_runtime_rewrites_home_defaults_for_single_container(tmp_path) -> None:
+    supervisor = single_container.EmbeddedRuntimeSupervisor(
+        lambda: {
+            "RUNTIME_PROFILE": "auto",
+            "DEPLOYMENT_TARGET": "home_edge",
+            "INFERENCE_ENGINE": "llama_cpp",
+            "CAPACITY_CLASS": "home_heat",
+            "TEMPORARY_NODE": "false",
+            "BURST_PROVIDER": "",
+            "BURST_LEASE_PHASE": "",
+            "BURST_COST_CEILING_USD": "",
+            "INFERENCE_BASE_URL": "http://inference-runtime:8000",
+            "VLLM_BASE_URL": "http://inference-runtime:8000",
+            "VLLM_PORT": "",
+        },
+        cache_dir=tmp_path / "cache",
+        credentials_dir=tmp_path / "credentials",
+        scratch_dir=tmp_path / "scratch",
+    )
+
+    values = supervisor.env_values()
+
+    assert values["RUNTIME_PROFILE"] == "vast_vllm_safetensors"
+    assert values["DEPLOYMENT_TARGET"] == "vast_ai"
+    assert values["INFERENCE_ENGINE"] == "vllm"
+    assert values["CAPACITY_CLASS"] == "elastic_burst"
+    assert values["TEMPORARY_NODE"] == "true"
+    assert values["BURST_PROVIDER"] == "vast_ai"
+    assert values["BURST_LEASE_PHASE"] == "accept_burst_work"
+    assert values["BURST_COST_CEILING_USD"] == "0.25"
+    assert values["INFERENCE_BASE_URL"] == "http://127.0.0.1:8000"
+    assert values["VLLM_BASE_URL"] == "http://127.0.0.1:8000"
+
+
 def test_main_starts_node_agent_without_nested_docker_when_vllm_is_external(monkeypatch) -> None:
     started: list[list[str]] = []
 

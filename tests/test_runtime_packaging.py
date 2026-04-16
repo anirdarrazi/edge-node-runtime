@@ -1,4 +1,7 @@
 from pathlib import Path
+import subprocess
+import sys
+import zipfile
 
 import pytest
 
@@ -45,3 +48,28 @@ def test_manager_mode_readme_requests_gpu_access() -> None:
     manager_section = readme.split("#### Local manager mode", 1)[1].split("Then open", 1)[0]
 
     assert "docker run --rm \\\n  --gpus all \\" in manager_section
+
+
+def test_built_wheel_includes_hidden_runtime_env_example(tmp_path: Path) -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "wheel",
+            "--no-deps",
+            "--wheel-dir",
+            str(tmp_path),
+            str(RUNTIME_ROOT),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    wheels = list(tmp_path.glob("autonomousc_node_agent-*.whl"))
+    assert wheels, completed.stdout
+
+    with zipfile.ZipFile(wheels[0]) as wheel:
+        assert "node_agent/runtime_bundle/.env.example" in wheel.namelist()
