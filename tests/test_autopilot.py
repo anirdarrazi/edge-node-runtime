@@ -64,3 +64,29 @@ def test_autopilot_uses_performance_when_demand_is_high_and_pressure_is_low(
     assert recommendation.max_concurrent_assignments >= 3
     assert recommendation.startup_model == DEFAULT_RESPONSE_MODEL
     assert recommendation.pending_restart is False
+
+
+def test_autopilot_reports_heating_telemetry_in_capabilities(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = build_settings(tmp_path)
+    settings.heat_demand = "high"
+    settings.room_temp_c = 18.5
+    settings.target_temp_c = 21.0
+    settings.energy_price_kwh = 0.12
+    autopilot = AutopilotController(settings)
+    monkeypatch.setattr(autopilot, "sample_gpu_memory_pressure", lambda: 0.55)
+    monkeypatch.setattr(
+        autopilot,
+        "sample_gpu_thermal_metrics",
+        lambda: {"gpu_temp_c": 61.0, "power_watts": 285.0, "estimated_heat_output_watts": 285.0},
+    )
+
+    autopilot.observe_idle()
+
+    capabilities = autopilot.capabilities_payload()
+    assert capabilities["heat_demand"] == "high"
+    assert capabilities["room_temp_c"] == 18.5
+    assert capabilities["target_temp_c"] == 21.0
+    assert capabilities["gpu_temp_c"] == 61.0
+    assert capabilities["power_watts"] == 285.0
+    assert capabilities["estimated_heat_output_watts"] == 285.0
+    assert capabilities["energy_price_kwh"] == 0.12

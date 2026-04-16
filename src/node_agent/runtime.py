@@ -7,8 +7,9 @@ import httpx
 
 
 class VLLMRuntime:
-    def __init__(self, base_url: str):
+    def __init__(self, base_url: str, *, engine: str = "vllm"):
         self.client = httpx.Client(base_url=base_url, timeout=120.0)
+        self.engine = engine
 
     def execute(self, operation: str, model: str, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if operation == "embeddings":
@@ -75,3 +76,7 @@ class VLLMRuntime:
             "output": payload,
             "completed_at": datetime.now(timezone.utc).isoformat(),
         }
+
+
+class OpenAICompatibleRuntime(VLLMRuntime):
+    pass

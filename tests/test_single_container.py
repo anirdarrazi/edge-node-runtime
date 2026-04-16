@@ -45,7 +45,30 @@ def test_config_from_env_allows_custom_commands(monkeypatch) -> None:
     assert config.vllm_extra_args == ("--dtype", "auto", "--max-model-len", "4096")
     assert config.node_agent_command == ("node-agent", "run")
     assert config.start_vllm is False
+    assert config.local_inference_url == "http://127.0.0.1:8123"
     assert config.local_vllm_url == "http://127.0.0.1:8123"
+
+
+def test_embedded_runtime_defaults_to_vast_burst_capacity(tmp_path) -> None:
+    supervisor = single_container.EmbeddedRuntimeSupervisor(
+        lambda: {},
+        cache_dir=tmp_path / "cache",
+        credentials_dir=tmp_path / "credentials",
+        scratch_dir=tmp_path / "scratch",
+    )
+
+    values = supervisor.env_values()
+
+    assert values["RUNTIME_PROFILE"] == "vast_vllm_safetensors"
+    assert values["DEPLOYMENT_TARGET"] == "vast_ai"
+    assert values["INFERENCE_ENGINE"] == "vllm"
+    assert values["CAPACITY_CLASS"] == "elastic_burst"
+    assert values["TEMPORARY_NODE"] == "true"
+    assert values["BURST_PROVIDER"] == "vast_ai"
+    assert values["BURST_LEASE_PHASE"] == "accept_burst_work"
+    assert values["BURST_COST_CEILING_USD"] == "0.25"
+    assert values["INFERENCE_BASE_URL"] == "http://127.0.0.1:8000"
+    assert values["VLLM_BASE_URL"] == "http://127.0.0.1:8000"
 
 
 def test_main_starts_node_agent_without_nested_docker_when_vllm_is_external(monkeypatch) -> None:
@@ -92,6 +115,6 @@ def test_wait_for_vllm_fails_fast_when_process_exits() -> None:
     try:
         single_container.wait_for_vllm_ready(config, FailedProcess())  # type: ignore[arg-type]
     except RuntimeError as error:
-        assert "vLLM exited" in str(error)
+        assert "local inference runtime exited" in str(error)
     else:  # pragma: no cover
         raise AssertionError("wait_for_vllm_ready should fail when vLLM exits early")

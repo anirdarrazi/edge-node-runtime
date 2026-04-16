@@ -70,7 +70,13 @@ function Get-NodeServiceVenvPython {
     throw "The local node service Python environment is incomplete. Delete .installer-venv and run the install launcher again."
   }
 
-  if ($RefreshDependencies) {
+  $needsBootstrap = $RefreshDependencies
+  if (-not $needsBootstrap) {
+    & $venvPython -c "import node_agent" *> $null
+    $needsBootstrap = $LASTEXITCODE -ne 0
+  }
+
+  if ($needsBootstrap) {
     Write-Host "Preparing the local AUTONOMOUSc Edge Node app..."
     & $venvPython -m pip install --upgrade pip
     & $venvPython -m pip install -e .
@@ -90,7 +96,7 @@ function Start-NodeApp {
   Set-Location $RootPath
   $venvPython = Get-NodeServiceVenvPython -RootPath $RootPath -Create -RefreshDependencies:$RefreshDependencies
   Write-Host "Opening the AUTONOMOUSc Edge Node app..."
-  & $venvPython -m node_agent.launcher
+  & $venvPython -m node_agent.service start --open
 }
 
 function Stop-NodeApp {

@@ -1,3 +1,4 @@
+import plistlib
 import subprocess
 from pathlib import Path
 
@@ -55,8 +56,104 @@ def test_windows_autostart_enable_and_disable(tmp_path: Path, monkeypatch: pytes
     assert disabled["label"] == "Disabled"
 
 
+def test_macos_autostart_enable_and_disable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    home_dir = tmp_path / "home"
+    loaded = False
+
+    def runner(args: list[str], _cwd: Path) -> subprocess.CompletedProcess[str]:
+        nonlocal loaded
+        if args[:2] == ["launchctl", "unload"]:
+            loaded = False
+            return completed(args)
+        if args[:2] == ["launchctl", "load"]:
+            loaded = True
+            return completed(args)
+        raise AssertionError(f"Unexpected command: {args}")
+
+    launcher_path = tmp_path / "launcher.py"
+    launcher_path.write_text("print('launcher')\n", encoding="utf-8")
+
+    monkeypatch.setattr(Path, "home", lambda: home_dir)
+    monkeypatch.setattr("node_agent.autostart.shutil.which", lambda name: f"/usr/bin/{name}" if name == "launchctl" else None)
+    manager = AutoStartManager(
+        tmp_path,
+        command_runner=runner,
+        platform_name="darwin",
+        launcher_path=launcher_path,
+        python_executable="/usr/bin/python3",
+    )
+
+    enabled = manager.enable()
+
+    assert loaded is True
+    assert enabled["enabled"] is True
+    assert enabled["mechanism"] == "macos_launch_agent"
+    assert manager.launch_agent_path.exists()
+    with manager.launch_agent_path.open("rb") as handle:
+        plist = plistlib.load(handle)
+    assert plist["Label"] == manager.launchd_label()
+    assert plist["ProgramArguments"] == ["/usr/bin/python3", str(launcher_path), "start"]
+    assert plist["EnvironmentVariables"]["AUTONOMOUSC_RUNTIME_DIR"] == str(tmp_path.resolve())
+
+    disabled = manager.disable()
+
+    assert disabled["supported"] is True
+    assert disabled["enabled"] is False
+    assert not manager.launch_agent_path.exists()
+
+
+def test_linux_autostart_enable_and_disable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    home_dir = tmp_path / "home"
+    enabled_state = False
+
+    def runner(args: list[str], _cwd: Path) -> subprocess.CompletedProcess[str]:
+        nonlocal enabled_state
+        if args == ["systemctl", "--user", "daemon-reload"]:
+            return completed(args)
+        if args[:3] == ["systemctl", "--user", "enable"]:
+            enabled_state = True
+            return completed(args)
+        if args[:3] == ["systemctl", "--user", "disable"]:
+            enabled_state = False
+            return completed(args)
+        if args[:3] == ["systemctl", "--user", "is-enabled"]:
+            if not enabled_state:
+                raise RuntimeError("disabled")
+            return completed(args, stdout="enabled\n")
+        raise AssertionError(f"Unexpected command: {args}")
+
+    launcher_path = tmp_path / "launcher.py"
+    launcher_path.write_text("print('launcher')\n", encoding="utf-8")
+
+    monkeypatch.setattr(Path, "home", lambda: home_dir)
+    monkeypatch.setattr("node_agent.autostart.shutil.which", lambda name: f"/usr/bin/{name}" if name == "systemctl" else None)
+    manager = AutoStartManager(
+        tmp_path,
+        command_runner=runner,
+        platform_name="linux",
+        launcher_path=launcher_path,
+        python_executable="/usr/bin/python3",
+    )
+
+    enabled = manager.enable()
+
+    assert enabled["enabled"] is True
+    assert enabled["mechanism"] == "systemd_user_service"
+    assert manager.systemd_unit_path.exists()
+    unit = manager.systemd_unit_path.read_text(encoding="utf-8")
+    assert "AUTONOMOUSc Edge Node Service" in unit
+    assert "AUTONOMOUSC_RUNTIME_DIR=" in unit
+    assert "launcher.py" in unit
+
+    disabled = manager.disable()
+
+    assert disabled["supported"] is True
+    assert disabled["enabled"] is False
+    assert not manager.systemd_unit_path.exists()
+
+
 def test_autostart_status_reports_unsupported_platform(tmp_path: Path) -> None:
-    manager = AutoStartManager(tmp_path, platform_name="posix")
+    manager = AutoStartManager(tmp_path, platform_name="freebsd")
 
     status = manager.status()
 

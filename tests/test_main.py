@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 import node_agent.main as main_module
+from node_agent.gguf_artifacts import find_gguf_artifact
 from node_agent.model_artifacts import find_model_artifact
 
 
@@ -113,7 +114,11 @@ class FakeControl:
 
 def test_command_bootstrap_runs_claim_bootstrap(monkeypatch: pytest.MonkeyPatch):
     control = FakeControl(has_credentials=False)
-    monkeypatch.setattr(main_module, "NodeAgentSettings", lambda: SimpleNamespace(vllm_base_url="http://localhost:8000"))
+    monkeypatch.setattr(
+        main_module,
+        "NodeAgentSettings",
+        lambda: SimpleNamespace(inference_base_url="http://localhost:8000", vllm_base_url="http://localhost:8000"),
+    )
     monkeypatch.setattr(main_module, "EdgeControlClient", lambda _settings: control)
 
     result = main_module.main(["bootstrap"])
@@ -124,12 +129,12 @@ def test_command_bootstrap_runs_claim_bootstrap(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_command_default_bootstraps_when_credentials_are_missing(monkeypatch: pytest.MonkeyPatch):
-    settings = SimpleNamespace(vllm_base_url="http://localhost:8000")
+    settings = SimpleNamespace(inference_base_url="http://localhost:8000", vllm_base_url="http://localhost:8000")
     control = FakeControl(has_credentials=False)
 
     monkeypatch.setattr(main_module, "NodeAgentSettings", lambda: settings)
     monkeypatch.setattr(main_module, "EdgeControlClient", lambda _settings: control)
-    monkeypatch.setattr(main_module, "VLLMRuntime", lambda _base_url: object())
+    monkeypatch.setattr(main_module, "VLLMRuntime", lambda _base_url, **_kwargs: object())
 
     with pytest.raises(KeyboardInterrupt):
         main_module.main([])
@@ -142,11 +147,12 @@ def test_run_worker_loop_clears_credentials_after_auth_failure():
     control = FakeControl(has_credentials=True)
     control.auth_fail_on_heartbeat = True
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="Open the setup UI and run Quick Start"):
         main_module.run_worker_loop(control, object(), attest_on_start=False)
 
     assert control.clear_calls == 1
     assert control.recovery_notes
+    assert "Open the setup UI and run Quick Start" in control.recovery_notes[-1]
 
 
 def test_run_worker_loop_reports_assignment_failure():
@@ -370,3 +376,99 @@ def test_build_runtime_receipt_uses_release_metadata_for_the_assignment_model():
     assert receipt["declared_runtime_image_digest"] == control.settings.docker_image
     assert receipt["declared_model_manifest_digest"] == artifact.model_manifest_digest
     assert receipt["declared_tokenizer_digest"] == artifact.tokenizer_digest
+    assert isinstance(receipt["declared_chat_template_digest"], str)
+    assert receipt["declared_effective_context_tokens"] == control.settings.max_context_tokens
+    assert isinstance(receipt["declared_runtime_tuple_digest"], str)
+
+
+def test_build_runtime_receipt_declares_gguf_artifact_for_llama_cpp():
+    control = FakeControl(has_credentials=True)
+    control.settings.runtime_profile = "home_llama_cpp_gguf"
+    control.settings.resolved_runtime_profile_id = "home_llama_cpp_gguf"
+    control.settings.resolved_inference_engine = "llama_cpp"
+    control.settings.current_model = "meta-llama/Llama-3.1-8B-Instruct"
+    assignment = SimpleNamespace(
+        assignment_id="assign_receipt_gguf",
+        execution_id="pexec_receipt_gguf",
+        assignment_nonce="nonce_gguf",
+        operation="responses",
+        model="meta-llama/Llama-3.1-8B-Instruct",
+    )
+    artifact = find_gguf_artifact("meta-llama/Llama-3.1-8B-Instruct", "responses")
+
+    receipt = main_module.build_runtime_receipt(control, assignment, [{"usage": {"total_tokens": 5}}])
+
+    assert artifact is not None
+    assert receipt["declared_model_manifest_digest"] is None
+    assert receipt["declared_tokenizer_digest"] is None
+    assert receipt["declared_gguf_artifact"]["file_digest"] == artifact.file_digest
+    assert receipt["declared_gguf_artifact"]["quantization_type"] == "Q4_K_M"
+
+
+def test_validate_assignment_rejects_mismatched_gguf_file_digest():
+    control = FakeControl(has_credentials=True)
+    control.settings.runtime_profile = "home_llama_cpp_gguf"
+    control.settings.resolved_runtime_profile_id = "home_llama_cpp_gguf"
+    control.settings.resolved_inference_engine = "llama_cpp"
+    control.settings.current_model = "meta-llama/Llama-3.1-8B-Instruct"
+    assignment = SimpleNamespace(
+        assignment_id="assign_gguf_mismatch",
+        execution_id="pexec_gguf_mismatch",
+        item_count=1,
+        operation="responses",
+        model="meta-llama/Llama-3.1-8B-Instruct",
+        privacy_tier="standard",
+        allowed_regions=["eu-se-1"],
+        required_vram_gb=16.0,
+        required_context_tokens=8192,
+        token_budget={"total_tokens": 2048},
+        expected_gguf_file_digest="sha256:" + "0" * 64,
+    )
+
+    with pytest.raises(ValueError, match="local GGUF file digest"):
+        main_module.validate_assignment(
+            control,
+            assignment,
+            [
+                {
+                    "batch_item_id": "item_1",
+                    "customer_item_id": "cust_1",
+                    "operation": "responses",
+                    "model": "meta-llama/Llama-3.1-8B-Instruct",
+                    "input": {"messages": [{"role": "user", "content": "hello"}]},
+                }
+            ],
+        )
+
+
+def test_validate_assignment_rejects_mismatched_runtime_tuple_digest():
+    control = FakeControl(has_credentials=True)
+    assignment = SimpleNamespace(
+        assignment_id="assign_runtime_tuple_mismatch",
+        execution_id="pexec_runtime_tuple_mismatch",
+        item_count=1,
+        operation="responses",
+        model="meta-llama/Llama-3.1-8B-Instruct",
+        privacy_tier="restricted",
+        allowed_regions=["eu-se-1"],
+        required_vram_gb=16.0,
+        required_context_tokens=8192,
+        token_budget={"total_tokens": 2048},
+        node_trust_requirement="trusted_only",
+        expected_runtime_tuple_digest="sha256:" + "0" * 64,
+    )
+
+    with pytest.raises(ValueError, match="runtime tuple digest"):
+        main_module.validate_assignment(
+            control,
+            assignment,
+            [
+                {
+                    "batch_item_id": "item_1",
+                    "customer_item_id": "cust_1",
+                    "operation": "responses",
+                    "model": "meta-llama/Llama-3.1-8B-Instruct",
+                    "input": {"messages": [{"role": "user", "content": "hello"}]},
+                }
+            ],
+        )

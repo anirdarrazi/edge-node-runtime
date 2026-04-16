@@ -18,7 +18,7 @@ def test_windows_desktop_launcher_enable_and_disable(tmp_path: Path, monkeypatch
 
     def runner(args: list[str], _cwd: Path) -> subprocess.CompletedProcess[str]:
         if args[0].lower().startswith("powershell"):
-            shortcut = desktop_dir / "AUTONOMOUSc Edge Node.lnk"
+            shortcut = desktop_dir / "AUTONOMOUSc Edge Node App.lnk"
             shortcut.write_text("shortcut", encoding="utf-8")
             return completed(args)
         raise AssertionError(f"Unexpected command: {args}")
@@ -42,6 +42,7 @@ def test_windows_desktop_launcher_enable_and_disable(tmp_path: Path, monkeypatch
     script = manager.script_path.read_text(encoding="utf-8")
     assert "AUTONOMOUSC_RUNTIME_DIR" in script
     assert str(launcher_path) in script
+    assert "start --open" in script
 
     disabled = manager.disable()
 

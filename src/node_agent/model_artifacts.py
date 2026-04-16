@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .release_manifest import load_release_manifest
+from .runtime_profiles import runtime_profile_by_id
 
 if TYPE_CHECKING:
     from .config import NodeAgentSettings
@@ -71,6 +72,14 @@ class ModelArtifactsManifest:
     artifacts: tuple[ModelArtifactRecord, ...]
 
 
+CHAT_TEMPLATE_RELEVANT_PATHS = {
+    "chat_template.jinja",
+    "chat_template.json",
+    "special_tokens_map.json",
+    "tokenizer_config.json",
+}
+
+
 def _manifest_path() -> Path:
     return Path(__file__).with_name("runtime_bundle") / "model-artifacts.json"
 
@@ -86,6 +95,27 @@ def _sorted_json(value: Any) -> Any:
 def _sha256_json(value: Any) -> str:
     payload = json.dumps(_sorted_json(value), separators=(",", ":"), ensure_ascii=True)
     return f"sha256:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
+
+
+def _chat_template_digest(manifest: ArtifactManifest, operation: str) -> str | None:
+    if operation != "responses":
+        return None
+    relevant_files = tuple(file for file in manifest.files if file.path in CHAT_TEMPLATE_RELEVANT_PATHS)
+    if not relevant_files:
+        return _sha256_json(manifest.payload())
+    return _sha256_json(
+        {
+            **manifest.payload(),
+            "files": [
+                {
+                    "path": file.path,
+                    "digest": file.digest,
+                    "size_bytes": file.size_bytes,
+                }
+                for file in relevant_files
+            ],
+        }
+    )
 
 
 def _parse_artifact_file(raw: Any, *, model: str, operation: str, label: str) -> ArtifactFile:
@@ -213,17 +243,62 @@ def load_model_artifacts_manifest() -> ModelArtifactsManifest:
     return ModelArtifactsManifest(version=version, generated_at=generated_at, artifacts=artifacts)
 
 
-def find_model_artifact(model: str, operation: str) -> ModelArtifactRecord | None:
+def find_model_artifact(model: str, operation: str, runtime_engine: str | None = None) -> ModelArtifactRecord | None:
     manifest = load_model_artifacts_manifest()
     for artifact in manifest.artifacts:
-        if artifact.model == model and artifact.operation == operation:
-            return artifact
+        if artifact.model != model or artifact.operation != operation:
+            continue
+        if runtime_engine and artifact.model_manifest.runtime_engine != runtime_engine:
+            continue
+        return artifact
+    return None
+
+
+def _settings_runtime_engine(settings: object) -> str:
+    profile_id = getattr(settings, "resolved_runtime_profile_id", None)
+    if not isinstance(profile_id, str) or not profile_id:
+        profile_id = getattr(settings, "runtime_profile", None)
+    profile = runtime_profile_by_id(profile_id)
+    if profile is not None:
+        return profile.inference_engine
+    value = getattr(settings, "resolved_inference_engine", None)
+    if isinstance(value, str) and value:
+        return value
+    value = getattr(settings, "inference_engine", None)
+    if isinstance(value, str) and value:
+        return value
+    return "vllm"
+
+
+def _settings_reports_audited_manifests(settings: object) -> bool:
+    value = getattr(settings, "reports_audited_manifests", None)
+    if isinstance(value, bool):
+        return value
+    profile_id = getattr(settings, "resolved_runtime_profile_id", None)
+    if not isinstance(profile_id, str) or not profile_id:
+        profile_id = getattr(settings, "runtime_profile", None)
+    profile = runtime_profile_by_id(profile_id)
+    if profile is not None:
+        return profile.reports_audited_manifests
+    return _settings_runtime_engine(settings) == "vllm"
+
+
+def _settings_current_model(settings: object) -> str | None:
+    value = getattr(settings, "current_model", None)
+    if isinstance(value, str) and value:
+        return value
+    value = getattr(settings, "vllm_model", None)
+    if isinstance(value, str) and value:
+        return value
     return None
 
 
 def resolved_model_manifest_digest(settings: NodeAgentSettings, model: str | None, operation: str | None) -> str | None:
+    runtime_engine = _settings_runtime_engine(settings)
+    if not _settings_reports_audited_manifests(settings):
+        return None
     if isinstance(model, str) and model and isinstance(operation, str) and operation:
-        artifact = find_model_artifact(model, operation)
+        artifact = find_model_artifact(model, operation, runtime_engine=runtime_engine)
         if artifact is not None:
             return artifact.model_manifest_digest
     override = settings.model_manifest_digest
@@ -233,8 +308,11 @@ def resolved_model_manifest_digest(settings: NodeAgentSettings, model: str | Non
 
 
 def resolved_tokenizer_digest(settings: NodeAgentSettings, model: str | None, operation: str | None) -> str | None:
+    runtime_engine = _settings_runtime_engine(settings)
+    if not _settings_reports_audited_manifests(settings):
+        return None
     if isinstance(model, str) and model and isinstance(operation, str) and operation:
-        artifact = find_model_artifact(model, operation)
+        artifact = find_model_artifact(model, operation, runtime_engine=runtime_engine)
         if artifact is not None:
             return artifact.tokenizer_digest
     override = settings.tokenizer_digest
@@ -243,8 +321,21 @@ def resolved_tokenizer_digest(settings: NodeAgentSettings, model: str | None, op
     return None
 
 
+def resolved_chat_template_digest(settings: NodeAgentSettings, model: str | None, operation: str | None) -> str | None:
+    runtime_engine = _settings_runtime_engine(settings)
+    if not _settings_reports_audited_manifests(settings):
+        return None
+    if not isinstance(operation, str) or operation != "responses":
+        return None
+    if isinstance(model, str) and model:
+        artifact = find_model_artifact(model, operation, runtime_engine=runtime_engine)
+        if artifact is not None:
+            return _chat_template_digest(artifact.tokenizer_manifest, operation)
+    return None
+
+
 def resolved_default_runtime_metadata(settings: NodeAgentSettings) -> tuple[str | None, str | None]:
     return (
-        resolved_model_manifest_digest(settings, settings.vllm_model, "responses"),
-        resolved_tokenizer_digest(settings, settings.vllm_model, "responses"),
+        resolved_model_manifest_digest(settings, _settings_current_model(settings), "responses"),
+        resolved_tokenizer_digest(settings, _settings_current_model(settings), "responses"),
     )

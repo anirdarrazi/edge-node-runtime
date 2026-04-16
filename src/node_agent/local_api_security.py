@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 ADMIN_TOKEN_HEADER = "x-local-admin-token"
 LOCAL_SESSION_COOKIE = "autonomousc_local_session"
 LOCAL_SESSION_TTL_SECONDS = 15 * 60
+ALLOW_CONTAINER_BIND_ENV = "AUTONOMOUSC_ALLOW_CONTAINER_BIND"
 
 
 def generate_admin_token() -> str:
@@ -43,6 +44,14 @@ def browser_access_host(host: str) -> str:
 
 
 def require_secure_bind_host(host: str, allow_remote: bool | None = None) -> None:
+    normalized = host.strip().lower()
+    if normalized in {"0.0.0.0", "::", "[::]"} and os.getenv(ALLOW_CONTAINER_BIND_ENV, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return
     if not is_loopback_host(host):
         raise ValueError(
             "Refusing to bind the local control service to a non-loopback host. "

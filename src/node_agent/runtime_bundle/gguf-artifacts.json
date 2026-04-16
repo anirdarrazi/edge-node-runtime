@@ -1,0 +1,50 @@
+{
+  "version": "2026.04.10.1",
+  "generated_at": "2026-04-14T00:00:00Z",
+  "artifacts": [
+    {
+      "artifact_kind": "gguf_model_file",
+      "artifact_manifest_type": "gguf_hf_file",
+      "model": "meta-llama/Llama-3.1-8B-Instruct",
+      "operation": "responses",
+      "source": "huggingface",
+      "repository": "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
+      "filename": "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
+      "revision": "bf5b95e96dac0462e2a09145ec66cae9a3f12067",
+      "runtime_engine": "llama_cpp",
+      "model_format": "gguf",
+      "quality_class": "quantized_economy",
+      "exactness_class": "quantized_best_effort",
+      "quantization_type": "Q4_K_M",
+      "file_digest": "sha256:7b064f5842bf9532c91456deda288a1b672397a54fa729aa665952863033557c",
+      "expected_context_tokens": 32768,
+      "capabilities": {
+        "chat": true,
+        "embeddings": false
+      },
+      "tokenizer_compatibility_notes": "Llama 3.1 tokenizer metadata is embedded in the GGUF. Quantized Q4_K_M output is not byte-equivalent to the audited safetensors runtime."
+    },
+    {
+      "artifact_kind": "gguf_model_file",
+      "artifact_manifest_type": "gguf_hf_file",
+      "model": "BAAI/bge-large-en-v1.5",
+      "operation": "embeddings",
+      "source": "huggingface",
+      "repository": "CompendiumLabs/bge-large-en-v1.5-gguf",
+      "filename": "bge-large-en-v1.5-q8_0.gguf",
+      "revision": "03b9bf107964236f1de7c217f866d1bf27ea677d",
+      "runtime_engine": "llama_cpp",
+      "model_format": "gguf",
+      "quality_class": "quantized_high_fidelity",
+      "exactness_class": "quantized_best_effort",
+      "quantization_type": "Q8_0",
+      "file_digest": "sha256:3475a261c0c52536503b8266ea94c6c76a3b282f0ce5d0b12452288ee7eff48a",
+      "expected_context_tokens": 512,
+      "capabilities": {
+        "chat": false,
+        "embeddings": true
+      },
+      "tokenizer_compatibility_notes": "BGE tokenizer metadata is embedded in the GGUF. Use llama.cpp embeddings with CLS pooling; Q8_0 embeddings are quantized and not identical to audited safetensors output."
+    }
+  ]
+}

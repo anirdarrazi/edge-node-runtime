@@ -15,14 +15,56 @@ services:
       - ./data/credentials:/var/lib/autonomousc/credentials
 
   vllm:
-    image: ${VLLM_IMAGE:-vllm/vllm-openai@sha256:d9a5c1c1614c959fde8d2a4d68449db184572528a6055afdd0caf1e66fb51504}
+    image: ${RUNTIME_IMAGE:-${VLLM_IMAGE:-vllm/vllm-openai@sha256:d9a5c1c1614c959fde8d2a4d68449db184572528a6055afdd0caf1e66fb51504}}
+    gpus: all
+    networks:
+      default:
+        aliases:
+          - inference-runtime
+    entrypoint: ["/bin/sh", "-lc"]
     command:
-      - --model
-      - ${VLLM_MODEL:-meta-llama/Llama-3.1-8B-Instruct}
-      - --host
-      - 0.0.0.0
-      - --port
-      - "8000"
+      - |
+        profile="$${RUNTIME_PROFILE:-auto}";
+        engine="$${INFERENCE_ENGINE:-auto}";
+        if [ "$$engine" = "auto" ] || [ -z "$$engine" ]; then
+          case "$$profile" in
+            home_llama_cpp_gguf|home_embeddings_llama_cpp) engine="llama_cpp" ;;
+            *) engine="vllm" ;;
+          esac;
+        fi;
+        if [ "$$engine" = "llama_cpp" ]; then
+          default_hf_repo="bartowski/Meta-Llama-3.1-8B-Instruct-GGUF";
+          default_hf_file="Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf";
+          default_alias="meta-llama/Llama-3.1-8B-Instruct";
+          default_embedding="false";
+          default_pooling="";
+          if [ "$$profile" = "home_embeddings_llama_cpp" ]; then
+            default_hf_repo="CompendiumLabs/bge-large-en-v1.5-gguf";
+            default_hf_file="bge-large-en-v1.5-q8_0.gguf";
+            default_alias="BAAI/bge-large-en-v1.5";
+            default_embedding="true";
+            default_pooling="cls";
+          fi;
+          set -- llama-server \
+            --hf-repo "$${LLAMA_CPP_HF_REPO:-$$default_hf_repo}" \
+            --hf-file "$${LLAMA_CPP_HF_FILE:-$$default_hf_file}" \
+            --alias "$${LLAMA_CPP_ALIAS:-$$default_alias}" \
+            --host 0.0.0.0 \
+            --port 8000 \
+            -c "$${MAX_CONTEXT_TOKENS:-32768}" \
+            -ngl 999;
+          if [ "$${LLAMA_CPP_EMBEDDING:-$$default_embedding}" = "true" ]; then
+            set -- "$$@" --embedding;
+          fi;
+          if [ -n "$${LLAMA_CPP_POOLING:-$$default_pooling}" ]; then
+            set -- "$$@" --pooling "$${LLAMA_CPP_POOLING:-$$default_pooling}";
+          fi;
+          exec "$$@";
+        fi;
+        exec python -m vllm.entrypoints.openai.api_server \
+          --model "$${VLLM_MODEL:-meta-llama/Llama-3.1-8B-Instruct}" \
+          --host 0.0.0.0 \
+          --port 8000
     ports:
       - "8000:8000"
     restart: unless-stopped

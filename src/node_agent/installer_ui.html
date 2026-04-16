@@ -133,6 +133,38 @@
         margin-bottom: 6px;
       }
 
+      .claim-layout {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 16px;
+        align-items: start;
+      }
+
+      .claim-support {
+        display: grid;
+        gap: 8px;
+      }
+
+      .claim-qr-shell {
+        display: grid;
+        gap: 10px;
+        justify-items: center;
+        min-width: 178px;
+        padding: 14px;
+        border: 1px dashed var(--line);
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.6);
+      }
+
+      .claim-qr-shell img {
+        display: block;
+        width: 156px;
+        height: 156px;
+        padding: 10px;
+        border-radius: 16px;
+        background: #ffffff;
+      }
+
       .pill {
         display: inline-flex;
         align-items: center;
@@ -153,6 +185,15 @@
         gap: 8px;
         font-size: 0.95rem;
         font-weight: 600;
+      }
+
+      .owner-decision {
+        font-size: 1.05rem;
+      }
+
+      .owner-decision input {
+        font-size: 1.05rem;
+        padding: 16px 16px;
       }
 
       input,
@@ -309,7 +350,8 @@
       }
 
       .error-banner[hidden],
-      .claim-card[hidden] {
+      .claim-card[hidden],
+      .claim-qr-shell[hidden] {
         display: none;
       }
 
@@ -332,6 +374,10 @@
           grid-template-columns: 1fr;
         }
 
+        .claim-layout {
+          grid-template-columns: 1fr;
+        }
+
       }
     </style>
   </head>
@@ -340,31 +386,39 @@
       <section class="hero">
         <p class="eyebrow">AUTONOMOUSc Edge Node Installer</p>
         <h1>Plug in, approve this machine, and let the runtime finish the rest.</h1>
-        <p class="lede">Quick Start hides the operator knobs. Give this machine a name, review what we inferred locally, approve the claim in your browser, and keep this window open while the first startup pre-pulls the runtime and fills the local model cache.</p>
+<p class="lede">This app is the normal owner path for checkout builds. Give this machine a name, review what we inferred locally, and keep this window open while first run checks Docker, validates the NVIDIA runtime, verifies Hugging Face access, pulls the runtime image, fills the local model cache, warms the startup model, and finishes the browser approval flow automatically.</p>
         <div class="hero-steps">
           <div class="step-chip">
             <strong>1. Checking Docker</strong>
             <p class="meta">Quick Start makes sure Docker Desktop and local disk space are ready first.</p>
           </div>
           <div class="step-chip">
-            <strong>2. Checking GPU</strong>
-            <p class="meta">The installer reads available GPU capacity and chooses the safest runtime defaults.</p>
+            <strong>2. Checking NVIDIA runtime</strong>
+            <p class="meta">The installer verifies that a supported NVIDIA runtime is available and chooses deterministic presets from local VRAM.</p>
           </div>
           <div class="step-chip">
-            <strong>3. Downloading runtime</strong>
-            <p class="meta">Local settings are saved and the runtime containers are pulled automatically. The first run can take several minutes here.</p>
+            <strong>3. Validating HF access</strong>
+            <p class="meta">If the startup model is gated, Quick Start validates the saved Hugging Face token before any large download begins.</p>
           </div>
           <div class="step-chip">
-            <strong>4. Warming model</strong>
-            <p class="meta">The startup model is cached locally before registration finishes, and Quick Start now shows that progress instead of going quiet.</p>
+            <strong>4. Pulling image</strong>
+            <p class="meta">The runtime image is cached locally first so retries and later restarts are faster.</p>
           </div>
           <div class="step-chip">
-            <strong>5. Claiming node</strong>
-            <p class="meta">The installer opens a browser approval flow and waits for the claim automatically.</p>
+            <strong>5. Downloading model</strong>
+            <p class="meta">Quick Start shows model-cache progress while the first local download fills in the background.</p>
           </div>
           <div class="step-chip">
-            <strong>6. Node live</strong>
-            <p class="meta">The node agent, vector, and vLLM services come online and start accepting work.</p>
+            <strong>6. Warming model</strong>
+            <p class="meta">Once the files are local, the runtime finishes the warm-up and confirms the startup model is actually responding.</p>
+          </div>
+          <div class="step-chip">
+            <strong>7. Claiming node</strong>
+            <p class="meta">The installer opens a browser approval flow, shows the claim code, and keeps polling until approval lands.</p>
+          </div>
+          <div class="step-chip">
+            <strong>8. Node live</strong>
+            <p class="meta">The node agent and supporting services come online and the dashboard switches to a live-ready state.</p>
           </div>
         </div>
       </section>
@@ -374,7 +428,7 @@
           <div class="stack">
             <div>
               <h2>Quick Start</h2>
-              <p class="supporting">This is the owner-friendly path. Advanced settings are still available, but most machines only need a name and a little patience on the first start.</p>
+<p class="supporting">Name this machine, then continue. Quick Start infers the rest, opens approval when needed, and keeps support/dev controls out of the normal owner path.</p>
             </div>
             <div id="error-banner" class="error-banner" hidden></div>
           </div>
@@ -382,75 +436,102 @@
           <form id="installer-form" class="stack">
             <input id="setup_profile" type="hidden" value="balanced">
 
-            <label>
-              Node name
-              <input id="node_label" name="node_label" placeholder="AUTONOMOUSc Edge Node">
+            <label class="owner-decision">
+              Name this machine
+              <input id="node_label" name="node_label" placeholder="AUTONOMOUSc Edge Node" autocomplete="organization">
             </label>
 
-            <div class="callout">
-              <strong id="machine-summary">Checking local hardware...</strong>
-              <p id="profile-summary" class="supporting">Quick Start is building an inferred runtime plan for this machine.</p>
+            <div id="hf-token-shell" class="callout" hidden>
+              <strong id="hf-token-title">Hugging Face access</strong>
+              <p id="hf-token-copy" class="supporting">Quick Start can save the required Hugging Face token locally for this machine.</p>
+              <label>
+                Hugging Face token
+                <input id="hugging_face_hub_token" type="password" placeholder="hf_..." autocomplete="off" spellcheck="false">
+              </label>
+              <p id="hf-token-hint" class="meta">The token stays local to this machine. Leave the field blank later if you want to keep the saved token.</p>
             </div>
-
-            <div id="recommendation-grid" class="status-grid"></div>
 
             <div class="button-row">
-              <button id="start-button" type="submit">Start Quick Start</button>
-              <button id="refresh-button" type="button" class="secondary">Refresh status</button>
+              <button id="start-button" type="submit">Continue</button>
             </div>
 
-            <details>
-              <summary>Advanced settings</summary>
+            <details id="inferred-plan" class="callout">
+              <summary>Show inferred plan</summary>
               <div class="stack" style="margin-top: 14px;">
-                <label>
-                  Thermal profile
-                  <select id="advanced_setup_profile" name="advanced_setup_profile">
-                    <option value="quiet">Quiet</option>
-                    <option value="balanced">Balanced</option>
-                    <option value="performance">Performance</option>
-                  </select>
-                </label>
-
-                <label>
-                  Control plane URL
-                  <input id="edge_control_url" name="edge_control_url" placeholder="https://edge.autonomousc.com">
-                </label>
-
-                <label>
-                  Region
-                  <input id="node_region" name="node_region" placeholder="eu-se-1">
-                </label>
-
-                <label>
-                  Trust tier
-                  <select id="trust_tier" name="trust_tier">
-                    <option value="standard">Standard</option>
-                    <option value="confidential">Confidential</option>
-                    <option value="restricted">Restricted</option>
-                  </select>
-                </label>
-
-                <label class="checkbox">
-                  <input id="restricted_capable" type="checkbox">
-                  Restricted workloads capable
-                </label>
-
-                <label>
-                  vLLM startup model
-                  <input id="vllm_model" name="vllm_model" placeholder="meta-llama/Llama-3.1-8B-Instruct">
-                </label>
-
-                <label>
-                  Supported models
-                  <textarea id="supported_models" name="supported_models" placeholder="model-a,model-b"></textarea>
-                </label>
-
-                <label>
-                  Max concurrent assignments
-                  <input id="max_concurrent_assignments" name="max_concurrent_assignments" type="number" min="1" max="16">
-                </label>
+                <div>
+                  <strong id="machine-summary">Checking local hardware...</strong>
+                  <p id="profile-summary" class="supporting">Quick Start is building an inferred runtime plan for this machine.</p>
+                </div>
+                <div id="recommendation-grid" class="status-grid"></div>
+                <div class="callout">
+                  <strong id="operator-mode-title">Everything else stays automatic</strong>
+                  <p id="operator-mode-copy" class="supporting">Normal setup keeps routing, startup model, concurrency, capacity, and local credentials automatic on this machine. Operator controls stay hidden unless this app is opened in operator/admin mode.</p>
+                </div>
+                <div class="button-row">
+                  <button id="refresh-button" type="button" class="secondary">Refresh status</button>
+                </div>
+              </div>
+              <div id="operator-mode-button-row" class="button-row" hidden>
+                <button id="toggle-operator-mode" type="button" class="secondary">Open operator/admin mode</button>
               </div>
             </details>
+
+            <div id="operator-settings-shell" class="callout" hidden>
+              <strong>Operator/admin settings</strong>
+              <p class="supporting">Use this only for support, self-hosted control plane changes, or manual runtime overrides. Normal owners usually just name the machine and start Quick Start.</p>
+              <details id="operator-settings">
+                <summary>Show advanced controls</summary>
+                <div class="stack" style="margin-top: 14px;">
+                  <label>
+                    Thermal profile
+                    <select id="advanced_setup_profile" name="advanced_setup_profile">
+                      <option value="quiet">Quiet</option>
+                      <option value="balanced">Balanced</option>
+                      <option value="performance">Performance</option>
+                    </select>
+                  </label>
+
+                  <label>
+                    Control plane URL
+                    <input id="edge_control_url" name="edge_control_url" placeholder="https://edge.autonomousc.com">
+                  </label>
+
+                  <label>
+                    Region
+                    <input id="node_region" name="node_region" placeholder="eu-se-1">
+                  </label>
+
+                  <label>
+                    Trust tier
+                    <select id="trust_tier" name="trust_tier">
+                      <option value="standard">Standard</option>
+                      <option value="confidential">Confidential</option>
+                      <option value="restricted">Restricted</option>
+                    </select>
+                  </label>
+
+                  <label class="checkbox">
+                    <input id="restricted_capable" type="checkbox">
+                    Restricted workloads capable
+                  </label>
+
+                  <label>
+                    Local inference runtime startup model
+                    <input id="vllm_model" name="vllm_model" placeholder="meta-llama/Llama-3.1-8B-Instruct">
+                  </label>
+
+                  <label>
+                    Supported models
+                    <textarea id="supported_models" name="supported_models" placeholder="model-a,model-b"></textarea>
+                  </label>
+
+                  <label>
+                    Max concurrent assignments
+                    <input id="max_concurrent_assignments" name="max_concurrent_assignments" type="number" min="1" max="16">
+                  </label>
+                </div>
+              </details>
+            </div>
           </form>
         </article>
 
@@ -514,13 +595,23 @@
 
           <div id="claim-card" class="claim-card" hidden>
             <strong>Approve this node</strong>
-            <p class="supporting">Open the approval page, sign in or create your operator account, then approve this machine. The installer keeps polling and will finish automatically.</p>
-            <p class="meta"><strong>Claim code:</strong> <span id="claim-code"></span></p>
-            <p class="meta"><strong>Expires:</strong> <span id="claim-expiry"></span></p>
-            <div class="button-row" style="margin-top: 12px;">
-              <a id="claim-link" target="_blank" rel="noreferrer">
-                <button type="button">Open approval page</button>
-              </a>
+            <div class="claim-layout">
+              <div class="claim-support">
+                <p id="claim-help" class="supporting">Quick Start opens the sign-in and approval page automatically. If nothing appears, use the button below. The installer keeps polling and will finish automatically.</p>
+                <p class="meta"><strong>Claim code:</strong> <span id="claim-code"></span></p>
+                <p class="meta"><strong>Approval link:</strong> <a id="claim-url" target="_blank" rel="noreferrer noopener"></a></p>
+                <p class="meta"><strong>Expires:</strong> <span id="claim-expiry"></span></p>
+                <p id="claim-refresh" class="meta">This approval link refreshes automatically if sign-in takes a while.</p>
+                <div class="button-row" style="margin-top: 12px;">
+                  <a id="claim-link" target="_blank" rel="noreferrer">
+                    <button type="button">Open sign-in / approval page</button>
+                  </a>
+                </div>
+              </div>
+              <div id="claim-qr-shell" class="claim-qr-shell" hidden>
+                <img id="claim-qr" alt="QR code for the approval link">
+                <p class="meta">Scan to open approval on another device.</p>
+              </div>
             </div>
           </div>
 
@@ -538,10 +629,98 @@
       const refreshButton = document.getElementById("refresh-button");
       const errorBanner = document.getElementById("error-banner");
       const claimCard = document.getElementById("claim-card");
+      const claimHelp = document.getElementById("claim-help");
       const claimLink = document.getElementById("claim-link");
+      const claimUrlText = document.getElementById("claim-url");
+      const claimRefresh = document.getElementById("claim-refresh");
+      const claimQrShell = document.getElementById("claim-qr-shell");
+      const claimQr = document.getElementById("claim-qr");
       const profileInput = document.getElementById("setup_profile");
       const advancedProfileSelect = document.getElementById("advanced_setup_profile");
+      const operatorModeToggle = document.getElementById("toggle-operator-mode");
+      const operatorModeButtonRow = document.getElementById("operator-mode-button-row");
+      const operatorModeTitle = document.getElementById("operator-mode-title");
+      const operatorModeCopy = document.getElementById("operator-mode-copy");
+      const operatorSettingsShell = document.getElementById("operator-settings-shell");
+      const operatorSettings = document.getElementById("operator-settings");
+      const huggingFaceTokenShell = document.getElementById("hf-token-shell");
+      const operatorModeAvailable = new URLSearchParams(window.location.search).get("operator") === "1";
       let formHydrated = false;
+      let operatorModeEnabled = false;
+      let claimWindow = null;
+      let claimWindowPrimed = false;
+      let currentClaimId = "";
+      let credentialsPresent = false;
+
+      function primeClaimWindow() {
+        if (claimWindowPrimed || credentialsPresent) {
+          return;
+        }
+        claimWindowPrimed = true;
+        try {
+          claimWindow = window.open("", "_blank");
+          if (claimWindow && !claimWindow.closed) {
+            claimWindow.document.write("<!doctype html><title>Preparing approval...</title><p>Preparing the AUTONOMOUSc sign-in and approval page...</p>");
+            claimWindow.document.close();
+          }
+        } catch (_error) {
+          claimWindow = null;
+        }
+      }
+
+      function resetPrimedClaimWindow(closeWindow = false) {
+        claimWindowPrimed = false;
+        currentClaimId = "";
+        if (closeWindow && claimWindow && !claimWindow.closed) {
+          try {
+            claimWindow.close();
+          } catch (_error) {
+            // Ignore popup close failures. The manual button stays available.
+          }
+        }
+        claimWindow = null;
+      }
+
+      function presentClaim(claim) {
+        if (!claim?.approval_url) {
+          return false;
+        }
+        const claimId = claim.claim_id || claim.approval_url;
+        if (claimId === currentClaimId) {
+          return Boolean(claimWindow && !claimWindow.closed);
+        }
+        currentClaimId = claimId;
+        let opened = false;
+        if (claimWindow && !claimWindow.closed) {
+          try {
+            claimWindow.location.replace(claim.approval_url);
+            opened = true;
+          } catch (_error) {
+            opened = false;
+          }
+        }
+        if (!opened) {
+          try {
+            const popup = window.open(claim.approval_url, "_blank");
+            if (popup && !popup.closed) {
+              claimWindow = popup;
+              opened = true;
+            }
+          } catch (_error) {
+            opened = false;
+          }
+        }
+        claimWindowPrimed = false;
+        return opened;
+      }
+
+      function claimRefreshCopy(claim) {
+        const refreshCount = Number(claim?.renewal_count || 0);
+        if (refreshCount > 0) {
+          return `This approval link was refreshed automatically ${refreshCount} time${refreshCount === 1 ? "" : "s"}. Older links keep working until they expire.`;
+        }
+        return "This approval link refreshes automatically if sign-in takes a while.";
+      }
 
       function pillTone(ok, warning = false) {
         if (ok) return "success";
@@ -559,12 +738,37 @@
         advancedProfileSelect.value = profile;
       }
 
+      function setOperatorMode(enabled) {
+        operatorModeEnabled = operatorModeAvailable && Boolean(enabled);
+        operatorModeButtonRow.hidden = !operatorModeAvailable;
+        operatorSettingsShell.hidden = !operatorModeEnabled;
+        operatorSettings.open = operatorModeEnabled;
+        operatorModeTitle.textContent = operatorModeEnabled
+          ? "Operator/admin mode is on"
+          : "Everything else stays automatic";
+        operatorModeCopy.textContent = operatorModeEnabled
+          ? "Advanced routing, startup model, capacity, and control-plane settings are visible for this machine."
+          : "Normal setup keeps routing, startup model, concurrency, capacity, and local credentials automatic on this machine. Operator controls stay hidden unless this app is opened in operator/admin mode.";
+        operatorModeToggle.textContent = operatorModeEnabled ? "Hide operator/admin mode" : "Open operator/admin mode";
+        try {
+          window.localStorage.setItem("edge-node-operator-mode", operatorModeEnabled ? "true" : "false");
+        } catch (_error) {
+          // Local storage can be unavailable in restricted browsers. The UI still works without persistence.
+        }
+      }
+
       function formPayload() {
-        return {
+        const payload = {
           setup_mode: "quickstart",
+          node_label: document.getElementById("node_label").value.trim(),
+          hugging_face_hub_token: document.getElementById("hugging_face_hub_token").value.trim(),
+          operator_mode: operatorModeEnabled
+        };
+        if (!operatorModeEnabled) return payload;
+        return {
+          ...payload,
           setup_profile: profileInput.value,
           edge_control_url: document.getElementById("edge_control_url").value.trim(),
-          node_label: document.getElementById("node_label").value.trim(),
           node_region: document.getElementById("node_region").value.trim(),
           trust_tier: document.getElementById("trust_tier").value,
           restricted_capable: document.getElementById("restricted_capable").checked,
@@ -586,6 +790,34 @@
         document.getElementById("max_concurrent_assignments").value = config.max_concurrent_assignments || "";
         selectProfile(config.setup_profile || config.recommended_setup_profile || "balanced");
         formHydrated = true;
+      }
+
+      function renderHuggingFaceAccess(config) {
+        const tokenInput = document.getElementById("hugging_face_hub_token");
+        const repository = config?.hugging_face_repository || "";
+        const tokenRequired = Boolean(config?.hugging_face_token_required);
+        const tokenConfigured = Boolean(config?.hugging_face_token_configured);
+
+        if (!operatorModeEnabled || !tokenRequired) {
+          huggingFaceTokenShell.hidden = true;
+          tokenInput.value = "";
+          return;
+        }
+        huggingFaceTokenShell.hidden = false;
+
+        document.getElementById("hf-token-title").textContent = tokenConfigured
+          ? "Hugging Face access ready"
+          : "Hugging Face token required";
+        document.getElementById("hf-token-copy").textContent = tokenConfigured
+          ? `A Hugging Face token for ${repository} is already saved locally. Paste a new token only if you want to replace it.`
+          : `${repository} is gated on Hugging Face. Add a token here so Quick Start can validate access before the first download starts.`;
+        document.getElementById("hf-token-hint").textContent = tokenConfigured
+          ? "Leave the field blank to keep the saved token for future Quick Start runs."
+          : "The token stays local to this machine and is reused for future Quick Start runs.";
+        tokenInput.placeholder = tokenConfigured ? "Leave blank to keep the saved token" : "hf_...";
+        if (tokenConfigured) {
+          tokenInput.value = "";
+        }
       }
 
       function renderRecommendations(ownerSetup) {
@@ -660,15 +892,19 @@
         const claim = state.claim || null;
         const gpu = preflight.gpu || {};
         const disk = preflight.disk || {};
-        const runningServices = (preflight.running_services || []).join(", ") || "No services detected yet.";
+        const runningServices = (preflight.running_services || [])
+          .map((service) => service === "vllm" ? "local inference runtime" : service)
+          .join(", ") || "No services detected yet.";
+        credentialsPresent = Boolean(preflight.credentials_present);
 
         document.getElementById("next-headline").textContent = ownerSetup.headline || "Ready to set up this machine";
         document.getElementById("next-detail").textContent = ownerSetup.detail || state.message || "Quick Start will guide this machine into service.";
         document.getElementById("logs").textContent = (state.logs || []).join("\n") || "Waiting for installer events...";
         document.getElementById("machine-summary").textContent =
-          ownerSetup.machine_plan_summary || (gpu.detected ? `${gpu.name} detected with ${gpu.memory_gb} GB VRAM` : "GPU detection is optional for Quick Start");
+          ownerSetup.machine_plan_summary || (gpu.detected ? `${gpu.name} detected with ${gpu.memory_gb} GB VRAM` : "Checking for a supported NVIDIA runtime on this machine.");
         document.getElementById("profile-summary").textContent =
           ownerSetup.profile_summary || config.profile_summary || "The installer will auto-tune this machine for the selected profile.";
+        renderHuggingFaceAccess(config);
         renderRecommendations(ownerSetup);
         renderJourney(ownerSetup);
         renderFlowSequence(ownerSetup, state, preflight);
@@ -679,9 +915,9 @@
           preflight.docker_error || (dockerOk ? `Compose is available. Running services: ${runningServices}` : "Install Docker Desktop or start Docker before continuing.");
 
         const gpuOk = Boolean(gpu.detected);
-        setPill(document.getElementById("gpu-pill"), gpuOk ? "Detected" : "Optional", pillTone(gpuOk, true));
+        setPill(document.getElementById("gpu-pill"), gpuOk ? "Detected" : "Needs attention", pillTone(gpuOk, true));
         document.getElementById("gpu-copy").textContent =
-          gpuOk ? `${gpu.name} with ${gpu.memory_gb} GB VRAM.` : "GPU detection is unavailable. Quick Start will still use safe defaults.";
+          gpuOk ? `${gpu.name} with ${gpu.memory_gb} GB VRAM.` : "No supported NVIDIA runtime was detected yet. Quick Start currently needs a supported NVIDIA GPU before setup can continue.";
 
         const diskOk = Boolean(disk.ok);
         setPill(document.getElementById("disk-pill"), diskOk ? "Ready" : "Low space", pillTone(diskOk, true));
@@ -691,7 +927,11 @@
         const claimReady = Boolean(preflight.credentials_present);
         setPill(document.getElementById("claim-pill"), claimReady ? "Approved" : (claim ? claim.status : "Waiting"), pillTone(claimReady, true));
         document.getElementById("claim-copy").textContent =
-          claimReady ? "Credentials are stored locally for this machine." : (claim ? `Claim code ${claim.claim_code}. Waiting for approval.` : "Quick Start will create a browser approval link.");
+          claimReady
+            ? "Credentials are stored locally for this machine."
+            : (claim
+              ? `Claim code ${claim.claim_code}. ${claimRefreshCopy(claim)}`
+              : "Quick Start will open the browser approval page automatically and show a QR code here.");
 
         setPill(document.getElementById("autostart-pill"), autostart.label || "Unavailable", pillTone(Boolean(autostart.enabled), Boolean(autostart.supported)));
         document.getElementById("autostart-copy").textContent =
@@ -704,10 +944,33 @@
         if (claim && claim.approval_url) {
           claimCard.hidden = false;
           claimLink.href = claim.approval_url;
+          claimUrlText.href = claim.approval_url;
+          claimUrlText.textContent = claim.approval_url;
           document.getElementById("claim-code").textContent = claim.claim_code || "";
           document.getElementById("claim-expiry").textContent = claim.expires_at || "";
+          claimRefresh.textContent = claimRefreshCopy(claim);
+          if (claim.approval_qr_svg_data_url) {
+            claimQrShell.hidden = false;
+            claimQr.src = claim.approval_qr_svg_data_url;
+          } else {
+            claimQrShell.hidden = true;
+            claimQr.removeAttribute("src");
+          }
+          const opened = presentClaim(claim);
+          claimHelp.textContent = opened
+            ? "Quick Start opened the sign-in and approval page in a new tab. If it did not appear, use the button below or scan the QR code. The installer keeps polling and refreshes this approval link automatically if needed."
+            : "Quick Start is waiting for approval. If the sign-in page did not open automatically, use the button below or scan the QR code. The installer keeps polling and refreshes this approval link automatically if needed.";
         } else {
           claimCard.hidden = true;
+          claimUrlText.removeAttribute("href");
+          claimUrlText.textContent = "";
+          claimRefresh.textContent = "This approval link refreshes automatically if sign-in takes a while.";
+          claimQrShell.hidden = true;
+          claimQr.removeAttribute("src");
+          claimHelp.textContent = "Quick Start opens the sign-in and approval page automatically. If nothing appears, use the button below. The installer keeps polling and will finish automatically.";
+          if (claimReady || !state.busy) {
+            resetPrimedClaimWindow(false);
+          }
         }
 
         if (state.error) {
@@ -723,9 +986,9 @@
         }
         const runtimeLive = Boolean((preflight.running_services || []).includes("node-agent"));
         startButton.disabled = Boolean(state.busy) || runtimeLive;
-        startButton.textContent =
-          ownerSetup.primary_action_label ||
-          (state.error ? "Retry Quick Start" : (state.busy ? "Quick Start is running..." : "Start Quick Start"));
+        startButton.textContent = state.error
+          ? "Retry Quick Start"
+          : (state.busy ? "Quick Start is running..." : (runtimeLive ? "Node live" : "Continue"));
       }
 
       async function refreshStatus() {
@@ -752,13 +1015,21 @@
       advancedProfileSelect.addEventListener("change", () => {
         selectProfile(advancedProfileSelect.value || "balanced");
       });
+      operatorModeToggle.addEventListener("click", () => {
+        if (!operatorModeAvailable) {
+          return;
+        }
+        setOperatorMode(!operatorModeEnabled);
+      });
 
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
         errorBanner.hidden = true;
+        primeClaimWindow();
         try {
           await submitInstall();
         } catch (error) {
+          resetPrimedClaimWindow(true);
           errorBanner.hidden = false;
           errorBanner.textContent = error instanceof Error ? error.message : "The installer request could not be completed.";
         }
@@ -767,6 +1038,12 @@
       refreshButton.addEventListener("click", () => {
         void refreshStatus();
       });
+
+      try {
+        setOperatorMode(operatorModeAvailable && window.localStorage.getItem("edge-node-operator-mode") === "true");
+      } catch (_error) {
+        setOperatorMode(false);
+      }
 
       void refreshStatus();
       window.setInterval(() => {

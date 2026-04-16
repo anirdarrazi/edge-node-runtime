@@ -23,6 +23,7 @@ from urllib.parse import quote, unquote, urlparse
 import httpx
 
 from .autostart import AutoStartManager
+from .config import NodeAgentSettings
 from .control_plane import EdgeControlClient
 from .desktop_launcher import DesktopLauncherManager
 from .installer import (
@@ -31,10 +32,18 @@ from .installer import (
     artifact_total_size_bytes,
     directory_size_bytes,
     format_bytes,
+    llama_cpp_env_for_model,
+    nvidia_support_preset,
     parse_env_file,
+    profile_concurrency,
+    profile_thermal_headroom,
+    recommended_setup_profile,
+    recommended_supported_models,
+    resolve_accessible_startup_selection,
     run_command,
     startup_model_artifact,
 )
+from .inference_engine import AUTO_RUNTIME_PROFILE, resolve_runtime_profile
 from .local_api_security import (
     ADMIN_TOKEN_HEADER,
     LOCAL_SESSION_COOKIE,
@@ -57,14 +66,26 @@ from .release_manifest import (
     ReleaseManifestError,
     load_release_manifest,
 )
+from .runtime_backend import (
+    SINGLE_CONTAINER_RUNTIME_BACKEND,
+    detect_runtime_backend,
+    runtime_backend_label,
+    runtime_backend_required_services,
+    runtime_backend_supports_compose,
+)
 from .runtime_layout import ensure_runtime_bundle, resolve_runtime_dir, service_access_host
+from .single_container import EmbeddedRuntimeSupervisor
 
 RUNTIME_SERVICES = ("vllm", "node-agent", "vector")
 SELF_HEAL_INTERVAL_SECONDS = 45
 REMOTE_DASHBOARD_CACHE_TTL_SECONDS = 30
 MODEL_CACHE_COLD_SECONDS = 7 * 24 * 60 * 60
+VLLM_WARM_RETRY_ATTEMPTS = 2
 
 SENSITIVE_ENV_MARKERS = ("TOKEN", "SECRET", "KEY", "PASSWORD", "COOKIE", "CERT")
+DOCKER_DESKTOP_INSTALL_URL = "https://www.docker.com/products/docker-desktop/"
+DOCKER_GPU_SUPPORT_URL = "https://docs.docker.com/desktop/features/gpu/"
+NVIDIA_DRIVER_DOWNLOAD_URL = "https://www.nvidia.com/Download/index.aspx"
 
 
 def now_iso() -> str:
@@ -134,6 +155,13 @@ def coerce_nonnegative_int(value: Any) -> int:
         return max(0, int(float(str(value).strip())))
     except (TypeError, ValueError):
         return 0
+
+
+def coerce_float(value: Any) -> float | None:
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
 
 
 def service_html() -> str:
@@ -234,6 +262,8 @@ class NodeRuntimeService:
         self.state_path = self.service_dir / "service-state.json"
         self.release_env_path = self.service_dir / "release.env"
         self.command_runner = command_runner
+        self.runtime_backend = detect_runtime_backend()
+        self.required_runtime_services = runtime_backend_required_services(self.runtime_backend)
         self.autostart_manager = autostart_manager or AutoStartManager(
             self.runtime_dir,
             command_runner=command_runner,
@@ -242,11 +272,24 @@ class NodeRuntimeService:
             self.runtime_dir,
             command_runner=command_runner,
         )
+        self.runtime_controller = (
+            EmbeddedRuntimeSupervisor(
+                self.runtime_env_values,
+                cache_dir=self.data_dir / "model-cache",
+                credentials_dir=self.data_dir / "credentials",
+                scratch_dir=self.scratch_dir,
+                log=self.log,
+            )
+            if self.runtime_backend == SINGLE_CONTAINER_RUNTIME_BACKEND
+            else None
+        )
         self.guided_installer = GuidedInstaller(
             runtime_dir=self.runtime_dir,
             command_runner=command_runner,
             autostart_manager=self.autostart_manager,
             desktop_launcher_manager=self.desktop_launcher_manager,
+            runtime_status_provider=self.runtime_backend_status,
+            runtime_controller=self.runtime_controller,
         )
         self.lock = threading.Lock()
         self.shutdown_event = threading.Event()
@@ -265,6 +308,19 @@ class NodeRuntimeService:
         self.port = 8765
         self.ensure_dirs()
         self.load_state()
+
+    def resume_setup_if_needed(self) -> None:
+        with self.guided_installer.lock:
+            should_resume = (
+                self.guided_installer.state.resume_requested
+                and bool(self.guided_installer.state.resume_config)
+                and not self.guided_installer.state.busy
+                and self.guided_installer.state.stage not in {"idle", "running", "error"}
+            )
+        if not should_resume:
+            return
+        self.log("Resuming interrupted Quick Start setup from the saved local checkpoint.")
+        self.guided_installer.resume_if_needed()
 
     def ensure_dirs(self) -> None:
         for path in (self.data_dir, self.service_dir, self.diagnostics_dir, self.scratch_dir):
@@ -308,13 +364,23 @@ class NodeRuntimeService:
         if changed:
             self.save_state()
 
+    def runtime_env_values(self) -> dict[str, str]:
+        return self.guided_installer.effective_runtime_env()
+
+    def runtime_backend_status(self) -> dict[str, Any]:
+        if self.runtime_controller is None:
+            return {}
+        return self.runtime_controller.snapshot()
+
     def compose_command(self, args: list[str]) -> list[str]:
+        if not runtime_backend_supports_compose(self.runtime_backend):
+            raise RuntimeError("Docker Compose is unavailable in the unified in-container runtime mode.")
         self.guided_installer.sync_runtime_env()
         command = ["docker", "compose"]
-        if self.guided_installer.runtime_env_path.exists():
-            command.extend(["--env-file", str(self.guided_installer.runtime_env_path)])
         if self.release_env_path.exists():
             command.extend(["--env-file", str(self.release_env_path)])
+        if self.guided_installer.runtime_env_path.exists():
+            command.extend(["--env-file", str(self.guided_installer.runtime_env_path)])
         command.extend(args)
         return command
 
@@ -413,8 +479,15 @@ class NodeRuntimeService:
         return True
 
     def wait_for_runtime_health(self, timeout_seconds: float = 90.0) -> None:
+        if self.runtime_controller is not None:
+            self.runtime_controller.wait_for_runtime_health(timeout_seconds)
+            return
+        env_values = self.runtime_env_values()
+        runtime_label = self.guided_installer.inference_runtime_label(env_values)
+        readiness_path = self.guided_installer.inference_readiness_path(env_values)
+        readiness_url = f"http://{service_access_host()}:8000{readiness_path}"
         deadline = time.time() + timeout_seconds
-        required_services = set(RUNTIME_SERVICES)
+        required_services = set(self.required_runtime_services)
         last_failure = "Runtime services are still starting."
         while time.time() < deadline:
             try:
@@ -425,10 +498,10 @@ class NodeRuntimeService:
                     last_failure = f"Runtime services are not healthy yet. Missing: {missing or 'unknown'}."
                     time.sleep(2)
                     continue
-                response = httpx.get(f"http://{service_access_host()}:8000/v1/models", timeout=4.0)
+                response = httpx.get(readiness_url, timeout=4.0)
                 if response.status_code < 500:
                     return
-                last_failure = f"vLLM health check returned HTTP {response.status_code}."
+                last_failure = f"{runtime_label} health check returned HTTP {response.status_code}."
             except (RuntimeError, httpx.HTTPError) as error:
                 last_failure = str(error) or "Runtime health check failed."
             time.sleep(2)
@@ -444,14 +517,32 @@ class NodeRuntimeService:
         env_values = self.guided_installer.effective_runtime_env()
         config_present = self.guided_installer.config_present()
         running_services = preflight.get("running_services", [])
-        vllm_ready = False
+        inference_service_running = "vllm" in running_services or "inference-runtime" in running_services
+        runtime_profile = self.guided_installer.resolved_runtime_profile(env_values)
+        inference_engine = self.guided_installer.resolved_inference_engine(env_values)
+        inference_engine_label = self.guided_installer.inference_runtime_label(env_values)
+        deployment_target = self.guided_installer.resolved_deployment_target(env_values)
+        readiness_path = self.guided_installer.inference_readiness_path(env_values)
+        readiness_url = f"http://{service_access_host()}:8000{readiness_path}"
+        inference_ready = False
         current_model = str(env_values.get("VLLM_MODEL") or "").strip() or None
-        if "vllm" in running_services:
+        if inference_service_running:
             try:
-                response = httpx.get(f"http://{service_access_host()}:8000/v1/models", timeout=4.0)
-                vllm_ready = response.status_code < 500
+                response = httpx.get(readiness_url, timeout=4.0)
+                inference_ready = response.status_code < 500
                 if response.status_code < 500:
-                    payload = response.json()
+                    model_response = response
+                    if readiness_path != "/v1/models":
+                        try:
+                            candidate = httpx.get(f"http://{service_access_host()}:8000/v1/models", timeout=4.0)
+                            if candidate.status_code < 500:
+                                model_response = candidate
+                        except httpx.HTTPError:
+                            pass
+                    try:
+                        payload = model_response.json()
+                    except ValueError:
+                        payload = None
                     if isinstance(payload, dict):
                         data = payload.get("data")
                         if isinstance(data, list):
@@ -459,8 +550,8 @@ class NodeRuntimeService:
                                 if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"].strip():
                                     current_model = item["id"].strip()
                                     break
-            except (ValueError, httpx.HTTPError):
-                vllm_ready = False
+            except httpx.HTTPError:
+                inference_ready = False
 
         installer_state = installer_state or self.guided_installer.state_payload()
         if installer_state.get("busy"):
@@ -484,10 +575,43 @@ class NodeRuntimeService:
             "message": message,
             "preflight": preflight,
             "running_services": running_services,
-            "vllm_ready": vllm_ready,
+            "inference_runtime_ready": inference_ready,
+            "vllm_ready": inference_ready,
+            "inference_ready": inference_ready,
+            "inference_engine": inference_engine,
+            "inference_engine_label": inference_engine_label,
+            "deployment_target": deployment_target,
+            "runtime_profile": runtime_profile.id,
+            "runtime_profile_label": runtime_profile.label,
+            "model_format": runtime_profile.model_format,
+            "runtime_image": env_values.get("RUNTIME_IMAGE") or env_values.get("VLLM_IMAGE") or runtime_profile.image,
+            "inference_base_url": env_values.get("INFERENCE_BASE_URL")
+            or env_values.get("VLLM_BASE_URL")
+            or f"http://{service_access_host()}:8000",
+            "readiness_path": runtime_profile.readiness_path,
+            "supported_apis": list(runtime_profile.supported_apis),
+            "trust_policy": runtime_profile.trust_policy,
+            "pricing_tier": runtime_profile.pricing_tier,
+            "artifact_manifest_type": runtime_profile.artifact_manifest_type,
+            "capacity_class": runtime_profile.capacity_class,
+            "routing_lane": runtime_profile.routing_lane,
+            "routing_lane_label": runtime_profile.routing_lane_label,
+            "routing_lane_detail": runtime_profile.routing_lane_detail,
+            "routing_lane_policy_summary": runtime_profile.routing_lane_policy_summary,
+            "routing_lane_allowed_privacy_tiers": list(runtime_profile.routing_lane_allowed_privacy_tiers),
+            "routing_lane_allowed_result_guarantees": list(runtime_profile.routing_lane_allowed_result_guarantees),
+            "routing_lane_allowed_trust_requirements": list(runtime_profile.routing_lane_allowed_trust_requirements),
+            "max_privacy_tier": runtime_profile.max_privacy_tier,
+            "exact_model_guarantee": runtime_profile.exact_model_guarantee,
+            "quantized_output_disclosure_required": runtime_profile.quantized_output_disclosure_required,
+            "trusted_eligibility": runtime_profile.trusted_eligibility,
+            "burst_lifecycle": list(runtime_profile.burst_lifecycle),
+            "burst_cost_ceiling_usd": runtime_profile.burst_cost_ceiling_usd,
             "current_model": current_model,
             "config_present": config_present,
             "credentials_present": preflight.get("credentials_present", False),
+            "runtime_backend": preflight.get("runtime_backend", self.runtime_backend),
+            "runtime_backend_label": preflight.get("runtime_backend_label", runtime_backend_label(self.runtime_backend)),
         }
 
     def startup_health_payload(
@@ -498,14 +622,27 @@ class NodeRuntimeService:
         config_present: bool,
         credentials_present: bool,
     ) -> dict[str, Any] | None:
-        platform_name = str(getattr(self.autostart_manager, "platform_name", os.name))
-        if platform_name != "nt" or not (credentials_present or config_present):
+        platform_name = str(
+            getattr(
+                self.autostart_manager,
+                "system_name",
+                getattr(self.autostart_manager, "platform_name", os.name),
+            )
+        )
+        if not (credentials_present or config_present):
             return None
 
         autostart_supported = bool(autostart.get("supported"))
         autostart_enabled = bool(autostart.get("enabled"))
         launcher_supported = bool(desktop_launcher.get("supported"))
         launcher_enabled = bool(desktop_launcher.get("enabled"))
+        startup_label = {
+            "nt": "Windows sign-in launch",
+            "win32": "Windows sign-in launch",
+            "darwin": "macOS login launch",
+            "linux": "Linux user service",
+            "posix": "Launch-on-sign-in",
+        }.get(platform_name, "Launch-on-sign-in")
 
         if autostart_supported and autostart_enabled:
             return None
@@ -513,7 +650,7 @@ class NodeRuntimeService:
         if not autostart_supported:
             detail = str(
                 autostart.get("detail")
-                or "Windows sign-in launch is unavailable on this machine right now."
+                or f"{startup_label} is unavailable on this machine right now."
             )
             return {
                 "issue_code": "startup_unavailable",
@@ -524,7 +661,7 @@ class NodeRuntimeService:
             }
 
         detail = (
-            "Windows sign-in launch is disabled or missing for this node. "
+            f"{startup_label} is disabled or missing for this node. "
             "Self-healing can reinstall it automatically so the node comes back after you sign in."
         )
         if launcher_supported and not launcher_enabled:
@@ -537,6 +674,260 @@ class NodeRuntimeService:
             "issue_action_label": "Fix startup",
         }
 
+    def prerequisite_action_payload(self, issue_code: str | None, issue_detail: str | None) -> dict[str, Any] | None:
+        if not issue_code:
+            return None
+        detail = issue_detail or "This machine has a prerequisite that needs attention before setup can continue."
+        if issue_code == "docker_not_running":
+            return {
+                "code": "start_docker_desktop",
+                "label": "Start Docker",
+                "detail": "Open Docker Desktop and re-check the engine before continuing setup.",
+                "automatic": False,
+            }
+        if issue_code == "docker_unavailable":
+            return {
+                "code": "open_docker_install",
+                "label": "Install Docker",
+                "detail": "Open the Docker Desktop installer page, then return here after Docker is installed and running.",
+                "automatic": False,
+            }
+        if issue_code == "nvidia_runtime_missing":
+            return {
+                "code": "open_gpu_runtime_help",
+                "label": "Fix GPU runtime",
+                "detail": "Open Docker Desktop GPU support guidance so NVIDIA containers can see the local GPU.",
+                "automatic": False,
+            }
+        if issue_code == "gpu_missing":
+            return {
+                "code": "open_nvidia_driver_help",
+                "label": "Install GPU driver",
+                "detail": "Open NVIDIA driver setup, then re-run the local check after the GPU is visible.",
+                "automatic": False,
+            }
+        if issue_code == "disk_low":
+            return {
+                "code": "free_disk_space",
+                "label": "Free space",
+                "detail": "Prune unused Docker data and cold model cache, then re-check available disk space.",
+                "automatic": False,
+            }
+        if issue_code == "startup_not_configured":
+            return {
+                "code": "repair_startup",
+                "label": "Fix startup",
+                "detail": "Repair launch-on-sign-in and the desktop launcher so the node comes back after sign-in.",
+                "automatic": True,
+            }
+        if issue_code == "startup_unavailable":
+            return {
+                "code": "open_startup_help",
+                "label": "Check startup",
+                "detail": detail,
+                "automatic": False,
+            }
+        return None
+
+    def docker_desktop_launcher(self) -> Path | None:
+        candidates: list[Path] = []
+        if os.name == "nt":
+            for env_key in ("ProgramFiles", "ProgramFiles(x86)", "LocalAppData"):
+                root = os.environ.get(env_key)
+                if root:
+                    candidates.append(Path(root) / "Docker" / "Docker" / "Docker Desktop.exe")
+            candidates.append(Path.home() / "AppData" / "Local" / "Docker" / "Docker" / "Docker Desktop.exe")
+        elif sys.platform == "darwin":
+            candidates.append(Path("/Applications/Docker.app/Contents/MacOS/Docker"))
+
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return None
+
+    def open_support_url(self, url: str, fallback_message: str) -> bool:
+        try:
+            return bool(webbrowser.open(url))
+        except Exception as error:
+            self.log(f"{fallback_message}: {error}")
+            return False
+
+    def start_docker_desktop(self) -> dict[str, Any]:
+        launcher = self.docker_desktop_launcher()
+        if launcher is not None:
+            subprocess.Popen([str(launcher)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return {
+                "handled": True,
+                "resolved": False,
+                "action": "start_docker_desktop",
+                "message": "Docker Desktop is opening. Keep this app open while Docker finishes starting, then Quick Start will re-check it automatically.",
+            }
+
+        opened = self.open_support_url(DOCKER_DESKTOP_INSTALL_URL, "Docker Desktop install page could not be opened")
+        return {
+            "handled": True,
+            "resolved": False,
+            "action": "open_docker_install",
+            "message": (
+                "Docker Desktop was not found locally, so the install page was opened."
+                if opened
+                else "Docker Desktop was not found locally. Install Docker Desktop, start it, then return here."
+            ),
+        }
+
+    def free_prerequisite_disk_space(self, health: dict[str, Any]) -> dict[str, Any]:
+        messages: list[str] = []
+        installer_snapshot = (
+            health.get("installer_snapshot")
+            if isinstance(health.get("installer_snapshot"), dict)
+            else self.guided_installer.status_payload()
+        )
+        cache_changed, cache_result, _cache_action = self.manage_model_cache(
+            health=health,
+            installer_snapshot=installer_snapshot,
+        )
+        if cache_changed:
+            messages.append(cache_result)
+
+        preflight = health.get("preflight") if isinstance(health.get("preflight"), dict) else {}
+        docker_ready = bool(
+            preflight.get("docker_cli")
+            and preflight.get("docker_compose")
+            and preflight.get("docker_daemon")
+        )
+        if docker_ready and runtime_backend_supports_compose(str(health.get("runtime_backend") or self.runtime_backend)):
+            try:
+                completed = self.command_runner(["docker", "system", "prune", "-f"], self.runtime_dir)
+                prune_detail = completed.stdout.strip() or "Docker pruned unused containers, networks, images, and build cache."
+                messages.append(prune_detail)
+            except Exception as error:
+                messages.append(f"Docker prune could not finish automatically: {error}")
+
+        if not messages:
+            messages.append(
+                "No safe unused Docker data or cold model cache was available to prune automatically. Free space manually, then re-check setup."
+            )
+
+        return {
+            "handled": True,
+            "resolved": False,
+            "action": "free_disk_space",
+            "message": " ".join(messages),
+        }
+
+    def repair_prerequisite_blocker(self, health: dict[str, Any]) -> dict[str, Any] | None:
+        action = health.get("prerequisite_action") if isinstance(health.get("prerequisite_action"), dict) else None
+        if not action:
+            return None
+        code = str(action.get("code") or "")
+        if code == "start_docker_desktop":
+            return self.start_docker_desktop()
+        if code == "open_docker_install":
+            opened = self.open_support_url(DOCKER_DESKTOP_INSTALL_URL, "Docker Desktop install page could not be opened")
+            return {
+                "handled": True,
+                "resolved": False,
+                "action": code,
+                "message": (
+                    "Opened the Docker Desktop install page. Install Docker, start it, then return here."
+                    if opened
+                    else "Install Docker Desktop, start it, then return here."
+                ),
+            }
+        if code == "open_gpu_runtime_help":
+            opened = self.open_support_url(DOCKER_GPU_SUPPORT_URL, "Docker GPU support guidance could not be opened")
+            return {
+                "handled": True,
+                "resolved": False,
+                "action": code,
+                "message": (
+                    "Opened Docker Desktop GPU support guidance. Enable NVIDIA GPU support, restart Docker, then re-check setup."
+                    if opened
+                    else "Enable NVIDIA GPU support in Docker Desktop, restart Docker, then re-check setup."
+                ),
+            }
+        if code == "open_nvidia_driver_help":
+            opened = self.open_support_url(NVIDIA_DRIVER_DOWNLOAD_URL, "NVIDIA driver page could not be opened")
+            return {
+                "handled": True,
+                "resolved": False,
+                "action": code,
+                "message": (
+                    "Opened the NVIDIA driver page. Install or update the driver, reboot if prompted, then re-check setup."
+                    if opened
+                    else "Install or update the NVIDIA driver, reboot if prompted, then re-check setup."
+                ),
+            }
+        if code == "free_disk_space":
+            return self.free_prerequisite_disk_space(health)
+        if code == "repair_startup":
+            autostart = self.autostart_manager.ensure_enabled()
+            launcher = self.desktop_launcher_manager.ensure_enabled()
+            return {
+                "handled": True,
+                "resolved": bool(autostart.get("enabled")) or bool(launcher.get("enabled")),
+                "action": code,
+                "message": str(
+                    autostart.get("detail")
+                    or launcher.get("detail")
+                    or "Launch-on-sign-in and the desktop launcher were re-checked."
+                ),
+            }
+        if code == "open_startup_help":
+            return {
+                "handled": True,
+                "resolved": False,
+                "action": code,
+                "message": str(action.get("detail") or "Automatic startup needs manual attention on this machine."),
+            }
+        return None
+
+    def nvidia_recovery_plan(
+        self,
+        *,
+        config: dict[str, Any],
+        gpu: dict[str, Any],
+        runtime: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        memory_gb = coerce_float(gpu.get("memory_gb"))
+        if memory_gb is None:
+            memory_gb = coerce_float(config.get("gpu_memory_gb"))
+        preset = nvidia_support_preset(memory_gb)
+        if preset is None:
+            return None
+
+        current_model = str(
+            runtime.get("current_model")
+            or config.get("vllm_model")
+            or ""
+        ).strip()
+        if not current_model or current_model in set(preset.supported_models):
+            return None
+
+        desired_profile = recommended_setup_profile(memory_gb)
+        desired_concurrency = profile_concurrency(desired_profile, memory_gb)
+        desired_supported_models = recommended_supported_models(memory_gb)
+        desired_thermal_headroom = str(
+            profile_thermal_headroom(desired_profile, NodeAgentSettings().thermal_headroom)
+        )
+
+        gpu_name = str(gpu.get("name") or config.get("gpu_name") or "this NVIDIA GPU").strip()
+        return {
+            "issue_code": "startup_model_too_large",
+            "issue_detail": (
+                f"{current_model} is outside the supported {preset.label} preset for {gpu_name}. "
+                f"Self-healing can switch this machine to {preset.startup_model}, reset the model list, "
+                "and retry the NVIDIA warm-up automatically."
+            ),
+            "target_model": preset.startup_model,
+            "target_supported_models": desired_supported_models,
+            "target_profile": desired_profile,
+            "target_concurrency": desired_concurrency,
+            "target_thermal_headroom": desired_thermal_headroom,
+            "target_preset_label": preset.label,
+            "target_capacity_label": preset.capacity_label,
+        }
+
     def runtime_health_snapshot(self, *, installer_snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
         installer_snapshot = installer_snapshot or self.guided_installer.status_payload()
         preflight = installer_snapshot["preflight"]
@@ -544,10 +935,17 @@ class NodeRuntimeService:
         runtime = self.runtime_status(preflight=preflight, installer_state=installer_state)
         running_services = set(preflight.get("running_services", []))
         docker_ready = bool(preflight.get("docker_cli") and preflight.get("docker_compose") and preflight.get("docker_daemon"))
+        runtime_backend = str(preflight.get("runtime_backend") or self.runtime_backend)
         config_present = bool(runtime.get("config_present"))
         credentials_present = bool(runtime.get("credentials_present"))
+        credentials_file_present = self.guided_installer.credentials_path.exists()
         disk = preflight.get("disk") if isinstance(preflight.get("disk"), dict) else {}
         gpu = preflight.get("gpu") if isinstance(preflight.get("gpu"), dict) else {}
+        nvidia_container_runtime = (
+            preflight.get("nvidia_container_runtime")
+            if isinstance(preflight.get("nvidia_container_runtime"), dict)
+            else {}
+        )
         autostart = (
             installer_snapshot.get("autostart")
             if isinstance(installer_snapshot.get("autostart"), dict)
@@ -558,12 +956,13 @@ class NodeRuntimeService:
             if isinstance(installer_snapshot.get("desktop_launcher"), dict)
             else self.desktop_launcher_manager.status()
         )
-        required_running = set(RUNTIME_SERVICES).issubset(running_services)
+        required_running = set(self.required_runtime_services).issubset(running_services)
+        inference_ready = bool(runtime.get("inference_ready", runtime.get("vllm_ready")))
         runtime_healthy = bool(
             credentials_present
             and runtime.get("stage") == "running"
             and required_running
-            and runtime.get("vllm_ready")
+            and inference_ready
         )
 
         issue_code: str | None = None
@@ -576,6 +975,11 @@ class NodeRuntimeService:
             desktop_launcher=desktop_launcher if isinstance(desktop_launcher, dict) else {},
             config_present=config_present,
             credentials_present=credentials_present,
+        )
+        nvidia_recovery = self.nvidia_recovery_plan(
+            config=installer_snapshot.get("config", {}) if isinstance(installer_snapshot.get("config"), dict) else {},
+            gpu=gpu,
+            runtime=runtime,
         )
 
         if installer_state.get("busy"):
@@ -600,7 +1004,7 @@ class NodeRuntimeService:
             )
             manual_fix_available = True
             issue_action_label = "Check storage"
-        elif not docker_ready:
+        elif runtime_backend_supports_compose(runtime_backend) and not docker_ready:
             if bool(preflight.get("docker_cli")) and bool(preflight.get("docker_compose")) and not bool(preflight.get("docker_daemon")):
                 issue_code = "docker_not_running"
                 issue_detail = str(
@@ -613,9 +1017,17 @@ class NodeRuntimeService:
                 issue_detail = str(
                     preflight.get("docker_error")
                     or "Docker needs attention before the runtime can be repaired."
-                )
+            )
             manual_fix_available = True
             issue_action_label = "Check Docker"
+        elif docker_ready and bool(gpu.get("detected")) and nvidia_container_runtime.get("visible") is False:
+            issue_code = "nvidia_runtime_missing"
+            issue_detail = str(
+                nvidia_container_runtime.get("error")
+                or "The NVIDIA GPU is visible on the host, but Docker cannot expose it to containers yet."
+            )
+            manual_fix_available = True
+            issue_action_label = "Fix GPU runtime"
         elif not bool(gpu.get("detected")):
             issue_code = "gpu_missing"
             issue_detail = (
@@ -624,20 +1036,31 @@ class NodeRuntimeService:
             )
             manual_fix_available = True
             issue_action_label = "Check GPU"
+        elif nvidia_recovery is not None:
+            issue_code = str(nvidia_recovery["issue_code"])
+            issue_detail = str(nvidia_recovery["issue_detail"])
+            automatic_fix_available = True
+            manual_fix_available = True
+            issue_action_label = "Use safer NVIDIA preset"
         elif credentials_present and not running_services:
             issue_code = "runtime_stopped"
             issue_detail = "The runtime is stopped even though this machine already has stored node credentials."
             automatic_fix_available = True
             manual_fix_available = True
         elif credentials_present and not required_running:
-            missing = ", ".join(sorted(set(RUNTIME_SERVICES) - running_services)) or "unknown services"
+            missing = ", ".join(sorted(set(self.required_runtime_services) - running_services)) or "unknown services"
             issue_code = "stuck_containers"
-            issue_detail = f"Some runtime containers look stuck or missing: {missing}."
+            if runtime_backend == SINGLE_CONTAINER_RUNTIME_BACKEND:
+                issue_detail = f"Some in-container runtime services look stuck or missing: {missing}."
+            else:
+                issue_detail = f"Some runtime containers look stuck or missing: {missing}."
             automatic_fix_available = True
             manual_fix_available = True
-        elif credentials_present and not runtime.get("vllm_ready"):
+        elif credentials_present and not inference_ready:
             issue_code = "runtime_unhealthy"
-            issue_detail = "The runtime containers are up, but vLLM is not responding yet."
+            issue_detail = (
+                f"The runtime containers are up, but {runtime.get('inference_engine_label') or 'the local inference runtime'} is not responding yet."
+            )
             automatic_fix_available = True
             manual_fix_available = True
         elif startup_issue is not None:
@@ -652,6 +1075,10 @@ class NodeRuntimeService:
             manual_fix_available = True
             issue_action_label = "Resume setup"
 
+        prerequisite_action = self.prerequisite_action_payload(issue_code, issue_detail)
+        if prerequisite_action is not None:
+            issue_action_label = str(prerequisite_action.get("label") or issue_action_label)
+
         return {
             "installer_snapshot": installer_snapshot,
             "preflight": preflight,
@@ -662,13 +1089,18 @@ class NodeRuntimeService:
             "issue_action_label": issue_action_label,
             "runtime_healthy": runtime_healthy,
             "docker_ready": docker_ready,
+            "runtime_backend": runtime_backend,
+            "runtime_backend_label": runtime_backend_label(runtime_backend),
             "credentials_present": credentials_present,
+            "credentials_file_present": credentials_file_present,
             "config_present": config_present,
             "autostart": autostart,
             "desktop_launcher": desktop_launcher,
             "running_services": sorted(running_services),
             "automatic_fix_available": automatic_fix_available,
             "manual_fix_available": manual_fix_available,
+            "nvidia_recovery_plan": nvidia_recovery,
+            "prerequisite_action": prerequisite_action,
         }
 
     def self_heal_payload(self, health: dict[str, Any]) -> dict[str, Any]:
@@ -680,7 +1112,7 @@ class NodeRuntimeService:
         elif health.get("issue_code"):
             if health.get("manual_fix_available"):
                 status = "attention"
-                headline = "Self-healing found something to fix"
+                headline = "Prerequisite-healing found the next fix"
             else:
                 status = "waiting"
                 headline = "Self-healing is standing by"
@@ -708,6 +1140,11 @@ class NodeRuntimeService:
             "manual_fix_available": bool(health.get("manual_fix_available")),
             "automatic_fix_available": bool(health.get("automatic_fix_available")),
             "action_label": str(health.get("issue_action_label") or "Fix it"),
+            "prerequisite_action": (
+                health.get("prerequisite_action")
+                if isinstance(health.get("prerequisite_action"), dict)
+                else None
+            ),
         }
 
     def build_control_client(self) -> EdgeControlClient | Any | None:
@@ -865,14 +1302,24 @@ class NodeRuntimeService:
                 for model in str(env_values.get("SUPPORTED_MODELS") or "").split(",")
                 if model.strip()
             )
-            for key in ("VLLM_MODEL",):
+            for key in ("VLLM_MODEL", "OWNER_TARGET_MODEL"):
                 value = str(env_values.get(key) or "").strip()
                 if value:
                     models.add(value)
-        for key in ("vllm_model", "recommended_model"):
+            models.update(
+                model.strip()
+                for model in str(env_values.get("OWNER_TARGET_SUPPORTED_MODELS") or "").split(",")
+                if model.strip()
+            )
+        for key in ("vllm_model", "owner_target_model", "recommended_model"):
             value = str(config.get(key) or "").strip()
             if value:
                 models.add(value)
+        models.update(
+            model.strip()
+            for model in str(config.get("owner_target_supported_models") or "").split(",")
+            if model.strip()
+        )
         return models
 
     def ranked_demand_models(self, demand: Any) -> list[tuple[str, float]]:
@@ -946,6 +1393,12 @@ class NodeRuntimeService:
                 if candidate:
                     return candidate, "control_plane_demand"
 
+        owner_target_model = supported(str(config.get("owner_target_model") or "").strip())
+        current_runtime_model = str(runtime.get("current_model") or "").strip()
+        current_config_model = str(config.get("vllm_model") or "").strip()
+        if owner_target_model and owner_target_model not in {current_runtime_model, current_config_model}:
+            return owner_target_model, "bootstrap_target"
+
         recommendation = autopilot.get("recommendation") if isinstance(autopilot.get("recommendation"), dict) else {}
         for model, source in (
             (str(recommendation.get("startup_model") or "").strip(), "autopilot"),
@@ -1011,7 +1464,22 @@ class NodeRuntimeService:
         )
         current_model = str(runtime.get("current_model") or config.get("vllm_model") or "").strip() or None
         likely_cache_bytes = self.model_cache_bytes_for_model(likely_model)
-        expected_bytes = artifact_total_size_bytes(startup_model_artifact(likely_model)) if likely_model else None
+        runtime_engine = str(
+            runtime.get("inference_engine")
+            or config.get("inference_engine")
+            or self.guided_installer.resolved_inference_engine()
+        )
+        expected_bytes = (
+            artifact_total_size_bytes(startup_model_artifact(likely_model, runtime_engine=runtime_engine))
+            if likely_model
+            else None
+        )
+        background_upgrade = bool(
+            likely_source == "bootstrap_target"
+            and current_model
+            and likely_model
+            and current_model != likely_model
+        )
         reuse_percent: int | None = None
         if expected_bytes and expected_bytes > 0:
             reuse_percent = max(0, min(100, int((likely_cache_bytes / expected_bytes) * 100)))
@@ -1034,25 +1502,40 @@ class NodeRuntimeService:
         elif likely_cache_bytes > 0:
             cache_label = format_bytes(likely_cache_bytes)
             if reuse_percent is not None and reuse_percent < 90:
-                value = "Partly cached"
+                value = "Background upgrade" if background_upgrade else "Partly cached"
                 detail = (
-                    f"The next likely model is {likely_model}. Reusing {cache_label} already in the local model cache "
-                    f"({reuse_percent}% of the expected snapshot), then filling the rest when it warms."
+                    f"The node is already online on {current_model}. Reusing {cache_label} of cached data for the larger owner target "
+                    f"{likely_model} ({reuse_percent}% of the expected snapshot) before the background switch finishes."
+                    if background_upgrade
+                    else (
+                        f"The next likely model is {likely_model}. Reusing {cache_label} already in the local model cache "
+                        f"({reuse_percent}% of the expected snapshot), then filling the rest when it warms."
+                    )
                 )
                 tone = "warning"
             else:
-                value = "Cache ready"
+                value = "Background upgrade" if background_upgrade else "Cache ready"
                 detail = (
-                    f"The next likely model is {likely_model}. Reusing {cache_label} from the local model cache, "
-                    "so the next warm-up should avoid most of the first-run download."
+                    f"The node is already online on {current_model}. Reusing {cache_label} from the local cache so the larger owner target "
+                    f"{likely_model} can switch in with a shorter background warm-up."
+                    if background_upgrade
+                    else (
+                        f"The next likely model is {likely_model}. Reusing {cache_label} from the local model cache, "
+                        "so the next warm-up should avoid most of the first-run download."
+                    )
                 )
                 tone = "success"
         else:
-            value = "Will warm on first use"
+            value = "Background upgrade" if background_upgrade else "Will warm on first use"
             expected_label = f" about {format_bytes(expected_bytes)}" if expected_bytes else ""
             detail = (
-                f"The next likely model is {likely_model}. No reusable local cache was found yet, so the first warm-up "
-                f"may download{expected_label}; after that, this machine will reuse the local cache automatically."
+                f"The node is already online on {current_model}. No reusable cache was found yet for the larger owner target "
+                f"{likely_model}, so the background warm-up may still download{expected_label} before switching over."
+                if background_upgrade
+                else (
+                    f"The next likely model is {likely_model}. No reusable local cache was found yet, so the first warm-up "
+                    f"may download{expected_label}; after that, this machine will reuse the local cache automatically."
+                )
             )
             tone = "warning"
 
@@ -1115,46 +1598,93 @@ class NodeRuntimeService:
                 return model, evicted_bytes
         return None, 0
 
-    def prewarm_likely_model(self, likely_model: str, current_model: str | None) -> tuple[bool, str]:
+    def prewarm_likely_model(
+        self,
+        likely_model: str,
+        current_model: str | None,
+        *,
+        source: str = "control_plane_demand",
+    ) -> tuple[bool, str]:
         env_values = self.guided_installer.effective_runtime_env()
         if not env_values:
             return False, "Model cache management is waiting for local runtime settings."
         supported_models = {model.strip() for model in env_values.get("SUPPORTED_MODELS", "").split(",") if model.strip()}
-        if supported_models and likely_model not in supported_models:
+        owner_target_model = str(env_values.get("OWNER_TARGET_MODEL") or "").strip()
+        owner_target_supported_models = str(env_values.get("OWNER_TARGET_SUPPORTED_MODELS") or "").strip()
+        if supported_models and likely_model not in supported_models and likely_model != owner_target_model:
             return False, f"{likely_model} is not advertised by this machine, so pre-warm was skipped."
         if current_model == likely_model and env_values.get("VLLM_MODEL") == likely_model:
             return False, f"{likely_model} is already the warm startup model."
 
         previous_env = dict(env_values)
         next_env = dict(env_values)
-        next_env["VLLM_MODEL"] = likely_model
+        configured_runtime_profile = str(env_values.get("RUNTIME_PROFILE") or "").strip()
+        configured_engine = str(env_values.get("INFERENCE_ENGINE") or "").strip()
+        configured_deployment_target = str(env_values.get("DEPLOYMENT_TARGET") or "").strip()
+        runtime_profile = resolve_runtime_profile(
+            configured_runtime_profile,
+            configured_engine=configured_engine,
+            configured_deployment_target=configured_deployment_target,
+            runtime_backend=self.guided_installer.current_runtime_backend(),
+            model=likely_model,
+        )
+        desired_supported_models = (
+            owner_target_supported_models
+            if owner_target_model and owner_target_model == likely_model and owner_target_supported_models
+            else ",".join(runtime_profile.supported_models)
+        )
+        selected_model, selected_supported_models, _fallback = resolve_accessible_startup_selection(
+            likely_model,
+            desired_supported_models,
+            token_configured=bool(str(env_values.get("HUGGING_FACE_HUB_TOKEN") or "").strip()),
+            inference_engine=runtime_profile.inference_engine,
+        )
+        if selected_model != likely_model:
+            return False, f"{likely_model} is not accessible on this machine yet, so pre-warm was skipped."
+        next_env["VLLM_MODEL"] = selected_model
+        next_env["SUPPORTED_MODELS"] = selected_supported_models
+        next_env.update(llama_cpp_env_for_model(selected_model))
+        if owner_target_model and owner_target_model == selected_model:
+            next_env["RUNTIME_PROFILE"] = AUTO_RUNTIME_PROFILE
         try:
             self.guided_installer.write_runtime_settings(next_env)
             self.guided_installer.write_runtime_env(next_env)
-            self.log(
-                f"Demand-aware model management is pre-warming {likely_model} while the node is idle. "
-                "Existing local cache will be reused where possible."
-            )
+            if source == "bootstrap_target":
+                self.log(
+                    f"Quick Start brought this node online on {current_model or previous_env.get('VLLM_MODEL') or 'the bootstrap model'}. "
+                    f"Now pre-warming the larger owner target {likely_model} in the background."
+                )
+            else:
+                self.log(
+                    f"Demand-aware model management is pre-warming {likely_model} while the node is idle. "
+                    "Existing local cache will be reused where possible."
+                )
             self.start_runtime_services(recreate=True)
             self.wait_for_runtime_health(timeout_seconds=240.0)
         except Exception:
             self.guided_installer.write_runtime_settings(previous_env)
             self.guided_installer.write_runtime_env(previous_env)
+            rollback_prefix = "Background owner-model warm-up" if source == "bootstrap_target" else "Demand-aware pre-warm"
             self.log(
-                f"Demand-aware pre-warm for {likely_model} failed. Rolling back to "
+                f"{rollback_prefix} for {likely_model} failed. Rolling back to "
                 f"{previous_env.get('VLLM_MODEL') or 'the previous startup model'}."
             )
             try:
                 self.start_runtime_services(recreate=True)
                 self.wait_for_runtime_health(timeout_seconds=90.0)
             except Exception as rollback_error:
-                self.log(f"Rollback after demand-aware pre-warm also needs attention: {rollback_error}")
+                self.log(f"Rollback after automatic model pre-warm also needs attention: {rollback_error}")
             raise
         warmed_at = now_iso()
         self.model_cache_state.last_warmed_model = likely_model
         self.model_cache_state.last_warmed_at = warmed_at
         self.model_cache_state.last_error = None
         self.touch_model_usage(likely_model)
+        if source == "bootstrap_target":
+            return (
+                True,
+                f"Pre-warmed the larger owner target {likely_model} after this node came online on the bootstrap model.",
+            )
         return True, f"Pre-warmed {likely_model} because it is the most likely next model for this node."
 
     def manage_model_cache(self, *, health: dict[str, Any], installer_snapshot: dict[str, Any]) -> tuple[bool, str, str]:
@@ -1204,14 +1734,18 @@ class NodeRuntimeService:
             health.get("runtime_healthy")
             and likely_model
             and current_model != likely_model
-            and model_cache.get("likely_model_source") == "control_plane_demand"
+            and model_cache.get("likely_model_source") in {"control_plane_demand", "bootstrap_target"}
             and active_assignments == 0
             and not self.update_state.pending_restart
             and not bool(health.get("installer_state", {}).get("busy"))
         )
         if can_prewarm:
             try:
-                applied, message = self.prewarm_likely_model(likely_model, current_model)
+                applied, message = self.prewarm_likely_model(
+                    likely_model,
+                    current_model,
+                    source=str(model_cache.get("likely_model_source") or "control_plane_demand"),
+                )
             except Exception as error:
                 message = f"Model pre-warm could not finish automatically: {error}"
                 self.model_cache_state.last_error = message
@@ -1262,6 +1796,11 @@ class NodeRuntimeService:
             or "Community capacity stays enabled, but premium jobs are unavailable on this machine right now."
         )
         premium_unavailable = premium_status in {"community_enabled", "premium_unavailable"}
+        routing_lane_label = str(
+            config.get("routing_lane_label")
+            or runtime.get("routing_lane_label")
+            or "current routing"
+        ).strip()
         remote_error = remote.get("last_error") if isinstance(remote.get("last_error"), str) else None
         autopilot_pending_restart = bool(
             autopilot.get("status") == "restart_pending"
@@ -1331,7 +1870,7 @@ class NodeRuntimeService:
         if health.get("runtime_healthy") and schedulable:
             detail = "This machine is healthy and online. Work will start automatically when a matching job arrives."
             if queue_depth > 0:
-                detail = "The network has work, but nothing currently matches this machine."
+                detail = f"The network has work, but nothing currently matches the {routing_lane_label.lower()} lane on this machine."
             elif premium_unavailable:
                 detail = (
                     f"{premium_detail} Community jobs will still start automatically when they match this machine."
@@ -1510,6 +2049,11 @@ class NodeRuntimeService:
         )
         remote_runtime = remote_node.get("runtime") if isinstance(remote_node.get("runtime"), dict) else {}
         earnings = remote_summary.get("earnings") if isinstance(remote_summary.get("earnings"), dict) else {}
+        setup_verification = (
+            remote_summary.get("setup_verification")
+            if isinstance(remote_summary.get("setup_verification"), dict)
+            else {}
+        )
         model_cache = self.model_cache_payload(
             health=health,
             runtime=runtime,
@@ -1555,6 +2099,28 @@ class NodeRuntimeService:
         if current_model:
             current_model = str(current_model)
 
+        setup_verification_status = (
+            str(setup_verification.get("status") or "").strip()
+            if isinstance(setup_verification.get("status"), str)
+            else ""
+        )
+        setup_verification_detail = (
+            str(setup_verification.get("detail") or "").strip()
+            if isinstance(setup_verification.get("detail"), str)
+            else ""
+        )
+        setup_verification_notification = None
+        if setup_verification_status == "passed":
+            setup_verification_notification = {
+                "show": True,
+                "title": "Setup verified",
+                "message": (
+                    setup_verification_detail
+                    or "A tiny end-to-end canary completed through edge.autonomousc.com, so this setup is verified."
+                ),
+                "tone": "success",
+            }
+
         accrued_value = format_usd(earnings.get("accrued_usd"))
         transferred_value = format_usd(earnings.get("transferred_usd"))
         last_payout = earnings.get("last_payout") if isinstance(earnings.get("last_payout"), dict) else None
@@ -1569,9 +2135,31 @@ class NodeRuntimeService:
             last_payout_detail = f" Last payout {payout_amount} is {payout_status}."
 
         if health.get("runtime_healthy") and not blocked_reason:
-            health_value = "Healthy"
-            health_tone = "success"
-            health_detail = "This machine is online, healthy, and ready for work."
+            if setup_verification_status == "passed":
+                health_value = "Setup verified"
+                health_tone = "success"
+                health_detail = (
+                    setup_verification_detail
+                    or "A tiny end-to-end canary completed through edge.autonomousc.com, so this setup is verified."
+                )
+            elif setup_verification_status in {"pending", "not_started"}:
+                health_value = "Verifying setup"
+                health_tone = "warning"
+                health_detail = (
+                    setup_verification_detail
+                    or "A tiny end-to-end canary is still running through edge.autonomousc.com."
+                )
+            elif setup_verification_status in {"failed", "mismatch"}:
+                health_value = "Needs attention"
+                health_tone = "danger"
+                health_detail = (
+                    setup_verification_detail
+                    or "Setup verification did not finish successfully. Use Fix it, then retry setup."
+                )
+            else:
+                health_value = "Healthy"
+                health_tone = "success"
+                health_detail = "This machine is online, healthy, and ready for work."
         elif installer_state.get("busy"):
             health_value = "Setting up"
             health_tone = "warning"
@@ -1633,12 +2221,24 @@ class NodeRuntimeService:
             heartbeat_tone = "warning"
 
         if current_model:
-            model_value = current_model
-            model_detail = (
-                "This model is loaded in the local runtime."
-                if runtime.get("stage") == "running"
-                else "Quick Start will use this startup model on this machine."
+            owner_target_model = str(config.get("owner_target_model") or "").strip()
+            bootstrap_pending_upgrade = bool(
+                config.get("bootstrap_pending_upgrade")
+                and owner_target_model
+                and owner_target_model != current_model
             )
+            model_value = current_model
+            if bootstrap_pending_upgrade:
+                model_detail = (
+                    f"{current_model} is loaded so this node could come online quickly. "
+                    f"{owner_target_model} is the larger owner target and will switch in after the background warm-up finishes."
+                )
+            else:
+                model_detail = (
+                    "This model is loaded in the local runtime."
+                    if runtime.get("stage") == "running"
+                    else "Quick Start will use this startup model on this machine."
+                )
             model_tone = "success" if runtime.get("stage") == "running" else "warning"
         else:
             model_value = "Pending"
@@ -1649,7 +2249,13 @@ class NodeRuntimeService:
         uptime_detail = f"Local service online since {self.started_at}."
         uptime_tone = "success"
 
-        if health_value == "Healthy":
+        if health_value == "Setup verified":
+            headline = "Setup verified"
+            detail = idle_reason["detail"] or health_detail
+        elif health_value == "Verifying setup":
+            headline = "Verifying setup"
+            detail = health_detail
+        elif health_value == "Healthy":
             headline = "Node live"
             detail = idle_reason["detail"]
         elif health_value == "Setting up":
@@ -1692,6 +2298,11 @@ class NodeRuntimeService:
                     "detail": model_cache["detail"],
                     "tone": model_cache["tone"],
                 },
+            },
+            "setup_verification": {
+                "status": setup_verification_status or None,
+                "detail": setup_verification_detail,
+                "notification": setup_verification_notification,
             },
             "autopilot": autopilot,
             "model_cache": model_cache,
@@ -1750,7 +2361,52 @@ class NodeRuntimeService:
             self.log("Self-healing recreated the local node settings and generated a fresh runtime config.")
         return repaired
 
+    def ensure_local_credentials(self) -> bool:
+        env_values = self.guided_installer.effective_runtime_env()
+        node_id = str(env_values.get("NODE_ID") or "").strip()
+        node_key = str(env_values.get("NODE_KEY") or "").strip()
+        if not node_id or not node_key:
+            return False
+
+        existing_matches = False
+        if self.guided_installer.credentials_path.exists():
+            try:
+                payload = json.loads(self.guided_installer.credentials_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                payload = {}
+            existing_matches = (
+                isinstance(payload, dict)
+                and str(payload.get("node_id") or "").strip() == node_id
+                and str(payload.get("node_key") or "").strip() == node_key
+            )
+            if existing_matches:
+                return False
+
+        self.guided_installer.credentials_path.parent.mkdir(parents=True, exist_ok=True)
+        tighten_private_path(self.guided_installer.credentials_path.parent, directory=True)
+        self.guided_installer.credentials_path.write_text(
+            json.dumps({"node_id": node_id, "node_key": node_key}, indent=2),
+            encoding="utf-8",
+        )
+        tighten_private_path(self.guided_installer.credentials_path)
+        self.log("Self-healing restored the local node credentials from the saved node approval.")
+        return True
+
     def start_runtime_services(self, *, recreate: bool) -> None:
+        if self.runtime_controller is not None:
+            if recreate:
+                self.log("Restarting the in-container runtime services...")
+                self.runtime_controller.start(recreate=True, start_vllm=True, start_node=True)
+                self.update_state.pending_restart = False
+                self.save_state()
+                self.log("In-container runtime services restarted.")
+                return
+
+            self.log("Starting the in-container runtime services...")
+            self.runtime_controller.start(recreate=False, start_vllm=True, start_node=True)
+            self.log("In-container runtime services started.")
+            return
+
         if recreate:
             self.log("Restarting runtime services...")
             self.compose(["up", "-d", "--force-recreate", "vllm", "node-agent", "vector"])
@@ -1762,6 +2418,83 @@ class NodeRuntimeService:
         self.log("Starting runtime services...")
         self.compose(["up", "-d", "vllm", "node-agent", "vector"])
         self.log("Runtime services started.")
+
+    def restart_inference_runtime_service(self) -> None:
+        self.restart_vllm_service()
+
+    def restart_vllm_service(self) -> None:
+        runtime_label = self.guided_installer.inference_runtime_label(self.runtime_env_values())
+        if self.runtime_controller is not None:
+            self.log(f"Restarting the in-container {runtime_label} model server...")
+            self.runtime_controller.restart_vllm()
+            return
+        self.log(f"Restarting the {runtime_label} model server container...")
+        self.compose(["up", "-d", "--force-recreate", "vllm"])
+
+    def wait_for_inference_runtime_readiness(self, *, model: str | None = None, timeout_seconds: float = 180.0) -> None:
+        self.wait_for_vllm_readiness(model=model, timeout_seconds=timeout_seconds)
+
+    def wait_for_vllm_readiness(self, *, model: str | None = None, timeout_seconds: float = 180.0) -> None:
+        env_values = self.runtime_env_values()
+        runtime_label = self.guided_installer.inference_runtime_label(env_values)
+        readiness_path = self.guided_installer.inference_readiness_path(env_values)
+        readiness_url = f"http://{service_access_host()}:8000{readiness_path}"
+        deadline = time.time() + max(1.0, timeout_seconds)
+        current_model = (model or "").strip() or env_values.get("VLLM_MODEL") or "the startup model"
+        last_failure = f"{current_model} is still warming."
+        while time.time() < deadline:
+            try:
+                response = httpx.get(readiness_url, timeout=5.0)
+                if response.status_code < 500:
+                    return
+                last_failure = f"{runtime_label} health check returned HTTP {response.status_code}."
+            except httpx.HTTPError as error:
+                last_failure = str(error) or last_failure
+            time.sleep(2)
+        raise RuntimeError(f"{current_model} did not finish warming in time. {last_failure}")
+
+    def apply_nvidia_recovery_plan(self, plan: dict[str, Any]) -> tuple[bool, str, str]:
+        env_values = self.guided_installer.effective_runtime_env()
+        if not env_values:
+            return False, "The local runtime config is still missing, so the NVIDIA preset could not be refreshed yet.", "repair_local_config"
+
+        next_env = dict(env_values)
+        target_model = str(plan.get("target_model") or "").strip()
+        target_supported_models = str(plan.get("target_supported_models") or "").strip()
+        target_profile = str(plan.get("target_profile") or "").strip()
+        target_concurrency = str(plan.get("target_concurrency") or "").strip()
+        target_thermal_headroom = str(plan.get("target_thermal_headroom") or "").strip()
+
+        changed = False
+        for key, value in (
+            ("VLLM_MODEL", target_model),
+            ("SUPPORTED_MODELS", target_supported_models),
+            ("SETUP_PROFILE", target_profile),
+            ("MAX_CONCURRENT_ASSIGNMENTS", target_concurrency),
+            ("THERMAL_HEADROOM", target_thermal_headroom),
+        ):
+            if value and next_env.get(key) != value:
+                next_env[key] = value
+                changed = True
+
+        if not changed:
+            return (
+                False,
+                f"The safer NVIDIA preset is already selected with {target_model}.",
+                "downgrade_startup_model",
+            )
+
+        self.guided_installer.write_runtime_settings(next_env)
+        self.guided_installer.write_runtime_env(next_env)
+        self.log(
+            "Self-healing switched this machine to the "
+            f"{plan.get('target_preset_label') or 'recommended NVIDIA'} preset and will retry the warm-up with {target_model}."
+        )
+        return (
+            True,
+            f"Switched this machine to {target_model} on the {plan.get('target_capacity_label') or 'recommended NVIDIA'} preset.",
+            "downgrade_startup_model",
+        )
 
     def attempt_runtime_recovery(self, *, recreate: bool, failure_reason: str) -> tuple[bool, str, str]:
         self.start_runtime_services(recreate=recreate)
@@ -1775,6 +2508,90 @@ class NodeRuntimeService:
 
         self.remember_known_good_release()
         return True, "The runtime is healthy again.", "restart_runtime" if recreate else "start_runtime"
+
+    def attempt_inference_runtime_recovery(
+        self,
+        *,
+        model: str | None,
+        attempts: int = VLLM_WARM_RETRY_ATTEMPTS,
+    ) -> tuple[bool, str, str]:
+        return self.attempt_vllm_recovery(model=model, attempts=attempts)
+
+    def attempt_vllm_recovery(self, *, model: str | None, attempts: int = VLLM_WARM_RETRY_ATTEMPTS) -> tuple[bool, str, str]:
+        env_values = self.runtime_env_values()
+        runtime_label = self.guided_installer.inference_runtime_label(env_values)
+        target_model = (model or "").strip() or env_values.get("VLLM_MODEL") or "the startup model"
+        last_error = f"{runtime_label} still needs attention."
+        for attempt in range(1, max(1, attempts) + 1):
+            try:
+                self.log(
+                    f"Self-healing is restarting {runtime_label} and retrying the warm-up for {target_model} "
+                    f"({attempt}/{max(1, attempts)})."
+                )
+                self.restart_inference_runtime_service()
+                self.wait_for_inference_runtime_readiness(model=target_model)
+                self.remember_known_good_release()
+                return True, f"Restarted {runtime_label} and re-warmed {target_model} successfully.", "restart_vllm"
+            except Exception as error:
+                last_error = str(error) or last_error
+                if attempt < max(1, attempts):
+                    self.log(f"{runtime_label} warm-up retry {attempt} did not stick: {last_error}")
+        return False, last_error, "restart_vllm"
+
+    def attempt_nvidia_runtime_recovery(self, health: dict[str, Any]) -> tuple[bool, str, str] | None:
+        issue_code = str(health.get("issue_code") or "")
+        if not issue_code:
+            return None
+
+        runtime = health.get("runtime") if isinstance(health.get("runtime"), dict) else {}
+        running_services = {
+            str(service)
+            for service in health.get("running_services", [])
+            if isinstance(service, str) and service.strip()
+        }
+        missing_services = set(self.required_runtime_services) - running_services
+        plan = health.get("nvidia_recovery_plan") if isinstance(health.get("nvidia_recovery_plan"), dict) else None
+        failure_reason = str(health.get("issue_detail") or issue_code)
+
+        if issue_code == "startup_model_too_large" and plan is not None:
+            applied, plan_message, plan_action = self.apply_nvidia_recovery_plan(plan)
+            if not applied:
+                return False, plan_message, plan_action
+            success, recovery_message, _recovery_action = self.attempt_runtime_recovery(
+                recreate=True,
+                failure_reason=failure_reason,
+            )
+            if success:
+                return True, f"{plan_message} The NVIDIA runtime restarted successfully.", plan_action
+            return False, f"{plan_message} {recovery_message}", plan_action
+
+        if not health.get("credentials_present"):
+            return None
+
+        if issue_code == "runtime_unhealthy" or (issue_code == "stuck_containers" and missing_services == {"vllm"}):
+            model = str(runtime.get("current_model") or self.runtime_env_values().get("VLLM_MODEL") or "").strip()
+            success, message, action = self.attempt_inference_runtime_recovery(model=model)
+            if success:
+                return success, message, action
+            if plan is not None:
+                applied, plan_message, plan_action = self.apply_nvidia_recovery_plan(plan)
+                if applied:
+                    success, recovery_message, _recovery_action = self.attempt_runtime_recovery(
+                        recreate=True,
+                        failure_reason=message,
+                    )
+                    if success:
+                        return True, f"{plan_message} The NVIDIA runtime restarted successfully.", plan_action
+                    return False, f"{plan_message} {recovery_message}", plan_action
+            success, recovery_message, recovery_action = self.attempt_runtime_recovery(
+                recreate=True,
+                failure_reason=message,
+            )
+            if success:
+                return True, "A full NVIDIA runtime restart brought the node back online.", recovery_action
+            return False, recovery_message, recovery_action
+
+        return None
 
     def repair_runtime(self, *, allow_quickstart_resume: bool = True) -> dict[str, Any]:
         if not self.repair_lock.acquire(blocking=False):
@@ -1806,7 +2623,8 @@ class NodeRuntimeService:
             )
             startup_repaired = False
             launcher_repaired = False
-            self.ensure_local_config()
+            config_repaired = self.ensure_local_config()
+            credentials_repaired = self.ensure_local_credentials()
 
             try:
                 autostart = self.autostart_manager.ensure_enabled()
@@ -1825,8 +2643,24 @@ class NodeRuntimeService:
             health = self.runtime_health_snapshot()
             installer_state = health["installer_state"]
             preflight = health["preflight"]
+            prerequisite_result = self.repair_prerequisite_blocker(health)
 
-            if installer_state.get("busy"):
+            if prerequisite_result is not None:
+                message = str(prerequisite_result.get("message") or "Prerequisite-healing ran the next setup fix.")
+                action = str(prerequisite_result.get("action") or "prerequisite_heal")
+                resolved = bool(prerequisite_result.get("resolved"))
+                self.log(message)
+                self.update_self_heal_state(
+                    status="healthy" if resolved else "attention",
+                    last_result=message,
+                    last_issue=str(health.get("issue_detail") or ""),
+                    last_error=None,
+                    last_action=action,
+                    last_repaired_at=now_iso(),
+                    fix_available=not resolved,
+                )
+                use_status_payload = True
+            elif installer_state.get("busy"):
                 self.update_self_heal_state(
                     status="standing_by",
                     last_result="Quick Start is already running, so repair is waiting for that setup flow to finish.",
@@ -1917,22 +2751,48 @@ class NodeRuntimeService:
                     fix_available=True,
                 )
                 use_status_payload = True
+            elif (nvidia_recovery := self.attempt_nvidia_runtime_recovery(health)) is not None:
+                success, message, action = nvidia_recovery
+                self.update_self_heal_state(
+                    status="healthy" if success else "error",
+                    last_result=(
+                        message
+                        if success
+                        else f"Self-healing could not recover the NVIDIA runtime automatically: {message}"
+                    ),
+                    last_issue=str(health.get("issue_detail") or ""),
+                    last_error=None if success else message,
+                    last_action=action,
+                    last_repaired_at=now_iso() if success else self.self_heal_state.last_repaired_at,
+                    fix_available=not success,
+                )
+                use_status_payload = True
             elif health["runtime_healthy"]:
                 self.remember_known_good_release()
-                if startup_repaired or launcher_repaired:
-                    startup_result = "Self-healing repaired Windows startup"
+                if startup_repaired or launcher_repaired or config_repaired or credentials_repaired:
+                    startup_result = "Self-healing repaired local setup"
                     if startup_repaired and launcher_repaired:
-                        startup_result += " and refreshed the desktop launcher."
+                        startup_result += ", refreshed automatic startup, and refreshed the desktop launcher."
                     elif startup_repaired:
-                        startup_result += " so this node can relaunch after sign-in."
-                    else:
-                        startup_result += " support and refreshed the desktop launcher."
+                        startup_result += " and repaired automatic startup so this node can relaunch after sign-in."
+                    elif launcher_repaired:
+                        startup_result += " and refreshed the desktop launcher."
+                    if config_repaired and credentials_repaired:
+                        startup_result += " Saved config and node approval were restored locally."
+                    elif config_repaired:
+                        startup_result += " Saved config was restored locally."
+                    elif credentials_repaired:
+                        startup_result += " Saved node approval was restored locally."
                     self.update_self_heal_state(
                         status="healthy",
                         last_result=startup_result,
                         last_issue=None,
                         last_error=None,
-                        last_action="repair_startup",
+                        last_action=(
+                            "repair_startup"
+                            if startup_repaired or launcher_repaired
+                            else "repair_local_state"
+                        ),
                         last_repaired_at=now_iso(),
                         fix_available=False,
                     )
@@ -2013,8 +2873,12 @@ class NodeRuntimeService:
 
     def stop_runtime(self) -> dict[str, Any]:
         self.log("Stopping runtime services...")
-        self.compose(["stop", "node-agent", "vllm", "vector"])
-        self.log("Runtime services stopped.")
+        if self.runtime_controller is not None:
+            self.runtime_controller.stop()
+            self.log("In-container runtime services stopped.")
+        else:
+            self.compose(["stop", "node-agent", "vllm", "vector"])
+            self.log("Runtime services stopped.")
         return self.status_payload()
 
     def restart_runtime(self) -> dict[str, Any]:
@@ -2033,6 +2897,16 @@ class NodeRuntimeService:
         return value or None
 
     def check_for_updates(self, apply: bool = False) -> dict[str, Any]:
+        if not runtime_backend_supports_compose(self.runtime_backend):
+            self.update_state.last_checked_at = now_iso()
+            self.update_state.last_error = None
+            self.update_state.pending_restart = False
+            self.update_state.last_result = (
+                "The unified runtime image updates by pulling a new container image and recreating the container."
+            )
+            self.save_state()
+            return self.status_payload()
+
         rollout_id = request_id()
         try:
             manifest = self.signed_release_manifest()
@@ -2204,14 +3078,18 @@ class NodeRuntimeService:
                 archive.writestr("runtime-settings.redacted.json", self.redacted_runtime_settings())
             archive.writestr("service.log", "\n".join(payload["service"]["logs"]) + "\n")
             archive.writestr("installer.log", "\n".join(payload["installer"]["state"]["logs"]) + "\n")
-            archive.writestr(
-                "docker-compose-ps.txt",
-                self.command_output(["docker", "compose", "ps"]),
-            )
-            archive.writestr(
-                "docker-compose.logs.txt",
-                self.command_output(["docker", "compose", "logs", "--tail", "200", "node-agent", "vllm", "vector"]),
-            )
+            if runtime_backend_supports_compose(self.runtime_backend):
+                archive.writestr(
+                    "docker-compose-ps.txt",
+                    self.command_output(["docker", "compose", "ps"]),
+                )
+                archive.writestr(
+                    "docker-compose.logs.txt",
+                    self.command_output(["docker", "compose", "logs", "--tail", "200", "node-agent", "vllm", "vector"]),
+                )
+            else:
+                runtime_snapshot = self.runtime_backend_status()
+                archive.writestr("runtime-processes.json", json.dumps(runtime_snapshot, indent=2))
             archive.writestr(
                 "nvidia-smi.txt",
                 self.command_output(["nvidia-smi"]),
@@ -2343,6 +3221,24 @@ class NodeRuntimeService:
                 return self.status_payload()
 
         if health["runtime_healthy"] and not health.get("issue_code"):
+            config_repaired = self.ensure_local_config()
+            credentials_repaired = self.ensure_local_credentials()
+            if config_repaired or credentials_repaired:
+                repair_bits = []
+                if config_repaired:
+                    repair_bits.append("recreated the saved runtime config")
+                if credentials_repaired:
+                    repair_bits.append("restored the saved node approval")
+                self.update_self_heal_state(
+                    status="healthy",
+                    last_result="Self-healing " + " and ".join(repair_bits) + ".",
+                    last_issue=None,
+                    last_error=None,
+                    last_action="repair_local_state",
+                    last_repaired_at=now_iso(),
+                    fix_available=False,
+                )
+                return self.status_payload()
             self.remember_known_good_release()
             applied, autopilot_result = self.apply_autopilot_tuning()
             if applied:
@@ -2391,6 +3287,24 @@ class NodeRuntimeService:
                 last_error=None,
                 last_action="waiting_for_quick_start",
                 fix_available=False,
+            )
+            return self.status_payload()
+
+        nvidia_recovery = self.attempt_nvidia_runtime_recovery(health)
+        if nvidia_recovery is not None:
+            success, message, action = nvidia_recovery
+            self.update_self_heal_state(
+                status="healthy" if success else "error",
+                last_result=(
+                    message
+                    if success
+                    else f"Self-healing could not recover the NVIDIA runtime automatically: {message}"
+                ),
+                last_issue=str(health.get("issue_detail") or ""),
+                last_error=None if success else message,
+                last_action=action,
+                last_repaired_at=now_iso() if success else self.self_heal_state.last_repaired_at,
+                fix_available=not success,
             )
             return self.status_payload()
 
@@ -2704,9 +3618,10 @@ def load_meta(runtime_dir: Path) -> dict[str, Any] | None:
 
 def wait_for_service(host: str, port: int, timeout_seconds: float = 20.0) -> None:
     deadline = time.time() + timeout_seconds
+    request_host = browser_access_host(host)
     while time.time() < deadline:
         try:
-            response = httpx.get(f"http://{host}:{port}/api/healthz", timeout=2.0)
+            response = httpx.get(f"http://{request_host}:{port}/api/healthz", timeout=2.0)
             if response.status_code == 200:
                 return
         except httpx.HTTPError:
@@ -2737,6 +3652,14 @@ def command_run(host: str, port: int) -> int:
     service.port = port
     service.write_meta()
     service.log(f"Node runtime service started at http://{host}:{port}")
+    service.resume_setup_if_needed()
+    access_url = f"http://{browser_access_host(host)}:{port}/?token={quote(service.admin_token)}"
+    print(f"AUTONOMOUSc node setup UI is available at {access_url}", flush=True)
+    print(
+        f"Runtime backend: {runtime_backend_label(service.runtime_backend)} on port 8765. "
+        "Open that URL to run Quick Start.",
+        flush=True,
+    )
 
     server_ref: dict[str, ThreadingHTTPServer] = {}
     handler = make_handler(service, server_ref)
@@ -2764,6 +3687,8 @@ def command_run(host: str, port: int) -> int:
     finally:
         service.shutdown_event.set()
         server.server_close()
+        if service.runtime_controller is not None:
+            service.runtime_controller.stop()
         service.clear_meta()
     return 0
 
@@ -2795,11 +3720,12 @@ def command_stop(runtime_dir: Path) -> int:
     meta = load_meta(runtime_dir)
     if meta:
         host = str(meta.get("host", "127.0.0.1"))
+        request_host = browser_access_host(host)
         port = int(meta.get("port", 8765))
         admin_token = str(meta.get("admin_token", "") or "")
         try:
             httpx.post(
-                f"http://{host}:{port}/api/shutdown",
+                f"http://{request_host}:{port}/api/shutdown",
                 timeout=3.0,
                 headers={ADMIN_TOKEN_HEADER: admin_token} if admin_token else None,
             )
@@ -2823,19 +3749,20 @@ def command_status(runtime_dir: Path) -> int:
         print("Node runtime service is not running.")
         return 0
     host = str(meta.get("host", "127.0.0.1"))
+    request_host = browser_access_host(host)
     port = int(meta.get("port", 8765))
     admin_token = str(meta.get("admin_token", "") or "")
     headers = {ADMIN_TOKEN_HEADER: admin_token} if admin_token else None
     try:
-        response = httpx.get(f"http://{host}:{port}/api/status", timeout=15.0, headers=headers)
+        response = httpx.get(f"http://{request_host}:{port}/api/status", timeout=15.0, headers=headers)
         payload = response.json()
         print(json.dumps(payload["runtime"], indent=2))
     except httpx.HTTPError:
         try:
-            health = httpx.get(f"http://{host}:{port}/api/healthz", timeout=2.0)
+            health = httpx.get(f"http://{request_host}:{port}/api/healthz", timeout=2.0)
             if health.status_code == 200:
                 print(
-                    f"Node runtime service is online at http://{host}:{port}, "
+                    f"Node runtime service is online at http://{request_host}:{port}, "
                     "but full runtime status is still loading. Open the local UI or try again in a few seconds."
                 )
                 return 0
@@ -2852,10 +3779,11 @@ def command_repair(runtime_dir: Path, host: str, port: int, open_ui_flag: bool) 
         raise RuntimeError("The local node runtime service could not be reached for repair.")
 
     target_host = str(meta.get("host", host))
+    request_host = browser_access_host(target_host)
     target_port = int(meta.get("port", port))
     admin_token = str(meta.get("admin_token", "") or "")
     headers = {ADMIN_TOKEN_HEADER: admin_token} if admin_token else None
-    response = httpx.post(f"http://{target_host}:{target_port}/api/repair", timeout=75.0, headers=headers)
+    response = httpx.post(f"http://{request_host}:{target_port}/api/repair", timeout=75.0, headers=headers)
     payload = response.json()
     if response.status_code >= 400 or payload.get("error"):
         detail = payload.get("error", {})

@@ -4,6 +4,7 @@ import os
 import shutil
 from pathlib import Path
 
+from .runtime_backend import default_service_access_host, detect_runtime_backend
 
 RUNTIME_DIR_ENV = "AUTONOMOUSC_RUNTIME_DIR"
 RUNTIME_HOST_ENV = "AUTONOMOUSC_RUNTIME_HOST"
@@ -26,7 +27,10 @@ def resolve_runtime_dir() -> Path:
 
 
 def service_access_host() -> str:
-    return os.getenv(RUNTIME_HOST_ENV, "127.0.0.1").strip() or "127.0.0.1"
+    override = os.getenv(RUNTIME_HOST_ENV)
+    if override:
+        return override.strip() or "127.0.0.1"
+    return default_service_access_host(detect_runtime_backend())
 
 
 def ensure_runtime_bundle(runtime_dir: Path) -> Path:

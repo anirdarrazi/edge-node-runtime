@@ -1,6 +1,7 @@
 import json
 import subprocess
 import threading
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -36,7 +37,12 @@ def write_example_env(runtime_dir: Path) -> None:
                 "TRUST_TIER=restricted",
                 "RESTRICTED_CAPABLE=true",
                 "CREDENTIALS_PATH=/var/lib/autonomousc/credentials/node-credentials.json",
-                "VLLM_BASE_URL=http://vllm:8000",
+                "RUNTIME_PROFILE=auto",
+                "DEPLOYMENT_TARGET=home_edge",
+                "INFERENCE_ENGINE=llama_cpp",
+                "RUNTIME_IMAGE=ghcr.io/ggml-org/llama.cpp:server-cuda",
+                "INFERENCE_BASE_URL=http://inference-runtime:8000",
+                "VLLM_BASE_URL=http://inference-runtime:8000",
                 "GPU_NAME=Generic GPU",
                 "GPU_MEMORY_GB=24",
                 "MAX_CONTEXT_TOKENS=32768",
@@ -47,6 +53,12 @@ def write_example_env(runtime_dir: Path) -> None:
                 "POLL_INTERVAL_SECONDS=10",
                 "ATTESTATION_PROVIDER=simulated",
                 "VLLM_MODEL=meta-llama/Llama-3.1-8B-Instruct",
+                "LLAMA_CPP_HF_REPO=bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
+                "LLAMA_CPP_HF_FILE=Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
+                "LLAMA_CPP_ALIAS=meta-llama/Llama-3.1-8B-Instruct",
+                "LLAMA_CPP_EMBEDDING=false",
+                "LLAMA_CPP_POOLING=",
+                "VLLM_IMAGE=ghcr.io/ggml-org/llama.cpp:server-cuda",
                 "",
             ]
         ),
@@ -69,6 +81,32 @@ def stable_machine_inference(monkeypatch: pytest.MonkeyPatch) -> None:
             "This machine does not expose a ready hardware attestation device yet.",
         ),
     )
+
+
+def installer_for_detected_gpu(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    gpu_line: str,
+    *,
+    attestation_provider: str = "simulated",
+) -> installer_module.GuidedInstaller:
+    write_example_env(tmp_path)
+    monkeypatch.setattr(installer_module.shutil, "which", lambda name: "nvidia-smi" if name == "nvidia-smi" else None)
+    monkeypatch.setattr(
+        installer_module,
+        "detect_attestation_provider",
+        lambda *_args, **_kwargs: (
+            attestation_provider,
+            f"{attestation_provider} attestation for matrix test.",
+        ),
+    )
+
+    def runner(args: list[str], _cwd: Path) -> subprocess.CompletedProcess[str]:
+        if args[0] == "nvidia-smi":
+            return completed(args, stdout=f"{gpu_line}\n")
+        raise AssertionError(f"Unexpected command: {args}")
+
+    return installer_module.GuidedInstaller(runtime_dir=tmp_path, command_runner=runner)
 
 
 def test_current_config_prefills_detected_gpu(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -97,10 +135,89 @@ def test_current_config_prefills_detected_gpu(tmp_path: Path, monkeypatch: pytes
     assert config["gpu_memory_gb"] == "24.0"
     assert config["max_concurrent_assignments"] == "2"
     assert config["setup_profile"] == "balanced"
+    assert config["deployment_target"] == "home_edge"
+    assert config["inference_engine"] == "llama_cpp"
+    assert config["vllm_model"] == "BAAI/bge-large-en-v1.5"
+    assert config["supported_models"] == "BAAI/bge-large-en-v1.5"
+    assert config["owner_target_model"] == "meta-llama/Llama-3.1-8B-Instruct"
+    assert config["owner_target_supported_models"] == "meta-llama/Llama-3.1-8B-Instruct,BAAI/bge-large-en-v1.5"
+    assert config["bootstrap_pending_upgrade"] is True
+    assert config["startup_model_fallback"] is False
     assert config["recommended_model"] == "meta-llama/Llama-3.1-8B-Instruct"
+    assert config["gpu_support_label"] == "24-47 GB NVIDIA"
+    assert config["gpu_support_track"] == "Llama 8B + embeddings"
     assert config["recommended_node_region"] == "eu-se-1"
+    assert config["routing_lane"] == "community_quantized_home"
+    assert config["routing_lane_label"] == "Community quantized home"
+    assert config["routing_lane_allowed_privacy_tiers"] == ["standard"]
+    assert config["routing_lane_allowed_result_guarantees"] == ["community_best_effort"]
+    assert config["routing_lane_allowed_trust_requirements"] == ["untrusted_allowed"]
     assert config["premium_eligibility_label"] == "Community capacity enabled"
+    assert config["hugging_face_repository"] == "CompendiumLabs/bge-large-en-v1.5-gguf"
+    assert config["hugging_face_token_required"] is False
+    assert config["hugging_face_token_configured"] is False
     assert "everyday setting" in config["profile_summary"]
+
+
+def test_current_config_uses_embeddings_preset_for_16gb_nvidia(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    installer = installer_for_detected_gpu(tmp_path, monkeypatch, "RTX 4080 Laptop GPU, 16384")
+
+    config = installer.current_config()
+
+    assert config["recommended_model"] == "BAAI/bge-large-en-v1.5"
+    assert config["recommended_supported_models"] == "BAAI/bge-large-en-v1.5"
+    assert config["recommended_setup_profile"] == "balanced"
+    assert config["recommended_max_concurrent_assignments"] == "1"
+    assert config["gpu_support_label"] == "12-23 GB NVIDIA"
+    assert config["gpu_support_track"] == "Embeddings/community"
+    assert config["premium_eligibility_label"] == "Community capacity enabled"
+    assert "embeddings/community preset" in config["premium_eligibility_detail"]
+
+
+def test_current_config_uses_llama8b_preset_for_24gb_hardware_attestation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    installer = installer_for_detected_gpu(
+        tmp_path,
+        monkeypatch,
+        "RTX 4090, 24564",
+        attestation_provider="hardware",
+    )
+
+    config = installer.current_config()
+
+    assert config["recommended_model"] == "meta-llama/Llama-3.1-8B-Instruct"
+    assert config["recommended_supported_models"] == "meta-llama/Llama-3.1-8B-Instruct,BAAI/bge-large-en-v1.5"
+    assert config["recommended_setup_profile"] == "balanced"
+    assert config["recommended_max_concurrent_assignments"] == "2"
+    assert config["gpu_support_label"] == "24-47 GB NVIDIA"
+    assert config["routing_lane"] == "community_quantized_home"
+    assert config["premium_eligibility_label"] == "Premium capacity eligible"
+    assert "Llama 8B + embeddings preset" in config["premium_eligibility_detail"]
+
+
+def test_current_config_uses_large_nvidia_preset_for_48gb_hardware_attestation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    installer = installer_for_detected_gpu(
+        tmp_path,
+        monkeypatch,
+        "RTX 6000 Ada Generation, 49152",
+        attestation_provider="hardware",
+    )
+
+    config = installer.current_config()
+
+    assert config["recommended_model"] == "meta-llama/Llama-3.1-8B-Instruct"
+    assert config["recommended_supported_models"] == "meta-llama/Llama-3.1-8B-Instruct,BAAI/bge-large-en-v1.5"
+    assert config["recommended_setup_profile"] == "performance"
+    assert config["recommended_max_concurrent_assignments"] == "4"
+    assert config["gpu_support_label"] == "48+ GB NVIDIA"
+    assert config["gpu_support_track"] == "Llama 8B + embeddings today"
+    assert config["premium_eligibility_label"] == "Premium capacity eligible"
+    assert "larger premium profiles later" in config["premium_eligibility_detail"]
 
 
 def test_build_env_uses_quickstart_profile_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -132,7 +249,129 @@ def test_build_env_uses_quickstart_profile_defaults(tmp_path: Path, monkeypatch:
     assert env_values["NODE_REGION"] == "eu-se-1"
     assert env_values["TRUST_TIER"] == "standard"
     assert env_values["RESTRICTED_CAPABLE"] == "false"
-    assert env_values["VLLM_MODEL"] == "meta-llama/Llama-3.1-8B-Instruct"
+    assert env_values["DEPLOYMENT_TARGET"] == "home_edge"
+    assert env_values["INFERENCE_ENGINE"] == "llama_cpp"
+    assert env_values["RUNTIME_PROFILE"] == "auto"
+    assert env_values["VLLM_MODEL"] == "BAAI/bge-large-en-v1.5"
+    assert env_values["SUPPORTED_MODELS"] == "BAAI/bge-large-en-v1.5"
+    assert env_values["OWNER_TARGET_MODEL"] == "meta-llama/Llama-3.1-8B-Instruct"
+    assert env_values["OWNER_TARGET_SUPPORTED_MODELS"] == "meta-llama/Llama-3.1-8B-Instruct,BAAI/bge-large-en-v1.5"
+    assert env_values["LLAMA_CPP_HF_REPO"] == "CompendiumLabs/bge-large-en-v1.5-gguf"
+    assert env_values["LLAMA_CPP_EMBEDDING"] == "true"
+    assert env_values["VLLM_IMAGE"] == "ghcr.io/ggml-org/llama.cpp:server-cuda"
+    assert env_values["CREDENTIALS_PATH"] == installer_module.COMPOSE_RUNTIME_CREDENTIALS_PATH
+    assert env_values["AUTOPILOT_STATE_PATH"] == installer_module.COMPOSE_RUNTIME_AUTOPILOT_STATE_PATH
+
+
+def test_build_env_uses_host_paths_for_single_container_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    write_example_env(tmp_path)
+    monkeypatch.setattr(installer_module.shutil, "which", lambda name: "nvidia-smi" if name == "nvidia-smi" else None)
+
+    def runner(args: list[str], _cwd: Path) -> subprocess.CompletedProcess[str]:
+        if args[0] == "nvidia-smi":
+            return completed(args, stdout="RTX 4090, 24564\n")
+        if args[0] == "powershell":
+            return completed(args, stdout="simulated\n")
+        raise AssertionError(f"Unexpected command: {args}")
+
+    installer = installer_module.GuidedInstaller(runtime_dir=tmp_path, command_runner=runner)
+    monkeypatch.setattr(installer, "current_runtime_backend", lambda: installer_module.SINGLE_CONTAINER_RUNTIME_BACKEND)
+
+    env_values = installer.build_env({"setup_mode": "quickstart", "node_label": "Owner Node"})
+
+    assert env_values["CREDENTIALS_PATH"] == str(installer.credentials_path)
+    assert env_values["AUTOPILOT_STATE_PATH"] == str(tmp_path / "data" / "scratch" / "autopilot-state.json")
+
+
+def test_build_env_persists_hugging_face_token_for_quickstart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    write_example_env(tmp_path)
+    monkeypatch.setattr(installer_module.shutil, "which", lambda name: "nvidia-smi" if name == "nvidia-smi" else None)
+
+    def runner(args: list[str], _cwd: Path) -> subprocess.CompletedProcess[str]:
+        if args[0] == "nvidia-smi":
+            return completed(args, stdout="RTX 4090, 24564\n")
+        if args[0] == "powershell":
+            return completed(args, stdout="simulated\n")
+        raise AssertionError(f"Unexpected command: {args}")
+
+    installer = installer_module.GuidedInstaller(runtime_dir=tmp_path, command_runner=runner)
+    env_values = installer.build_env(
+        {
+            "setup_mode": "quickstart",
+            "node_label": "Nordic Heat Compute",
+            "hugging_face_hub_token": "hf_secret_token",
+        }
+    )
+    installer.write_runtime_settings(env_values)
+
+    persisted = installer.load_persisted_env()
+    config = installer.current_config()
+
+    assert env_values["HUGGING_FACE_HUB_TOKEN"] == "hf_secret_token"
+    assert env_values["HF_TOKEN"] == "hf_secret_token"
+    assert persisted["HUGGING_FACE_HUB_TOKEN"] == "hf_secret_token"
+    assert persisted["HF_TOKEN"] == "hf_secret_token"
+    assert config["hugging_face_token_configured"] is True
+    assert env_values["VLLM_MODEL"] == "BAAI/bge-large-en-v1.5"
+    assert env_values["SUPPORTED_MODELS"] == "BAAI/bge-large-en-v1.5"
+    assert env_values["OWNER_TARGET_MODEL"] == "meta-llama/Llama-3.1-8B-Instruct"
+    assert env_values["OWNER_TARGET_SUPPORTED_MODELS"] == "meta-llama/Llama-3.1-8B-Instruct,BAAI/bge-large-en-v1.5"
+
+
+def test_build_env_quickstart_resets_advanced_overrides_without_operator_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_example_env(tmp_path)
+    monkeypatch.setattr(installer_module.shutil, "which", lambda name: "nvidia-smi" if name == "nvidia-smi" else None)
+
+    def runner(args: list[str], _cwd: Path) -> subprocess.CompletedProcess[str]:
+        if args[0] == "nvidia-smi":
+            return completed(args, stdout="RTX 4090, 24564\n")
+        if args[0] == "powershell":
+            return completed(args, stdout="simulated\n")
+        raise AssertionError(f"Unexpected command: {args}")
+
+    installer = installer_module.GuidedInstaller(runtime_dir=tmp_path, command_runner=runner)
+    installer.write_runtime_settings(
+        {
+            "EDGE_CONTROL_URL": "https://custom-control.example",
+            "NODE_LABEL": "Operator Override",
+            "NODE_REGION": "us-east-1",
+            "TRUST_TIER": "restricted",
+            "RESTRICTED_CAPABLE": "true",
+            "CREDENTIALS_PATH": str(installer.credentials_path),
+            "AUTOPILOT_STATE_PATH": str(tmp_path / "data" / "scratch" / "autopilot-state.json"),
+            "INFERENCE_BASE_URL": "http://127.0.0.1:8000",
+            "VLLM_BASE_URL": "http://127.0.0.1:8000",
+            "GPU_NAME": "RTX 4090",
+            "GPU_MEMORY_GB": "24.0",
+            "MAX_CONTEXT_TOKENS": "32768",
+            "MAX_BATCH_TOKENS": "99999",
+            "MAX_CONCURRENT_ASSIGNMENTS": "7",
+            "THERMAL_HEADROOM": "0.99",
+            "SUPPORTED_MODELS": "custom/model",
+            "POLL_INTERVAL_SECONDS": "10",
+            "ATTESTATION_PROVIDER": "hardware",
+            "VLLM_MODEL": "custom/model",
+            "DOCKER_IMAGE": "anirdarrazi/autonomousc-ai-edge-runtime:latest",
+        }
+    )
+
+    env_values = installer.build_env({"setup_mode": "quickstart", "node_label": "Owner Node"})
+
+    assert env_values["NODE_LABEL"] == "Owner Node"
+    assert env_values["EDGE_CONTROL_URL"] == "https://custom-control.example"
+    assert env_values["TRUST_TIER"] == "standard"
+    assert env_values["RESTRICTED_CAPABLE"] == "false"
+    assert env_values["DEPLOYMENT_TARGET"] == "home_edge"
+    assert env_values["INFERENCE_ENGINE"] == "llama_cpp"
+    assert env_values["VLLM_MODEL"] == "BAAI/bge-large-en-v1.5"
+    assert env_values["SUPPORTED_MODELS"] == "BAAI/bge-large-en-v1.5"
+    assert env_values["OWNER_TARGET_MODEL"] == "meta-llama/Llama-3.1-8B-Instruct"
+    assert env_values["OWNER_TARGET_SUPPORTED_MODELS"] == "meta-llama/Llama-3.1-8B-Instruct,BAAI/bge-large-en-v1.5"
+    assert env_values["MAX_CONCURRENT_ASSIGNMENTS"] == "2"
+    assert env_values["THERMAL_HEADROOM"] == "0.80"
+    assert env_values["VLLM_IMAGE"] == "ghcr.io/ggml-org/llama.cpp:server-cuda"
 
 
 def test_collect_preflight_reports_missing_docker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -147,6 +386,38 @@ def test_collect_preflight_reports_missing_docker(tmp_path: Path, monkeypatch: p
     assert "Docker is not installed" in preflight["docker_error"]
     assert preflight["disk"]["total_gb"] > 0
     assert preflight["blockers"]
+
+
+def test_collect_preflight_reports_missing_nvidia_container_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_example_env(tmp_path)
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(installer_module.shutil, "which", lambda name: "docker" if name == "docker" else "nvidia-smi")
+
+    def runner(args: list[str], _cwd: Path) -> subprocess.CompletedProcess[str]:
+        commands.append(args)
+        normalized = normalize_compose_args(args)
+        if args[0] == "nvidia-smi":
+            return completed(args, stdout="RTX 4090, 24564\n")
+        if normalized[:3] == ["docker", "compose", "version"]:
+            return completed(args)
+        if args == ["docker", "info"]:
+            return completed(args)
+        if args[:3] == ["docker", "info", "--format"]:
+            return completed(args, stdout='{"runc":{}}\n')
+        if normalized[:4] == ["docker", "compose", "ps", "--services"]:
+            return completed(args, stdout="")
+        raise AssertionError(f"Unexpected command: {args}")
+
+    installer = installer_module.GuidedInstaller(runtime_dir=tmp_path, command_runner=runner)
+    preflight = installer.collect_preflight()
+
+    assert preflight["docker_daemon"] is True
+    assert preflight["gpu"]["detected"] is True
+    assert preflight["nvidia_container_runtime"]["visible"] is False
+    assert "NVIDIA GPU support" in " ".join(preflight["blockers"])
 
 
 def test_run_install_creates_claim_and_starts_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -250,6 +521,8 @@ def test_run_install_creates_claim_and_starts_runtime(tmp_path: Path, monkeypatc
 
     autostart = FakeAutoStartManager()
     launcher = FakeDesktopLauncherManager()
+    validated_models: list[str | None] = []
+    warmed_models: list[str | None] = []
 
     installer = installer_module.GuidedInstaller(
         runtime_dir=runtime_dir,
@@ -259,10 +532,12 @@ def test_run_install_creates_claim_and_starts_runtime(tmp_path: Path, monkeypatc
         desktop_launcher_manager=launcher,
         sleep=lambda _seconds: None,
     )
-    installer.wait_for_vllm = lambda timeout_seconds=240.0, model=None: None  # type: ignore[method-assign]
+    installer.validate_hugging_face_access = lambda model=None: validated_models.append(model)  # type: ignore[method-assign]
+    installer.wait_for_vllm = lambda timeout_seconds=240.0, model=None, **_kwargs: warmed_models.append(model)  # type: ignore[method-assign]
 
     installer.run_install(
         {
+            "setup_mode": "quickstart",
             "edge_control_url": "https://edge.autonomousc.com",
             "node_label": "Nordic Heat Compute",
             "node_region": "eu-se-1",
@@ -287,11 +562,498 @@ def test_run_install_creates_claim_and_starts_runtime(tmp_path: Path, monkeypatc
     assert not (runtime_dir / ".env").exists()
     assert "Nordic Heat Compute" in installer.runtime_env_path.read_text(encoding="utf-8")
     assert "SETUP_PROFILE=balanced" in installer.runtime_env_path.read_text(encoding="utf-8")
+    assert "VLLM_MODEL=BAAI/bge-large-en-v1.5" in installer.runtime_env_path.read_text(encoding="utf-8")
+    assert "OWNER_TARGET_MODEL=meta-llama/Llama-3.1-8B-Instruct" in installer.runtime_env_path.read_text(encoding="utf-8")
     settings_payload = json.loads(installer.runtime_settings_path.read_text(encoding="utf-8"))
     assert settings_payload["config"]["node_label"] == "Nordic Heat Compute"
     assert settings_payload["config"]["setup_profile"] == "balanced"
+    assert settings_payload["config"]["owner_target_model"] == "meta-llama/Llama-3.1-8B-Instruct"
+    assert validated_models == ["BAAI/bge-large-en-v1.5"]
+    assert warmed_models == ["BAAI/bge-large-en-v1.5"]
+    assert any("Claim code: ABC123" in message for message in installer.state.logs)
+    assert any("https://edge.autonomousc.com/?claim=123" in message for message in installer.state.logs)
     assert autostart.ensure_calls == 1
     assert launcher.ensure_calls == 1
+
+
+def test_build_claim_state_includes_qr_data_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    write_example_env(tmp_path)
+    monkeypatch.setattr(installer_module.shutil, "which", lambda _name: None)
+
+    installer = installer_module.GuidedInstaller(runtime_dir=tmp_path)
+    claim = installer_module.NodeClaimSession(
+        claim_id="claim_123",
+        claim_code="ABC123",
+        approval_url="https://edge.autonomousc.com/?claim=123",
+        poll_token="poll-token",
+        expires_at="2099-01-01T00:00:00Z",
+        poll_interval_seconds=10,
+    )
+
+    claim_state = installer.build_claim_state(claim, renewal_count=2)
+
+    assert claim_state.renewal_count == 2
+    assert claim_state.auto_refreshes is True
+    assert claim_state.approval_qr_svg_data_url is not None
+    assert claim_state.approval_qr_svg_data_url.startswith("data:image/svg+xml;base64,")
+
+
+def test_installer_state_survives_restart_with_progress_and_private_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_example_env(tmp_path)
+    monkeypatch.setattr(installer_module.shutil, "which", lambda _name: None)
+    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat().replace("+00:00", "Z")
+
+    installer = installer_module.GuidedInstaller(runtime_dir=tmp_path)
+    claim = installer_module.NodeClaimSession(
+        claim_id="claim_resume",
+        claim_code="RESUME1",
+        approval_url="https://edge.autonomousc.com/?claim=resume",
+        poll_token="private-poll-token",
+        expires_at=expires_at,
+        poll_interval_seconds=10,
+    )
+    with installer.lock:
+        installer.state = installer_module.InstallerState(
+            stage="downloading_model",
+            busy=True,
+            message="Downloading bootstrap model.",
+            logs=["First chunk finished."],
+            stage_context={
+                "warm_model": "BAAI/bge-large-en-v1.5",
+                "warm_expected_bytes": 1000,
+                "warm_downloaded_bytes": 420,
+                "warm_progress_percent": 42,
+            },
+            claim=installer.build_claim_state(claim),
+            resume_config={
+                "setup_mode": "quickstart",
+                "node_label": "Resume Node",
+                "hugging_face_hub_token": "hf_private",
+            },
+            resume_requested=True,
+        )
+        installer.persist_state_unlocked()
+
+    reloaded = installer_module.GuidedInstaller(runtime_dir=tmp_path)
+
+    assert reloaded.state.stage == "downloading_model"
+    assert reloaded.state.busy is False
+    assert reloaded.state.resume_requested is True
+    assert reloaded.state.stage_context["warm_progress_percent"] == 42
+    assert reloaded.state.claim is not None
+    assert reloaded.state.claim.poll_token == "private-poll-token"
+    public_state = reloaded.state_payload()
+    assert "poll_token" not in public_state["claim"]
+    assert public_state["resume_config"]["hugging_face_hub_token"] == "***"
+
+
+def test_run_install_reuses_valid_saved_claim_after_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime_dir = tmp_path
+    write_example_env(runtime_dir)
+    commands: list[list[str]] = []
+    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat().replace("+00:00", "Z")
+
+    monkeypatch.setattr(installer_module.shutil, "which", lambda name: "docker" if name == "docker" else "nvidia-smi")
+
+    def runner(args: list[str], _cwd: Path) -> subprocess.CompletedProcess[str]:
+        commands.append(args)
+        normalized = normalize_compose_args(args)
+        if args[0] == "nvidia-smi":
+            return completed(args, stdout="RTX 4090, 24564\n")
+        if args[0] == "powershell":
+            return completed(args, stdout="simulated\n")
+        if normalized[:3] == ["docker", "compose", "version"]:
+            return completed(args)
+        if args[:2] == ["docker", "info"]:
+            return completed(args)
+        if normalized[:4] == ["docker", "compose", "ps", "--services"]:
+            return completed(args, stdout="")
+        if normalized[:3] == ["docker", "compose", "pull"]:
+            return completed(args)
+        if normalized[:3] == ["docker", "compose", "up"]:
+            return completed(args)
+        raise AssertionError(f"Unexpected command: {args}")
+
+    class FakeControlClient:
+        created_claims = 0
+        polled: list[tuple[str, str]] = []
+
+        def __init__(self, settings):
+            self.settings = settings
+
+        def create_node_claim_session(self):
+            self.__class__.created_claims += 1
+            raise AssertionError("Quick Start should reuse the valid saved claim instead of creating a new one.")
+
+        def poll_node_claim_session(self, claim_id: str, poll_token: str):
+            self.__class__.polled.append((claim_id, poll_token))
+            return SimpleNamespace(
+                status="consumed",
+                expires_at=expires_at,
+                node_id="node_from_resume",
+                node_key="key_from_resume_123456789012345",
+            )
+
+        def persist_credentials(self, node_id: str, node_key: str):
+            path = Path(self.settings.credentials_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"node_id": node_id, "node_key": node_key}), encoding="utf-8")
+
+    class FakeManager:
+        def status(self) -> dict[str, object]:
+            return {
+                "supported": True,
+                "enabled": True,
+                "label": "Ready",
+                "detail": "Ready.",
+            }
+
+        def ensure_enabled(self) -> dict[str, object]:
+            return self.status()
+
+    installer = installer_module.GuidedInstaller(
+        runtime_dir=runtime_dir,
+        command_runner=runner,
+        control_client_factory=FakeControlClient,
+        autostart_manager=FakeManager(),
+        desktop_launcher_manager=FakeManager(),
+        sleep=lambda _seconds: None,
+    )
+    installer.set_claim(
+        installer_module.InstallerClaimState(
+            claim_id="claim_saved",
+            claim_code="SAVED1",
+            approval_url="https://edge.autonomousc.com/?claim=saved",
+            expires_at=expires_at,
+            poll_interval_seconds=0,
+            poll_token="saved-poll-token",
+        )
+    )
+    installer.validate_hugging_face_access = lambda model=None: None  # type: ignore[method-assign]
+    installer.wait_for_vllm = lambda timeout_seconds=240.0, model=None, **_kwargs: None  # type: ignore[method-assign]
+
+    installer.run_install(
+        {
+            "setup_mode": "quickstart",
+            "edge_control_url": "https://edge.autonomousc.com",
+            "node_label": "Nordic Heat Compute",
+            "node_region": "eu-se-1",
+            "trust_tier": "restricted",
+            "restricted_capable": True,
+            "vllm_model": "meta-llama/Llama-3.1-8B-Instruct",
+            "supported_models": "meta-llama/Llama-3.1-8B-Instruct,BAAI/bge-large-en-v1.5",
+            "max_concurrent_assignments": "2",
+        },
+        resume_from_stage="claiming_node",
+    )
+
+    assert installer.state.stage == "running"
+    assert installer.credentials_path.exists()
+    assert FakeControlClient.created_claims == 0
+    assert FakeControlClient.polled == [("claim_saved", "saved-poll-token")]
+
+
+def test_run_install_refreshes_claim_before_expiry_and_accepts_older_approval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime_dir = tmp_path
+    write_example_env(runtime_dir)
+    commands: list[list[str]] = []
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(installer_module.shutil, "which", lambda name: "docker" if name == "docker" else "nvidia-smi")
+
+    def runner(args: list[str], _cwd: Path) -> subprocess.CompletedProcess[str]:
+        commands.append(args)
+        normalized = normalize_compose_args(args)
+        if args[0] == "nvidia-smi":
+            return completed(args, stdout="RTX 4090, 24564\n")
+        if args[0] == "powershell":
+            return completed(args, stdout="simulated\n")
+        if normalized[:3] == ["docker", "compose", "version"]:
+            return completed(args)
+        if args[:2] == ["docker", "info"]:
+            return completed(args)
+        if normalized[:4] == ["docker", "compose", "ps", "--services"]:
+            return completed(args, stdout="")
+        if normalized[:3] == ["docker", "compose", "pull"]:
+            return completed(args)
+        if normalized[:3] == ["docker", "compose", "up"]:
+            return completed(args)
+        raise AssertionError(f"Unexpected command: {args}")
+
+    soon = (datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat().replace("+00:00", "Z")
+    later = (datetime.now(timezone.utc) + timedelta(minutes=20)).isoformat().replace("+00:00", "Z")
+
+    class FakeControlClient:
+        def __init__(self, settings):
+            self.settings = settings
+            self.created_claim_ids: list[str] = []
+            self.poll_counts: dict[str, int] = {}
+
+        def create_node_claim_session(self):
+            claim_number = len(self.created_claim_ids) + 1
+            claim_id = f"claim_{claim_number}"
+            self.created_claim_ids.append(claim_id)
+            return SimpleNamespace(
+                claim_id=claim_id,
+                claim_code=f"CODE{claim_number}",
+                approval_url=f"https://edge.autonomousc.com/?claim={claim_number}",
+                poll_token=f"poll-{claim_number}",
+                expires_at=soon if claim_number == 1 else later,
+                poll_interval_seconds=0,
+            )
+
+        def poll_node_claim_session(self, claim_id: str, _poll_token: str):
+            self.poll_counts[claim_id] = self.poll_counts.get(claim_id, 0) + 1
+            if claim_id == "claim_1" and self.poll_counts[claim_id] == 1:
+                return SimpleNamespace(status="pending", expires_at=soon, node_id=None, node_key=None)
+            if claim_id == "claim_1":
+                return SimpleNamespace(
+                    status="consumed",
+                    expires_at=soon,
+                    node_id="node_approved_from_first_claim",
+                    node_key="key_approved_from_first_claim_123456",
+                )
+            return SimpleNamespace(status="pending", expires_at=later, node_id=None, node_key=None)
+
+        def persist_credentials(self, node_id: str, node_key: str):
+            path = Path(self.settings.credentials_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"node_id": node_id, "node_key": node_key}), encoding="utf-8")
+
+    class FakeManager:
+        def status(self) -> dict[str, object]:
+            return {
+                "supported": True,
+                "enabled": True,
+                "label": "Ready",
+                "detail": "Ready.",
+            }
+
+        def ensure_enabled(self) -> dict[str, object]:
+            return self.status()
+
+    def control_factory(settings):
+        client = FakeControlClient(settings)
+        captured["client"] = client
+        return client
+
+    installer = installer_module.GuidedInstaller(
+        runtime_dir=runtime_dir,
+        command_runner=runner,
+        control_client_factory=control_factory,  # type: ignore[arg-type]
+        autostart_manager=FakeManager(),
+        desktop_launcher_manager=FakeManager(),
+        sleep=lambda _seconds: None,
+    )
+    validated_models: list[str | None] = []
+    warmed_models: list[str | None] = []
+    installer.validate_hugging_face_access = lambda model=None: validated_models.append(model)  # type: ignore[method-assign]
+    installer.wait_for_vllm = lambda timeout_seconds=240.0, model=None, **_kwargs: warmed_models.append(model)  # type: ignore[method-assign]
+
+    installer.run_install(
+        {
+            "setup_mode": "quickstart",
+            "edge_control_url": "https://edge.autonomousc.com",
+            "node_label": "Nordic Heat Compute",
+            "node_region": "eu-se-1",
+            "trust_tier": "restricted",
+            "restricted_capable": True,
+            "vllm_model": "meta-llama/Llama-3.1-8B-Instruct",
+            "supported_models": "meta-llama/Llama-3.1-8B-Instruct,BAAI/bge-large-en-v1.5",
+            "max_concurrent_assignments": "2",
+        }
+    )
+
+    fake_client = captured["client"]
+    assert isinstance(fake_client, FakeControlClient)
+    assert installer.state.stage == "running"
+    assert installer.credentials_path.exists()
+    assert fake_client.created_claim_ids == ["claim_1", "claim_2"]
+    assert fake_client.poll_counts.get("claim_1") == 2
+    assert fake_client.poll_counts.get("claim_2", 0) == 0
+    assert validated_models == ["BAAI/bge-large-en-v1.5"]
+    assert warmed_models == ["BAAI/bge-large-en-v1.5"]
+    assert any("refreshed the approval link automatically before it expired" in message for message in installer.state.logs)
+
+
+def test_run_install_stops_when_claim_is_consumed_without_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime_dir = tmp_path
+    write_example_env(runtime_dir)
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(installer_module.shutil, "which", lambda name: "docker" if name == "docker" else "nvidia-smi")
+
+    def runner(args: list[str], _cwd: Path) -> subprocess.CompletedProcess[str]:
+        commands.append(args)
+        normalized = normalize_compose_args(args)
+        if args[0] == "nvidia-smi":
+            return completed(args, stdout="RTX 4090, 24564\n")
+        if args[0] == "powershell":
+            return completed(args, stdout="simulated\n")
+        if normalized[:3] == ["docker", "compose", "version"]:
+            return completed(args)
+        if args[:2] == ["docker", "info"]:
+            return completed(args)
+        if normalized[:4] == ["docker", "compose", "ps", "--services"]:
+            return completed(args, stdout="")
+        if normalized[:3] == ["docker", "compose", "pull"]:
+            return completed(args)
+        if normalized[:3] == ["docker", "compose", "up"]:
+            return completed(args)
+        raise AssertionError(f"Unexpected command: {args}")
+
+    class FakeControlClient:
+        created_claims = 0
+
+        def __init__(self, settings):
+            self.settings = settings
+
+        def create_node_claim_session(self):
+            self.__class__.created_claims += 1
+            return SimpleNamespace(
+                claim_id="claim_123",
+                claim_code="ABC123",
+                approval_url="https://edge.autonomousc.com/?claim=123",
+                poll_token="poll-token",
+                expires_at="2099-01-01T00:00:00Z",
+                poll_interval_seconds=0,
+            )
+
+        def poll_node_claim_session(self, _claim_id: str, _poll_token: str):
+            return SimpleNamespace(
+                status="consumed",
+                expires_at="2099-01-01T00:00:00Z",
+                node_id=None,
+                node_key=None,
+            )
+
+        def persist_credentials(self, _node_id: str, _node_key: str):
+            raise AssertionError("Quick Start should not persist credentials when the claim response is incomplete.")
+
+    class FakeManager:
+        def status(self) -> dict[str, object]:
+            return {
+                "supported": True,
+                "enabled": True,
+                "label": "Ready",
+                "detail": "Ready.",
+            }
+
+        def ensure_enabled(self) -> dict[str, object]:
+            return self.status()
+
+    installer = installer_module.GuidedInstaller(
+        runtime_dir=runtime_dir,
+        command_runner=runner,
+        control_client_factory=FakeControlClient,
+        autostart_manager=FakeManager(),
+        desktop_launcher_manager=FakeManager(),
+        sleep=lambda _seconds: None,
+    )
+    installer.validate_hugging_face_access = lambda model=None: None  # type: ignore[method-assign]
+    installer.wait_for_vllm = lambda timeout_seconds=240.0, model=None, **_kwargs: None  # type: ignore[method-assign]
+
+    installer.run_install(
+        {
+            "setup_mode": "quickstart",
+            "edge_control_url": "https://edge.autonomousc.com",
+            "node_label": "Nordic Heat Compute",
+            "node_region": "eu-se-1",
+            "trust_tier": "restricted",
+            "restricted_capable": True,
+            "vllm_model": "meta-llama/Llama-3.1-8B-Instruct",
+            "supported_models": "meta-llama/Llama-3.1-8B-Instruct,BAAI/bge-large-en-v1.5",
+            "max_concurrent_assignments": "2",
+        }
+    )
+
+    assert installer.state.stage == "error"
+    assert installer.state.error is not None
+    assert "consumed but did not return credentials" in installer.state.error
+    assert FakeControlClient.created_claims == 1
+    assert not installer.credentials_path.exists()
+    assert any(normalize_compose_args(command) == ["docker", "compose", "up", "-d", "vllm"] for command in commands)
+    assert not any(
+        normalize_compose_args(command) == ["docker", "compose", "up", "-d", "node-agent", "vector"]
+        for command in commands
+    )
+
+
+def test_validate_hugging_face_access_requires_token_for_gated_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    write_example_env(tmp_path)
+    installer = installer_module.GuidedInstaller(runtime_dir=tmp_path)
+    env_values = installer.effective_runtime_env()
+    env_values["DEPLOYMENT_TARGET"] = "vast_ai"
+    env_values["INFERENCE_ENGINE"] = "vllm"
+    installer.write_runtime_settings(env_values)
+
+    with pytest.raises(RuntimeError, match="HUGGING_FACE_HUB_TOKEN"):
+        installer.validate_hugging_face_access("meta-llama/Llama-3.1-8B-Instruct")
+
+
+def test_validate_hugging_face_access_accepts_saved_token_for_gated_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_example_env(tmp_path)
+    installer = installer_module.GuidedInstaller(runtime_dir=tmp_path)
+    env_values = installer.effective_runtime_env()
+    env_values["DEPLOYMENT_TARGET"] = "vast_ai"
+    env_values["INFERENCE_ENGINE"] = "vllm"
+    env_values["HUGGING_FACE_HUB_TOKEN"] = "hf_saved_token"
+    installer.write_runtime_settings(env_values)
+
+    class FakeResponse:
+        status_code = 200
+
+    monkeypatch.setattr(installer_module.httpx, "get", lambda _url, **_kwargs: FakeResponse())
+
+    installer.validate_hugging_face_access("meta-llama/Llama-3.1-8B-Instruct")
+
+    assert any(
+        "Validated gated Hugging Face access for meta-llama/Llama-3.1-8B-Instruct." in message
+        for message in installer.state.logs
+    )
+
+
+def test_runtime_settings_accept_hf_token_alias(tmp_path: Path) -> None:
+    write_example_env(tmp_path)
+    installer = installer_module.GuidedInstaller(runtime_dir=tmp_path)
+    env_values = installer.effective_runtime_env()
+    env_values["HUGGING_FACE_HUB_TOKEN"] = ""
+    env_values["HF_TOKEN"] = "hf_alias_token"
+    installer.write_runtime_settings(env_values)
+
+    persisted = installer.load_persisted_env()
+    config = installer.current_config(gpu={"name": "RTX 4090", "memory_gb": 24.0})
+
+    assert persisted["HUGGING_FACE_HUB_TOKEN"] == "hf_alias_token"
+    assert persisted["HF_TOKEN"] == "hf_alias_token"
+    assert config["hugging_face_token_configured"] is True
+
+
+def test_validate_hugging_face_access_accepts_public_model_without_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    write_example_env(tmp_path)
+    installer = installer_module.GuidedInstaller(runtime_dir=tmp_path)
+
+    class FakeResponse:
+        status_code = 200
+
+    monkeypatch.setattr(installer_module.httpx, "get", lambda _url, **_kwargs: FakeResponse())
+
+    installer.validate_hugging_face_access("BAAI/bge-large-en-v1.5")
+
+    assert any(
+        "Validated public Hugging Face access for CompendiumLabs/bge-large-en-v1.5-gguf." in message
+        for message in installer.state.logs
+    )
 
 
 def test_run_install_skips_claim_when_credentials_exist(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -299,11 +1061,13 @@ def test_run_install_skips_claim_when_credentials_exist(tmp_path: Path, monkeypa
     write_example_env(runtime_dir)
     commands: list[list[str]] = []
 
-    monkeypatch.setattr(installer_module.shutil, "which", lambda name: "docker" if name == "docker" else None)
+    monkeypatch.setattr(installer_module.shutil, "which", lambda name: "docker" if name == "docker" else "nvidia-smi")
 
     def runner(args: list[str], _cwd: Path) -> subprocess.CompletedProcess[str]:
         commands.append(args)
         normalized = normalize_compose_args(args)
+        if args[0] == "nvidia-smi":
+            return completed(args, stdout="RTX 4090, 24564\n")
         if args[0] == "powershell":
             return completed(args, stdout="simulated\n")
         if normalized[:3] == ["docker", "compose", "version"]:
@@ -395,8 +1159,10 @@ def test_status_payload_includes_owner_setup_guidance(tmp_path: Path, monkeypatc
     assert payload["owner_setup"]["headline"] == "Start Docker Desktop"
     assert [step["label"] for step in payload["owner_setup"]["steps"]] == [
         "Checking Docker",
-        "Checking GPU",
-        "Downloading runtime",
+        "Checking NVIDIA runtime",
+        "Validating HF access",
+        "Pulling image",
+        "Downloading model",
         "Warming model",
         "Claiming node",
         "Node live",
@@ -407,7 +1173,7 @@ def test_status_payload_includes_owner_setup_guidance(tmp_path: Path, monkeypatc
     assert "desktop_launcher" in payload
 
 
-def test_status_payload_marks_download_step_active_when_machine_is_ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_status_payload_marks_hf_validation_active_when_machine_is_ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     write_example_env(tmp_path)
 
     monkeypatch.setattr(installer_module.shutil, "which", lambda name: "docker" if name == "docker" else "nvidia-smi")
@@ -442,17 +1208,28 @@ def test_status_payload_marks_download_step_active_when_machine_is_ready(tmp_pat
     )
     payload = installer.status_payload()
 
-    assert payload["owner_setup"]["current_step"] == "downloading_runtime"
+    assert payload["owner_setup"]["current_step"] == "validating_hf_access"
+    assert payload["owner_setup"]["headline"] == "Ready for Quick Start"
     assert payload["owner_setup"]["steps"][0]["status"] == "complete"
     assert payload["owner_setup"]["steps"][1]["status"] == "complete"
     assert payload["owner_setup"]["steps"][2]["status"] == "active"
     recommendations = {item["key"]: item for item in payload["owner_setup"]["recommendations"]}
-    assert recommendations["startup_model"]["value"] == "meta-llama/Llama-3.1-8B-Instruct"
+    assert recommendations["nvidia_preset"]["value"] == "24-47 GB NVIDIA: Llama 8B + embeddings"
+    assert recommendations["hf_access"]["value"] == "Public access for CompendiumLabs/bge-large-en-v1.5-gguf"
+    assert "validates public Hugging Face access" in recommendations["hf_access"]["detail"]
+    assert recommendations["startup_model"]["label"] == "Bootstrap model"
+    assert recommendations["startup_model"]["value"] == "BAAI/bge-large-en-v1.5"
+    assert recommendations["background_target"]["value"] == "meta-llama/Llama-3.1-8B-Instruct"
     assert recommendations["concurrency"]["value"] == "2 active workloads"
     assert recommendations["thermal_profile"]["value"] == "Balanced"
     assert recommendations["region"]["value"] == "eu-se-1"
     assert recommendations["startup_mode"]["value"] == "Launch on sign-in"
+    assert recommendations["routing_lane"]["value"] == "Community quantized home"
+    assert recommendations["privacy_ceiling"]["value"] == "Standard"
+    assert recommendations["exactness_ceiling"]["value"] == "Not available"
+    assert recommendations["quantized_disclosure"]["value"] == "Required"
     assert recommendations["premium_eligibility"]["value"] == "Community capacity enabled"
+    assert payload["owner_setup"]["primary_action_label"] == "Start Quick Start"
 
 
 def test_status_payload_shows_model_cache_progress_during_warmup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -504,8 +1281,11 @@ def test_status_payload_shows_model_cache_progress_during_warmup(tmp_path: Path,
     payload = installer.status_payload()
 
     assert payload["owner_setup"]["current_step"] == "warming_model"
-    assert payload["owner_setup"]["eta_label"] == "First startup can take several minutes while the local model cache fills."
-    assert payload["owner_setup"]["steps"][3]["detail"].startswith("Caching meta-llama/Llama-3.1-8B-Instruct locally:")
+    assert payload["owner_setup"]["eta_label"] == (
+        "First startup is only warming the tiny bootstrap model. The larger owner target keeps warming in the background after the node is online."
+    )
+    assert payload["owner_setup"]["steps"][4]["detail"].startswith("Downloaded about 1.0 GB")
+    assert payload["owner_setup"]["steps"][5]["detail"].startswith("Finishing the local warm-up")
     assert payload["owner_setup"]["progress_percent"] > 50
 
 
@@ -522,13 +1302,14 @@ def test_wait_for_vllm_tracks_cache_progress_before_ready(tmp_path: Path, monkey
 
     responses = iter([FakeResponse(503), FakeResponse(200)])
 
-    monkeypatch.setattr(installer_module, "startup_model_artifact", lambda _model: object())
+    monkeypatch.setattr(installer_module, "startup_model_artifact", lambda _model, runtime_engine=None: object())
     monkeypatch.setattr(installer_module, "artifact_total_size_bytes", lambda _artifact: 1024**3)
     monkeypatch.setattr(installer_module, "directory_size_bytes", lambda _path: next(observed_sizes))
     monkeypatch.setattr(installer_module.httpx, "get", lambda _url, timeout=5.0: next(responses))
 
     installer.wait_for_vllm(model="meta-llama/Llama-3.1-8B-Instruct")
 
+    assert installer.state.stage == "warming_model"
     assert installer.state.stage_context["warm_progress_percent"] == 100
     assert any("First startup is downloading about 1.0 GB" in message for message in installer.state.logs)
     assert any("Model cache progress" in message for message in installer.state.logs)

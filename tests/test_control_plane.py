@@ -9,6 +9,7 @@ import pytest
 
 from node_agent.config import NodeAgentSettings
 from node_agent.control_plane import EdgeControlClient
+from node_agent.gguf_artifacts import find_gguf_artifact
 from node_agent.model_artifacts import find_model_artifact
 
 
@@ -113,6 +114,26 @@ class ClaimClient:
         )
 
 
+class ConsumedWithoutCredentialsClaimClient:
+    def __init__(self):
+        self.calls = []
+
+    def post(self, path, json):
+        self.calls.append((path, json))
+        if path == "/node-claims":
+            return DummyResponse(
+                {
+                    "claim_id": "claim_123",
+                    "claim_code": "ABC123",
+                    "approval_url": "https://ai.autonomousc.com/?claim_id=claim_123&claim_token=approval-token",
+                    "poll_token": "poll-token",
+                    "expires_at": "2099-01-01T00:00:00Z",
+                    "poll_interval_seconds": 0,
+                }
+            )
+        return DummyResponse({"status": "consumed", "expires_at": "2099-01-01T00:00:00Z"})
+
+
 def test_bootstrap_claims_node_via_browser_flow(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     credentials_path = tmp_path / "credentials" / "node.json"
     settings = build_settings(credentials_path, operator_token=None)
@@ -130,13 +151,38 @@ def test_bootstrap_claims_node_via_browser_flow(monkeypatch: pytest.MonkeyPatch,
     assert credentials_path.exists()
 
 
+def test_bootstrap_fails_fast_when_claim_is_consumed_without_credentials(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    credentials_path = tmp_path / "credentials" / "node.json"
+    settings = build_settings(credentials_path, operator_token=None)
+    client = EdgeControlClient(settings)
+    client.client = ConsumedWithoutCredentialsClaimClient()
+
+    monkeypatch.setattr("node_agent.control_plane.sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("node_agent.control_plane.sys.stdout.isatty", lambda: True)
+    monkeypatch.setattr("node_agent.control_plane.time.sleep", lambda _seconds: None)
+
+    with pytest.raises(RuntimeError, match="consumed but did not return credentials"):
+        client.bootstrap(interactive=True)
+
+
 def test_bootstrap_requires_interactive_terminal_without_credentials(tmp_path: Path):
     credentials_path = tmp_path / "credentials" / "node.json"
     settings = build_settings(credentials_path, operator_token=None)
     client = EdgeControlClient(settings)
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="Open the setup UI and run Quick Start"):
         client.bootstrap(interactive=False)
+
+
+def test_require_credentials_points_missing_nodes_back_to_setup_ui(tmp_path: Path):
+    credentials_path = tmp_path / "credentials" / "node.json"
+    settings = build_settings(credentials_path, operator_token=None)
+    client = EdgeControlClient(settings)
+
+    with pytest.raises(RuntimeError, match="Open the setup UI and run Quick Start"):
+        client.require_credentials()
 
 
 def test_attest_declares_attestation_provider(tmp_path: Path):
@@ -164,12 +210,18 @@ def test_attest_declares_attestation_provider(tmp_path: Path):
     assert persisted["status"] == "verified"
 
 
-def test_heartbeat_reports_current_model(tmp_path: Path):
+def test_heartbeat_reports_current_model(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     credentials_path = tmp_path / "credentials" / "node.json"
     settings = build_settings(credentials_path, operator_token="operator_token")
     settings.node_id = "node_123"
     settings.node_key = "key_123456789012345678901234"
+    settings.runtime_profile = "partner_vllm_trusted"
     settings.vllm_model = "meta-llama/Llama-3.1-8B-Instruct"
+    settings.docker_image = "sha256:" + ("a" * 64)
+    settings.gpu_name = "RTX 4090"
+    settings.gpu_memory_gb = 24.0
+    monkeypatch.setenv("CUDA_VERSION", "12.4")
+    monkeypatch.setenv("NVIDIA_DRIVER_VERSION", "555.42.02")
     client = EdgeControlClient(settings)
     recording_client = RecordingClient()
     client.client = recording_client
@@ -180,6 +232,47 @@ def test_heartbeat_reports_current_model(tmp_path: Path):
     assert path == "/nodes/heartbeat"
     assert payload["runtime"]["current_model"] == "meta-llama/Llama-3.1-8B-Instruct"
     assert payload["capabilities"]["max_concurrent_assignments"] == settings.max_concurrent_assignments
+    evidence = payload["runtime"]["runtime_evidence"]
+    assert evidence["digest"].startswith("sha256:")
+    assert evidence["signature"].startswith("sha256:")
+    assert evidence["signature_algorithm"] == "hmac-sha256"
+    assert evidence["bundle"]["runtime_profile"] == payload["runtime"]["runtime_profile"]
+    assert evidence["bundle"]["quality_class"] == "exact_audited"
+    assert evidence["bundle"]["exactness_class"] == "exact_audited"
+    assert evidence["bundle"]["runtime_image_digest"] == settings.docker_image
+    assert evidence["bundle"]["runtime_tuple_digest"] == payload["runtime"]["runtime_tuple_digest"]
+    assert evidence["bundle"]["startup_args"]["served_model"] == settings.vllm_model
+    assert evidence["bundle"]["driver_metadata"]["gpu_name"] == "RTX 4090"
+    assert evidence["bundle"]["driver_metadata"]["cuda_version"] == "12.4"
+    assert evidence["bundle"]["driver_metadata"]["driver_version"] == "555.42.02"
+
+
+def test_heartbeat_reports_home_heating_telemetry(tmp_path: Path):
+    credentials_path = tmp_path / "credentials" / "node.json"
+    settings = build_settings(credentials_path, operator_token="operator_token")
+    settings.node_id = "node_123"
+    settings.node_key = "key_123456789012345678901234"
+    settings.heat_demand = "medium"
+    settings.room_temp_c = 19.0
+    settings.target_temp_c = 21.0
+    settings.gpu_temp_c = 62.0
+    settings.power_watts = 280.0
+    settings.estimated_heat_output_watts = 275.0
+    settings.energy_price_kwh = 0.14
+    client = EdgeControlClient(settings)
+    recording_client = RecordingClient()
+    client.client = recording_client
+
+    client.heartbeat(queue_depth=0, active_assignments=0)
+
+    _path, payload = recording_client.calls[0]
+    assert payload["capabilities"]["heat_demand"] == "medium"
+    assert payload["capabilities"]["room_temp_c"] == 19.0
+    assert payload["capabilities"]["target_temp_c"] == 21.0
+    assert payload["capabilities"]["gpu_temp_c"] == 62.0
+    assert payload["capabilities"]["power_watts"] == 280.0
+    assert payload["capabilities"]["estimated_heat_output_watts"] == 275.0
+    assert payload["capabilities"]["energy_price_kwh"] == 0.14
 
 
 def test_pull_assignment_tracks_control_plane_queue_depth(tmp_path: Path):
@@ -199,6 +292,7 @@ def test_pull_assignment_tracks_control_plane_queue_depth(tmp_path: Path):
 def test_node_request_payload_uses_bundled_release_metadata_for_the_primary_model(tmp_path: Path):
     credentials_path = tmp_path / "credentials" / "node.json"
     settings = build_settings(credentials_path, operator_token="operator_token")
+    settings.runtime_profile = "partner_vllm_trusted"
     settings.vllm_model = "meta-llama/Llama-3.1-8B-Instruct"
     client = EdgeControlClient(settings)
 
@@ -206,8 +300,86 @@ def test_node_request_payload_uses_bundled_release_metadata_for_the_primary_mode
     artifact = find_model_artifact("meta-llama/Llama-3.1-8B-Instruct", "responses")
 
     assert artifact is not None
+    assert payload["runtime"]["routing_lane"] == "trusted_exact_partner"
+    assert payload["runtime"]["routing_lane_label"] == "Trusted exact partner"
+    assert payload["runtime"]["routing_lane_allowed_privacy_tiers"] == ["standard", "confidential", "restricted"]
+    assert payload["runtime"]["routing_lane_allowed_result_guarantees"] == [
+        "community_best_effort",
+        "exact_model_audited",
+    ]
+    assert payload["runtime"]["routing_lane_allowed_trust_requirements"] == [
+        "untrusted_allowed",
+        "trusted_only",
+    ]
+    assert payload["runtime"]["max_privacy_tier"] == "restricted"
+    assert payload["runtime"]["exact_model_guarantee"] is True
+    assert payload["runtime"]["quantized_output_disclosure_required"] is False
+    assert payload["runtime"]["quality_class"] == "exact_audited"
+    assert payload["runtime"]["exactness_class"] == "exact_audited"
     assert payload["runtime"]["model_manifest_digest"] == artifact.model_manifest_digest
     assert payload["runtime"]["tokenizer_digest"] == artifact.tokenizer_digest
+
+
+def test_node_request_payload_marks_vast_as_temporary_burst_capacity(tmp_path: Path):
+    credentials_path = tmp_path / "credentials" / "node.json"
+    settings = build_settings(credentials_path, operator_token="operator_token")
+    settings.runtime_profile = "vast_vllm_safetensors"
+    settings.capacity_class = "elastic_burst"
+    settings.temporary_node = True
+    settings.burst_provider = "vast_ai"
+    settings.burst_lease_id = "lease_123"
+    settings.burst_lease_phase = "accept_burst_work"
+    settings.burst_cost_ceiling_usd = 0.18
+    client = EdgeControlClient(settings)
+
+    payload = client._node_request_payload()
+
+    assert payload["runtime"]["capacity_class"] == "elastic_burst"
+    assert payload["runtime"]["routing_lane"] == "elastic_exact_vast"
+    assert payload["runtime"]["trusted_eligibility"] == "runtime_and_model_digest_match"
+    assert payload["runtime"]["quality_class"] == "exact_audited"
+    assert payload["runtime"]["exactness_class"] == "exact_audited"
+    assert payload["runtime"]["temporary_node"] is True
+    assert payload["runtime"]["burst_provider"] == "vast_ai"
+    assert payload["runtime"]["burst_lease_id"] == "lease_123"
+    assert payload["runtime"]["burst_lease_phase"] == "accept_burst_work"
+    assert payload["runtime"]["burst_cost_ceiling_usd"] == 0.18
+    assert payload["runtime"]["burst_lifecycle"] == [
+        "provision",
+        "warm_model",
+        "register_temporary_node",
+        "accept_burst_work",
+        "drain",
+        "terminate",
+    ]
+
+
+def test_node_request_payload_uses_gguf_contract_for_home_llama_cpp(tmp_path: Path):
+    credentials_path = tmp_path / "credentials" / "node.json"
+    settings = build_settings(credentials_path, operator_token="operator_token")
+    settings.runtime_profile = "home_llama_cpp_gguf"
+    client = EdgeControlClient(settings)
+
+    payload = client._node_request_payload()
+    artifact = find_gguf_artifact("meta-llama/Llama-3.1-8B-Instruct", "responses")
+
+    assert artifact is not None
+    assert "model_manifest_digest" not in payload["runtime"]
+    assert "tokenizer_digest" not in payload["runtime"]
+    assert payload["runtime"]["routing_lane"] == "community_quantized_home"
+    assert payload["runtime"]["routing_lane_policy_summary"].startswith(
+        "Routes home llama.cpp GGUF capacity into the community lane only."
+    )
+    assert payload["runtime"]["max_privacy_tier"] == "standard"
+    assert payload["runtime"]["exact_model_guarantee"] is False
+    assert payload["runtime"]["quantized_output_disclosure_required"] is True
+    assert payload["runtime"]["quality_class"] == "quantized_economy"
+    assert payload["runtime"]["exactness_class"] == "quantized_best_effort"
+    assert payload["runtime"]["artifact_manifest_type"] == "gguf_hf_file"
+    assert payload["runtime"]["gguf_artifact"]["file_digest"] == artifact.file_digest
+    assert payload["runtime"]["gguf_artifact"]["quality_class"] == "quantized_economy"
+    assert payload["runtime"]["gguf_artifact"]["exactness_class"] == "quantized_best_effort"
+    assert payload["runtime"]["gguf_artifact"]["quantization_type"] == "Q4_K_M"
 
 
 class DashboardClient:

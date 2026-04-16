@@ -11,13 +11,55 @@ import httpx
 from .autopilot import AutopilotController
 from .config import NodeAgentSettings
 from .control_plane import EdgeControlClient
-from .model_artifacts import resolved_model_manifest_digest, resolved_tokenizer_digest
+from .gguf_artifacts import resolved_gguf_artifact_contract
+from .inference_engine import VLLM_INFERENCE_ENGINE
 from .runtime import VLLMRuntime
+from .runtime_tuple import resolved_runtime_tuple
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 LOGGER = logging.getLogger("autonomousc-node-agent")
 assignment_progress_keepalive_seconds = 30.0
 supported_operations = frozenset({"responses", "embeddings"})
+
+
+def resolved_inference_engine_for_settings(settings: object) -> str:
+    value = getattr(settings, "resolved_inference_engine", None)
+    if isinstance(value, str) and value:
+        return value
+    value = getattr(settings, "inference_engine", None)
+    if isinstance(value, str) and value:
+        return value
+    return VLLM_INFERENCE_ENGINE
+
+
+def resolved_runtime_profile_for_settings(settings: object) -> str | None:
+    value = getattr(settings, "resolved_runtime_profile_id", None)
+    if isinstance(value, str) and value:
+        return value
+    value = getattr(settings, "runtime_profile", None)
+    if isinstance(value, str) and value and value != "auto":
+        return value
+    return None
+
+
+def settings_support_trusted_assignments(settings: object) -> bool:
+    value = getattr(settings, "supports_trusted_assignments", None)
+    if isinstance(value, bool):
+        return value
+    return resolved_inference_engine_for_settings(settings) == VLLM_INFERENCE_ENGINE
+
+
+def resolved_inference_base_url_for_settings(settings: object) -> str:
+    value = getattr(settings, "resolved_inference_base_url", None)
+    if isinstance(value, str) and value:
+        return value
+    value = getattr(settings, "inference_base_url", None)
+    if isinstance(value, str) and value:
+        return value
+    value = getattr(settings, "vllm_base_url", None)
+    if isinstance(value, str) and value:
+        return value
+    return "http://inference-runtime:8000"
 
 
 def is_transient_http_error(error: Exception) -> bool:
@@ -165,33 +207,70 @@ def validate_assignment_policy(control: EdgeControlClient, assignment: object) -
     if privacy_tier == "confidential" and settings.trust_tier == "standard":
         raise ValueError("confidential assignment rejected because the node trust tier is only standard")
 
+    runtime_tuple = resolved_runtime_tuple(settings, assignment_model, assignment_operation)
     node_trust_requirement = getattr(assignment, "node_trust_requirement", None)
     if node_trust_requirement == "trusted_only":
+        if not settings_support_trusted_assignments(settings):
+            raise ValueError(
+                "trusted assignment rejected because the current runtime profile is not trusted-work capable"
+            )
         expected_runtime_image_digest = getattr(assignment, "expected_runtime_image_digest", None)
         if isinstance(expected_runtime_image_digest, str) and expected_runtime_image_digest:
-            if settings.docker_image != expected_runtime_image_digest:
+            if runtime_tuple.runtime_image_digest != expected_runtime_image_digest:
                 raise ValueError(
                     "trusted assignment rejected because the local runtime image digest "
-                    f"{settings.docker_image!r} does not match expected {expected_runtime_image_digest!r}"
+                    f"{runtime_tuple.runtime_image_digest!r} does not match expected {expected_runtime_image_digest!r}"
                 )
         expected_model_manifest_digest = getattr(assignment, "expected_model_manifest_digest", None)
         if isinstance(expected_model_manifest_digest, str) and expected_model_manifest_digest:
-            declared_model_manifest_digest = resolved_model_manifest_digest(
-                settings, assignment_model, assignment_operation
-            )
-            if declared_model_manifest_digest != expected_model_manifest_digest:
+            if runtime_tuple.model_manifest_digest != expected_model_manifest_digest:
                 raise ValueError(
                     "trusted assignment rejected because the local model manifest digest "
-                    f"{declared_model_manifest_digest!r} does not match expected {expected_model_manifest_digest!r}"
+                    f"{runtime_tuple.model_manifest_digest!r} does not match expected {expected_model_manifest_digest!r}"
                 )
         expected_tokenizer_digest = getattr(assignment, "expected_tokenizer_digest", None)
         if isinstance(expected_tokenizer_digest, str) and expected_tokenizer_digest:
-            declared_tokenizer_digest = resolved_tokenizer_digest(settings, assignment_model, assignment_operation)
-            if declared_tokenizer_digest != expected_tokenizer_digest:
+            if runtime_tuple.tokenizer_digest != expected_tokenizer_digest:
                 raise ValueError(
                     "trusted assignment rejected because the local tokenizer digest "
-                    f"{declared_tokenizer_digest!r} does not match expected {expected_tokenizer_digest!r}"
+                    f"{runtime_tuple.tokenizer_digest!r} does not match expected {expected_tokenizer_digest!r}"
                 )
+        expected_chat_template_digest = getattr(assignment, "expected_chat_template_digest", None)
+        if isinstance(expected_chat_template_digest, str) and expected_chat_template_digest:
+            if runtime_tuple.chat_template_digest != expected_chat_template_digest:
+                raise ValueError(
+                    "trusted assignment rejected because the local chat template digest "
+                    f"{runtime_tuple.chat_template_digest!r} does not match expected {expected_chat_template_digest!r}"
+                )
+        expected_effective_context_tokens = getattr(assignment, "expected_effective_context_tokens", None)
+        if isinstance(expected_effective_context_tokens, int) and expected_effective_context_tokens > 0:
+            if runtime_tuple.effective_context_tokens != expected_effective_context_tokens:
+                raise ValueError(
+                    "trusted assignment rejected because the local effective context size "
+                    f"{runtime_tuple.effective_context_tokens!r} does not match expected "
+                    f"{expected_effective_context_tokens!r}"
+                )
+        expected_runtime_tuple_digest = getattr(assignment, "expected_runtime_tuple_digest", None)
+        if isinstance(expected_runtime_tuple_digest, str) and expected_runtime_tuple_digest:
+            if runtime_tuple.runtime_tuple_digest != expected_runtime_tuple_digest:
+                raise ValueError(
+                    "trusted assignment rejected because the local runtime tuple digest "
+                    f"{runtime_tuple.runtime_tuple_digest!r} does not match expected {expected_runtime_tuple_digest!r}"
+                )
+    expected_gguf_file_digest = getattr(assignment, "expected_gguf_file_digest", None)
+    if isinstance(expected_gguf_file_digest, str) and expected_gguf_file_digest:
+        if runtime_tuple.gguf_file_digest != expected_gguf_file_digest:
+            raise ValueError(
+                "GGUF assignment rejected because the local GGUF file digest "
+                f"{runtime_tuple.gguf_file_digest!r} does not match expected {expected_gguf_file_digest!r}"
+            )
+    expected_quantization_type = getattr(assignment, "expected_quantization_type", None)
+    if isinstance(expected_quantization_type, str) and expected_quantization_type:
+        if runtime_tuple.quantization_type != expected_quantization_type:
+            raise ValueError(
+                "GGUF assignment rejected because the local quantization type "
+                f"{runtime_tuple.quantization_type!r} does not match expected {expected_quantization_type!r}"
+            )
 
 
 def validate_assignment_items(assignment: object, items: object) -> list[dict[str, object]]:
@@ -288,18 +367,24 @@ def build_runtime_receipt(
 ) -> dict[str, object]:
     assignment_model = getattr(assignment, "model", None)
     assignment_operation = getattr(assignment, "operation", None)
-    return {
+    runtime_tuple = resolved_runtime_tuple(control.settings, assignment_model, assignment_operation)
+    gguf_artifact = resolved_gguf_artifact_contract(control.settings, assignment_model, assignment_operation)
+    receipt: dict[str, object] = {
         "assignment_nonce": getattr(assignment, "assignment_nonce", ""),
         "declared_model": assignment_model or "",
-        "declared_runtime_image_digest": control.settings.docker_image,
-        "declared_model_manifest_digest": resolved_model_manifest_digest(
-            control.settings, assignment_model, assignment_operation
-        ),
-        "declared_tokenizer_digest": resolved_tokenizer_digest(
-            control.settings, assignment_model, assignment_operation
-        ),
+        "declared_runtime_profile": resolved_runtime_profile_for_settings(control.settings),
+        "declared_runtime_engine": resolved_inference_engine_for_settings(control.settings),
+        "declared_runtime_image_digest": runtime_tuple.runtime_image_digest,
+        "declared_model_manifest_digest": runtime_tuple.model_manifest_digest,
+        "declared_tokenizer_digest": runtime_tuple.tokenizer_digest,
+        "declared_chat_template_digest": runtime_tuple.chat_template_digest,
+        "declared_effective_context_tokens": runtime_tuple.effective_context_tokens,
+        "declared_runtime_tuple_digest": runtime_tuple.runtime_tuple_digest,
         "provider_usage_summary": summarize_provider_usage(item_results),
     }
+    if gguf_artifact is not None:
+        receipt["declared_gguf_artifact"] = gguf_artifact.payload()
+    return receipt
 
 
 def complete_assignment_with_retry(
@@ -460,11 +545,13 @@ def run_worker_loop(control: EdgeControlClient, runtime: VLLMRuntime, attest_on_
                 )
                 control.write_recovery_note(
                     "This node lost control-plane access because its credentials were rejected or revoked. "
-                    "Run `node-agent bootstrap` again from an interactive terminal to reclaim it."
+                    "Open the setup UI and run Quick Start to re-approve this machine. "
+                    "Use `node-agent bootstrap` only for direct terminal debugging."
                 )
                 control.clear_credentials()
                 raise RuntimeError(
-                    "Node credentials were rejected by the control plane. Run `node-agent bootstrap` again to reclaim this node."
+                    "Node credentials were rejected by the control plane. "
+                    "Open the setup UI and run Quick Start to reclaim this node."
                 ) from error
             LOGGER.exception("node agent loop failed")
             time.sleep(control.settings.poll_interval_seconds)
@@ -480,7 +567,10 @@ def command_bootstrap() -> int:
 def command_run() -> int:
     settings = NodeAgentSettings()
     control = EdgeControlClient(settings)
-    runtime = VLLMRuntime(settings.vllm_base_url)
+    runtime = VLLMRuntime(
+        resolved_inference_base_url_for_settings(settings),
+        engine=resolved_inference_engine_for_settings(settings),
+    )
     run_worker_loop(control, runtime, attest_on_start=True)
     return 0
 
@@ -488,7 +578,10 @@ def command_run() -> int:
 def command_default() -> int:
     settings = NodeAgentSettings()
     control = EdgeControlClient(settings)
-    runtime = VLLMRuntime(settings.vllm_base_url)
+    runtime = VLLMRuntime(
+        resolved_inference_base_url_for_settings(settings),
+        engine=resolved_inference_engine_for_settings(settings),
+    )
 
     bootstrapped_now = False
     if not control.has_credentials():

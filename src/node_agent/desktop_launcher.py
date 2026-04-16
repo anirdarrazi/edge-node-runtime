@@ -46,7 +46,7 @@ class DesktopLauncherManager:
         launcher_path: Path | None = None,
         python_executable: str | None = None,
         desktop_dir: Path | None = None,
-        shortcut_name: str = "AUTONOMOUSc Edge Node.lnk",
+        shortcut_name: str = "AUTONOMOUSc Edge Node App.lnk",
     ) -> None:
         self.runtime_dir = runtime_dir.resolve()
         self.command_runner = command_runner
@@ -113,7 +113,7 @@ class DesktopLauncherManager:
                 "$ErrorActionPreference = 'Stop'",
                 f"$env:{RUNTIME_DIR_ENV} = '{powershell_literal(str(self.runtime_dir))}'",
                 f"Set-Location -LiteralPath '{powershell_literal(str(self.runtime_dir))}'",
-                f"& '{powershell_literal(self.python_executable)}' '{powershell_literal(str(self.launcher_path))}'",
+                f"& '{powershell_literal(self.python_executable)}' '{powershell_literal(str(self.launcher_path))}' start --open",
                 "",
             ]
         )
@@ -137,7 +137,7 @@ class DesktopLauncherManager:
                 f"$Shortcut.Arguments = '{powershell_literal(arguments)}'",
                 f"$Shortcut.WorkingDirectory = '{powershell_literal(str(self.runtime_dir))}'",
                 "$Shortcut.IconLocation = 'shell32.dll,220'",
-                "$Shortcut.Description = 'Open AUTONOMOUSc Edge Node'",
+                "$Shortcut.Description = 'Open AUTONOMOUSc Edge Node App'",
                 "$Shortcut.Save()",
             ]
         )

@@ -11,10 +11,12 @@ from pathlib import Path
 from typing import Any
 
 from .config import NodeAgentSettings
+from .runtime_profiles import HOME_EMBEDDINGS_LLAMA_CPP_PROFILE, HOME_LLAMA_CPP_GGUF_PROFILE, LLAMA_CPP_INFERENCE_ENGINE
 
 DEFAULT_RESPONSE_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-large-en-v1.5"
 AUTOPILOT_STATE_VERSION = 1
+HEAT_DEMAND_LEVELS = {"none", "low", "medium", "high"}
 
 
 def now_iso() -> str:
@@ -52,6 +54,18 @@ def settings_float(settings: object, name: str, fallback: float) -> float:
     return safe_float(settings_value(settings, name, fallback), fallback)
 
 
+def settings_optional_float(settings: object, name: str) -> float | None:
+    value = getattr(settings, name, None)
+    if value is None or str(value).strip() == "":
+        return None
+    return safe_float(value, 0.0)
+
+
+def normalize_heat_demand(value: Any) -> str:
+    normalized = str(value or "none").strip().lower()
+    return normalized if normalized in HEAT_DEMAND_LEVELS else "none"
+
+
 def clamp(value: float, lower: float, upper: float) -> float:
     return min(upper, max(lower, value))
 
@@ -63,6 +77,11 @@ def configured_models(settings: object) -> list[str]:
 
 
 def operations_for_model(model: str, settings: object) -> list[str]:
+    runtime_profile = getattr(settings, "resolved_runtime_profile", None)
+    supported_apis = getattr(runtime_profile, "supported_apis", None)
+    default_model = getattr(runtime_profile, "default_model", None)
+    if isinstance(supported_apis, (list, tuple)) and model == default_model:
+        return [str(api) for api in supported_apis if str(api) in {"responses", "embeddings"}] or ["responses"]
     if model == DEFAULT_EMBEDDING_MODEL and DEFAULT_RESPONSE_MODEL not in configured_models(settings):
         return ["embeddings"]
     if model == DEFAULT_EMBEDDING_MODEL:
@@ -80,6 +99,9 @@ class AutopilotSignals:
     queue_depth: int = 0
     active_assignments: int = 0
     gpu_memory_pressure: float | None = None
+    gpu_temp_c: float | None = None
+    power_watts: float | None = None
+    estimated_heat_output_watts: float | None = None
     last_failure_code: str | None = None
     last_failure_retryable: bool | None = None
     last_observed_at: str | None = None
@@ -146,6 +168,21 @@ def state_from_payload(payload: dict[str, Any], settings: NodeAgentSettings) -> 
             gpu_memory_pressure=(
                 clamp(safe_float(signals_payload.get("gpu_memory_pressure"), 0.0), 0.0, 1.0)
                 if signals_payload.get("gpu_memory_pressure") is not None
+                else None
+            ),
+            gpu_temp_c=(
+                safe_float(signals_payload.get("gpu_temp_c"), 0.0)
+                if signals_payload.get("gpu_temp_c") is not None
+                else None
+            ),
+            power_watts=(
+                safe_float(signals_payload.get("power_watts"), 0.0)
+                if signals_payload.get("power_watts") is not None
+                else None
+            ),
+            estimated_heat_output_watts=(
+                safe_float(signals_payload.get("estimated_heat_output_watts"), 0.0)
+                if signals_payload.get("estimated_heat_output_watts") is not None
                 else None
             ),
             last_failure_code=(
@@ -260,7 +297,8 @@ class AutopilotController:
             )
         except (OSError, subprocess.SubprocessError):
             return None
-        first_line = completed.stdout.splitlines()[0].strip() if completed.stdout.splitlines() else ""
+        output_lines = completed.stdout.splitlines()
+        first_line = output_lines[0].strip() if output_lines else ""
         if "," not in first_line:
             return None
         used_raw, total_raw = [part.strip() for part in first_line.split(",", 1)]
@@ -270,13 +308,50 @@ class AutopilotController:
             return None
         return clamp(used / total, 0.0, 1.0)
 
+    def sample_gpu_thermal_metrics(self) -> dict[str, float] | None:
+        if shutil.which("nvidia-smi") is None:
+            return None
+        try:
+            completed = subprocess.run(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=temperature.gpu,power.draw",
+                    "--format=csv,noheader,nounits",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=3.0,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        first_line = completed.stdout.splitlines()[0].strip() if completed.stdout.splitlines() else ""
+        if "," not in first_line:
+            return None
+        temp_raw, power_raw = [part.strip() for part in first_line.split(",", 1)]
+        gpu_temp_c = safe_float(temp_raw, 0.0)
+        power_watts = max(0.0, safe_float(power_raw, 0.0))
+        return {
+            "gpu_temp_c": gpu_temp_c,
+            "power_watts": power_watts,
+            "estimated_heat_output_watts": power_watts,
+        }
+
+    def refresh_gpu_signals(self) -> None:
+        sampled_pressure = self.sample_gpu_memory_pressure()
+        if sampled_pressure is not None:
+            self.state.signals.gpu_memory_pressure = sampled_pressure
+        sampled_thermal = self.sample_gpu_thermal_metrics()
+        if sampled_thermal is not None:
+            self.state.signals.gpu_temp_c = sampled_thermal["gpu_temp_c"]
+            self.state.signals.power_watts = sampled_thermal["power_watts"]
+            self.state.signals.estimated_heat_output_watts = sampled_thermal["estimated_heat_output_watts"]
+
     def observe_idle(self, *, queue_depth: int = 0, active_assignments: int = 0) -> None:
         signals = self.state.signals
         signals.queue_depth = max(0, queue_depth)
         signals.active_assignments = max(0, active_assignments)
-        sampled_pressure = self.sample_gpu_memory_pressure()
-        if sampled_pressure is not None:
-            signals.gpu_memory_pressure = sampled_pressure
+        self.refresh_gpu_signals()
         signals.last_observed_at = now_iso()
         self.evaluate()
         self.save()
@@ -301,9 +376,7 @@ class AutopilotController:
         signals.last_failure_code = None
         signals.last_failure_retryable = None
         self._refresh_failure_rate()
-        sampled_pressure = self.sample_gpu_memory_pressure()
-        if sampled_pressure is not None:
-            signals.gpu_memory_pressure = sampled_pressure
+        self.refresh_gpu_signals()
         signals.last_observed_at = now_iso()
         self.evaluate()
         self.save()
@@ -323,9 +396,7 @@ class AutopilotController:
         signals.queue_depth = max(0, queue_depth)
         signals.active_assignments = max(0, active_assignments)
         self._refresh_failure_rate()
-        sampled_pressure = self.sample_gpu_memory_pressure()
-        if sampled_pressure is not None:
-            signals.gpu_memory_pressure = sampled_pressure
+        self.refresh_gpu_signals()
         signals.last_observed_at = now_iso()
         self.evaluate()
         self.save()
@@ -393,6 +464,14 @@ class AutopilotController:
 
         operations = operations_for_model(target_model, self.settings)
         pending_restart = target_model != configured_model
+        runtime_profile = getattr(self.settings, "resolved_runtime_profile", None)
+        runtime_profile_id = getattr(runtime_profile, "id", None)
+        if getattr(runtime_profile, "inference_engine", None) == LLAMA_CPP_INFERENCE_ENGINE:
+            runtime_profile_id = (
+                HOME_EMBEDDINGS_LLAMA_CPP_PROFILE
+                if target_model == DEFAULT_EMBEDDING_MODEL
+                else HOME_LLAMA_CPP_GGUF_PROFILE
+            )
         env_updates = {
             "SETUP_PROFILE": profile,
             "MAX_CONCURRENT_ASSIGNMENTS": str(concurrency),
@@ -400,6 +479,8 @@ class AutopilotController:
             "SUPPORTED_MODELS": supported_models,
             "VLLM_MODEL": target_model,
         }
+        if isinstance(runtime_profile_id, str) and runtime_profile_id:
+            env_updates["RUNTIME_PROFILE"] = runtime_profile_id
         recommendation = AutopilotRecommendation(
             setup_profile=profile,
             max_concurrent_assignments=concurrency,
@@ -432,7 +513,8 @@ class AutopilotController:
 
     def capabilities_payload(self) -> dict[str, Any]:
         recommendation = self.state.recommendation
-        return {
+        signals = self.state.signals
+        payload: dict[str, Any] = {
             "supported_models": [model.strip() for model in recommendation.supported_models.split(",") if model.strip()],
             "operations": recommendation.operations,
             "gpu_name": settings_str(self.settings, "gpu_name", "Generic GPU"),
@@ -441,7 +523,25 @@ class AutopilotController:
             "max_batch_tokens": settings_int(self.settings, "max_batch_tokens", 50000),
             "max_concurrent_assignments": recommendation.max_concurrent_assignments,
             "thermal_headroom": recommendation.thermal_headroom,
+            "heat_demand": normalize_heat_demand(settings_str(self.settings, "heat_demand", "none")),
         }
+        configured_heat_output_watts = settings_optional_float(self.settings, "estimated_heat_output_watts")
+        optional_values = {
+            "room_temp_c": settings_optional_float(self.settings, "room_temp_c"),
+            "target_temp_c": settings_optional_float(self.settings, "target_temp_c"),
+            "gpu_temp_c": signals.gpu_temp_c if signals.gpu_temp_c is not None else settings_optional_float(self.settings, "gpu_temp_c"),
+            "power_watts": signals.power_watts if signals.power_watts is not None else settings_optional_float(self.settings, "power_watts"),
+            "estimated_heat_output_watts": configured_heat_output_watts
+            if configured_heat_output_watts is not None
+            else signals.estimated_heat_output_watts,
+            "energy_price_kwh": settings_optional_float(self.settings, "energy_price_kwh"),
+        }
+        if optional_values["estimated_heat_output_watts"] is None:
+            optional_values["estimated_heat_output_watts"] = optional_values["power_watts"]
+        for key, value in optional_values.items():
+            if value is not None:
+                payload[key] = value
+        return payload
 
     def runtime_payload(self) -> dict[str, Any]:
         payload = asdict(self.state)
