@@ -1400,8 +1400,10 @@ class GuidedInstaller:
         region_value, region_reason = infer_node_region()
         attestation_provider, attestation_reason = detect_attestation_provider(self.command_runner, self.runtime_dir)
 
-        gpu_name = resolve_gpu_name(source.get("GPU_NAME"), gpu.get("name"), default_settings.gpu_name)
-        gpu_memory_gb = resolve_gpu_memory(source.get("GPU_MEMORY_GB"), gpu.get("memory_gb"), default_settings.gpu_memory_gb)
+        configured_gpu_name = first_nonempty(source.get("GPU_NAME"), default_settings.gpu_name)
+        configured_gpu_memory = _safe_float(source.get("GPU_MEMORY_GB"), default_settings.gpu_memory_gb)
+        gpu_name = resolve_gpu_name(None, gpu.get("name"), configured_gpu_name)
+        gpu_memory_gb = resolve_gpu_memory(None, gpu.get("memory_gb"), configured_gpu_memory)
         numeric_gpu_memory = _safe_float(gpu_memory_gb, default_settings.gpu_memory_gb)
         support_preset = nvidia_support_preset(numeric_gpu_memory)
         inferred_startup_model = recommended_startup_model(numeric_gpu_memory)
@@ -2782,11 +2784,16 @@ class GuidedInstaller:
 
         config_gpu_name = str(config.get("gpu_name", "")).strip() or None
         config_gpu_memory = str(config.get("gpu_memory_gb", "")).strip() or None
-        gpu_name = resolve_gpu_name(config_gpu_name or current.get("GPU_NAME"), detected_gpu.get("name"), defaults.gpu_name)
-        gpu_memory = resolve_gpu_memory(
-            config_gpu_memory or persisted.get("GPU_MEMORY_GB") or current.get("GPU_MEMORY_GB"),
-            detected_gpu.get("memory_gb"),
+        configured_gpu_name = first_nonempty(current.get("GPU_NAME"), defaults.gpu_name)
+        configured_gpu_memory = _safe_float(
+            first_nonempty(persisted.get("GPU_MEMORY_GB"), current.get("GPU_MEMORY_GB")),
             defaults.gpu_memory_gb,
+        )
+        gpu_name = resolve_gpu_name(config_gpu_name, detected_gpu.get("name"), configured_gpu_name)
+        gpu_memory = resolve_gpu_memory(
+            config_gpu_memory,
+            detected_gpu.get("memory_gb"),
+            configured_gpu_memory,
         )
         numeric_gpu_memory = _safe_float(gpu_memory, defaults.gpu_memory_gb)
 

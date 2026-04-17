@@ -263,6 +263,34 @@ def test_build_env_uses_quickstart_profile_defaults(tmp_path: Path, monkeypatch:
     assert env_values["AUTOPILOT_STATE_PATH"] == installer_module.COMPOSE_RUNTIME_AUTOPILOT_STATE_PATH
 
 
+def test_build_env_prefers_detected_gpu_over_stale_saved_gpu(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_example_env(tmp_path)
+    monkeypatch.setattr(installer_module.shutil, "which", lambda name: "nvidia-smi" if name == "nvidia-smi" else None)
+
+    def runner(args: list[str], _cwd: Path) -> subprocess.CompletedProcess[str]:
+        if args[0] == "nvidia-smi":
+            return completed(args, stdout="NVIDIA GeForce RTX 5060 Ti, 16276\n")
+        if args[0] == "powershell":
+            return completed(args, stdout="simulated\n")
+        raise AssertionError(f"Unexpected command: {args}")
+
+    installer = installer_module.GuidedInstaller(runtime_dir=tmp_path, command_runner=runner)
+    installer.write_runtime_settings(
+        {
+            "GPU_NAME": "RTX 4090",
+            "GPU_MEMORY_GB": "24.0",
+        }
+    )
+
+    env_values = installer.build_env({"setup_mode": "quickstart", "node_label": "Owner Node"})
+
+    assert env_values["GPU_NAME"] == "NVIDIA GeForce RTX 5060 Ti"
+    assert env_values["GPU_MEMORY_GB"] == "15.9"
+    assert env_values["NODE_LABEL"] == "Owner Node"
+
+
 def test_build_env_uses_host_paths_for_single_container_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     write_example_env(tmp_path)
     monkeypatch.setattr(installer_module.shutil, "which", lambda name: "nvidia-smi" if name == "nvidia-smi" else None)
