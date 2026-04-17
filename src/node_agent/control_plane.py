@@ -3,10 +3,13 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import sys
 import time
 from pathlib import Path
 from typing import Any
+
+import httpx
 
 from .config import AssignmentEnvelope, NodeAgentSettings, NodeClaimPollResult, NodeClaimSession
 from .control_plane_bootstrap import NodeBootstrapOrchestrator
@@ -362,13 +365,58 @@ class EdgeControlClient:
         item_results: list[dict[str, Any]],
         runtime_receipt: dict[str, Any] | None = None,
     ) -> None:
+        node_id, node_key = self.require_credentials()
+        result_payload = {"item_results": item_results}
+        encrypted_artifact = encrypt_artifact(result_payload)
+        try:
+            artifact = self.transport.post_json(
+                f"/nodes/assignments/{assignment_id}/result-artifact/upload-url",
+                {
+                    "node_id": node_id,
+                    "node_key": node_key,
+                    "ciphertext_sha256": encrypted_artifact["ciphertext_sha256"],
+                    "plaintext_sha256": encrypted_artifact["plaintext_sha256"],
+                    "content_length_bytes": len(encrypted_artifact["ciphertext"]),
+                },
+            )
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code not in {404, 405, 501}:
+                raise
+            artifact = self.transport.post_content(
+                f"/nodes/assignments/{assignment_id}/result-artifact",
+                encrypted_artifact["ciphertext"],
+                headers={
+                    "content-type": "application/octet-stream",
+                    "x-node-id": node_id,
+                    "x-node-key": node_key,
+                    "x-artifact-ciphertext-sha256": encrypted_artifact["ciphertext_sha256"],
+                    "x-artifact-plaintext-sha256": encrypted_artifact["plaintext_sha256"],
+                    "x-artifact-key-b64": encrypted_artifact["encryption"]["key_b64"],
+                    "x-artifact-iv-b64": encrypted_artifact["encryption"]["iv_b64"],
+                },
+            )
+
+        upload_url = artifact.get("upload_url")
+        upload_headers = artifact.get("upload_headers")
+        if isinstance(upload_url, str) and isinstance(upload_headers, dict):
+            self.transport.put_content(
+                upload_url,
+                encrypted_artifact["ciphertext"],
+                headers={str(key): str(value) for key, value in upload_headers.items()},
+            )
+
         self.transport.post_json(
             f"/nodes/assignments/{assignment_id}/complete",
             {
-                "node_id": self.settings.node_id,
-                "node_key": self.settings.node_key,
-                "item_results": item_results,
+                "node_id": node_id,
+                "node_key": node_key,
                 "runtime_receipt": runtime_receipt,
+                "result_artifact": {
+                    "result_artifact_key": str(artifact["result_artifact_key"]),
+                    "result_artifact_encryption": artifact.get(
+                        "result_artifact_encryption", encrypted_artifact["encryption"]
+                    ),
+                },
             },
         )
 
@@ -404,3 +452,25 @@ def decrypt_artifact(payload: bytes, encryption: dict[str, str]) -> dict[str, An
     aes = AESGCM(key)
     decrypted = aes.decrypt(iv, payload, None)
     return json.loads(decrypted.decode("utf-8"))
+
+
+def encrypt_artifact(payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    except ImportError as exc:  # pragma: no cover - packaged in container when needed
+        raise RuntimeError("cryptography is required for artifact encryption") from exc
+
+    plaintext = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    key = AESGCM.generate_key(bit_length=256)
+    iv = os.urandom(12)
+    aes = AESGCM(key)
+    ciphertext = aes.encrypt(iv, plaintext, None)
+    return {
+        "ciphertext": ciphertext,
+        "encryption": {
+            "key_b64": base64.b64encode(key).decode("ascii"),
+            "iv_b64": base64.b64encode(iv).decode("ascii"),
+        },
+        "plaintext_sha256": hashlib.sha256(plaintext).hexdigest(),
+        "ciphertext_sha256": hashlib.sha256(ciphertext).hexdigest(),
+    }

@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from node_agent.config import NodeAgentSettings
-from node_agent.control_plane import EdgeControlClient
+from node_agent.control_plane import EdgeControlClient, decrypt_artifact
 from node_agent.gguf_artifacts import find_gguf_artifact
 from node_agent.model_artifacts import find_model_artifact
 
@@ -575,3 +575,261 @@ def test_is_auth_error_only_matches_control_plane_requests(tmp_path: Path):
 
     assert client.is_auth_error(control_error) is True
     assert client.is_auth_error(runtime_error) is False
+
+
+def test_complete_assignment_uploads_result_artifact_before_completion(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    credentials_path = tmp_path / "credentials" / "node.json"
+    settings = build_settings(credentials_path, operator_token="operator_token")
+    settings.node_id = "node_123"
+    settings.node_key = "key_123456789012345678901234"
+    client = EdgeControlClient(settings)
+    upload_plans = []
+    uploads = []
+    completions = []
+
+    def fake_post_json(path: str, payload: dict[str, object]):
+        if path.endswith("/result-artifact/upload-url"):
+            upload_plans.append((path, payload))
+            return {
+                "result_artifact_key": "provider-executions/pexec_123/result-aabbcc.json.enc",
+                "upload_url": "https://example-bucket.r2.cloudflarestorage.com/provider-executions/pexec_123/result-aabbcc.json.enc?X-Amz-Signature=abc",
+                "upload_headers": {
+                    "content-type": "application/octet-stream",
+                    "x-amz-meta-ciphertext-sha256": str(payload["ciphertext_sha256"]),
+                    "x-amz-meta-plaintext-sha256": str(payload["plaintext_sha256"]),
+                },
+                "upload_method": "PUT",
+                "expires_at": "2026-04-17T10:10:00Z",
+            }
+        completions.append((path, payload))
+        return {}
+
+    def fake_put_content(path: str, payload: bytes, headers: dict[str, str]):
+        uploads.append((path, payload, headers))
+        return {}
+
+    monkeypatch.setattr(client.transport, "post_json", fake_post_json)
+    monkeypatch.setattr(client.transport, "put_content", fake_put_content)
+
+    item_results = [
+        {
+            "batch_item_id": "item-1",
+            "customer_item_id": "customer-item-1",
+            "provider": "autonomousc_edge",
+            "provider_model": "BAAI/bge-large-en-v1.5",
+            "status": "completed",
+            "usage": {"input_tokens": 3, "total_tokens": 3},
+            "cost": {
+                "provider_cost": {"amount": "0.0001", "currency": "usd"},
+                "customer_charge": {"amount": "0.0002", "currency": "usd"},
+                "platform_margin": {"amount": "0.0001", "currency": "usd"},
+            },
+            "output": {"embedding": [0.1, 0.2, 0.3]},
+            "completed_at": "2026-04-17T10:00:00Z",
+        }
+    ]
+    runtime_receipt = {
+        "assignment_nonce": "nonce_123",
+        "declared_model": "BAAI/bge-large-en-v1.5",
+        "provider_usage_summary": {"input_texts": 1},
+    }
+
+    client.complete_assignment("assign_123", item_results, runtime_receipt)
+
+    assert len(upload_plans) == 1
+    upload_plan_path, upload_plan_payload = upload_plans[0]
+    assert upload_plan_path == "/nodes/assignments/assign_123/result-artifact/upload-url"
+    assert upload_plan_payload["node_id"] == "node_123"
+    assert upload_plan_payload["node_key"] == "key_123456789012345678901234"
+    assert len(uploads) == 1
+    upload_path, ciphertext, headers = uploads[0]
+    assert upload_path.startswith(
+        "https://example-bucket.r2.cloudflarestorage.com/provider-executions/pexec_123/result-aabbcc.json.enc"
+    )
+    assert headers["content-type"] == "application/octet-stream"
+    assert headers["x-amz-meta-ciphertext-sha256"] == hashlib.sha256(ciphertext).hexdigest()
+    assert headers["x-amz-meta-plaintext-sha256"] == upload_plan_payload["plaintext_sha256"]
+
+    completed_payload = completions[0][1]
+    decrypted = decrypt_artifact(
+        ciphertext,
+        {
+            "key_b64": completed_payload["result_artifact"]["result_artifact_encryption"]["key_b64"],
+            "iv_b64": completed_payload["result_artifact"]["result_artifact_encryption"]["iv_b64"],
+        },
+    )
+    assert decrypted == {"item_results": item_results}
+
+    assert completions == [
+        (
+            "/nodes/assignments/assign_123/complete",
+            {
+                "node_id": "node_123",
+                "node_key": "key_123456789012345678901234",
+                "runtime_receipt": runtime_receipt,
+                "result_artifact": {
+                    "result_artifact_key": "provider-executions/pexec_123/result-aabbcc.json.enc",
+                    "result_artifact_encryption": {
+                        "key_b64": completed_payload["result_artifact"]["result_artifact_encryption"]["key_b64"],
+                        "iv_b64": completed_payload["result_artifact"]["result_artifact_encryption"]["iv_b64"],
+                    },
+                },
+            },
+        )
+    ]
+
+
+def test_complete_assignment_falls_back_to_worker_uploaded_artifact_when_direct_upload_route_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    credentials_path = tmp_path / "credentials" / "node.json"
+    settings = build_settings(credentials_path, operator_token="operator_token")
+    settings.node_id = "node_123"
+    settings.node_key = "key_123456789012345678901234"
+    client = EdgeControlClient(settings)
+    proxy_uploads = []
+    completions = []
+
+    def fake_post_json(path: str, payload: dict[str, object]):
+        if path.endswith("/result-artifact/upload-url"):
+            request = httpx.Request("POST", "http://localhost:8787/nodes/assignments/assign_123/result-artifact/upload-url")
+            response = httpx.Response(501, request=request)
+            raise httpx.HTTPStatusError("missing", request=request, response=response)
+        completions.append((path, payload))
+        return {}
+
+    def fake_post_content(path: str, payload: bytes, headers: dict[str, str]):
+        proxy_uploads.append((path, payload, headers))
+        return {
+            "result_artifact_key": "provider-executions/pexec_123/result.json.enc",
+            "result_artifact_encryption": {
+                "key_b64": "server-key",
+                "iv_b64": "server-iv",
+            },
+        }
+
+    monkeypatch.setattr(client.transport, "post_content", fake_post_content)
+    monkeypatch.setattr(client.transport, "post_json", fake_post_json)
+
+    item_results = [
+        {
+            "batch_item_id": "item-1",
+            "customer_item_id": "customer-item-1",
+            "provider": "autonomousc_edge",
+            "provider_model": "BAAI/bge-large-en-v1.5",
+            "status": "completed",
+            "usage": {"input_tokens": 3, "total_tokens": 3},
+            "cost": {
+                "provider_cost": {"amount": "0.0001", "currency": "usd"},
+                "customer_charge": {"amount": "0.0002", "currency": "usd"},
+                "platform_margin": {"amount": "0.0001", "currency": "usd"},
+            },
+            "output": {"embedding": [0.1, 0.2, 0.3]},
+            "completed_at": "2026-04-17T10:00:00Z",
+        }
+    ]
+    runtime_receipt = {
+        "assignment_nonce": "nonce_123",
+        "declared_model": "BAAI/bge-large-en-v1.5",
+        "provider_usage_summary": {"input_texts": 1},
+    }
+
+    client.complete_assignment("assign_123", item_results, runtime_receipt)
+
+    assert len(proxy_uploads) == 1
+    proxy_path, ciphertext, headers = proxy_uploads[0]
+    assert proxy_path == "/nodes/assignments/assign_123/result-artifact"
+    assert headers["x-node-id"] == "node_123"
+    assert headers["x-node-key"] == "key_123456789012345678901234"
+    assert headers["x-artifact-ciphertext-sha256"] == hashlib.sha256(ciphertext).hexdigest()
+    decrypted = decrypt_artifact(
+        ciphertext,
+        {
+            "key_b64": headers["x-artifact-key-b64"],
+            "iv_b64": headers["x-artifact-iv-b64"],
+        },
+    )
+    assert decrypted == {"item_results": item_results}
+
+    assert completions == [
+        (
+            "/nodes/assignments/assign_123/complete",
+            {
+                "node_id": "node_123",
+                "node_key": "key_123456789012345678901234",
+                "runtime_receipt": runtime_receipt,
+                "result_artifact": {
+                    "result_artifact_key": "provider-executions/pexec_123/result.json.enc",
+                    "result_artifact_encryption": {
+                        "key_b64": "server-key",
+                        "iv_b64": "server-iv",
+                    },
+                },
+            },
+        )
+    ]
+
+
+def test_complete_assignment_raises_when_direct_upload_put_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    credentials_path = tmp_path / "credentials" / "node.json"
+    settings = build_settings(credentials_path, operator_token="operator_token")
+    settings.node_id = "node_123"
+    settings.node_key = "key_123456789012345678901234"
+    client = EdgeControlClient(settings)
+
+    def fake_post_json(path: str, payload: dict[str, object]):
+        if path.endswith("/result-artifact/upload-url"):
+            return {
+                "result_artifact_key": "provider-executions/pexec_123/result-aabbcc.json.enc",
+                "upload_url": "https://example-bucket.r2.cloudflarestorage.com/provider-executions/pexec_123/result-aabbcc.json.enc?X-Amz-Signature=abc",
+                "upload_headers": {
+                    "content-type": "application/octet-stream",
+                    "x-amz-meta-ciphertext-sha256": str(payload["ciphertext_sha256"]),
+                    "x-amz-meta-plaintext-sha256": str(payload["plaintext_sha256"]),
+                },
+                "upload_method": "PUT",
+                "expires_at": "2026-04-17T10:10:00Z",
+            }
+        return {}
+
+    def fake_put_content(_path: str, _payload: bytes, _headers: dict[str, str]):
+        request = httpx.Request(
+            "PUT",
+            "https://example-bucket.r2.cloudflarestorage.com/provider-executions/pexec_123/result-aabbcc.json.enc",
+        )
+        response = httpx.Response(404, request=request)
+        raise httpx.HTTPStatusError("upload failed", request=request, response=response)
+
+    monkeypatch.setattr(client.transport, "post_json", fake_post_json)
+    monkeypatch.setattr(client.transport, "put_content", fake_put_content)
+
+    with pytest.raises(httpx.HTTPStatusError, match="upload failed"):
+        client.complete_assignment(
+            "assign_123",
+            [
+                {
+                    "batch_item_id": "item-1",
+                    "customer_item_id": "customer-item-1",
+                    "provider": "autonomousc_edge",
+                    "provider_model": "BAAI/bge-large-en-v1.5",
+                    "status": "completed",
+                    "usage": {"input_tokens": 3, "total_tokens": 3},
+                    "cost": {
+                        "provider_cost": {"amount": "0.0001", "currency": "usd"},
+                        "customer_charge": {"amount": "0.0002", "currency": "usd"},
+                        "platform_margin": {"amount": "0.0001", "currency": "usd"},
+                    },
+                    "output": {"embedding": [0.1, 0.2, 0.3]},
+                    "completed_at": "2026-04-17T10:00:00Z",
+                }
+            ],
+            {
+                "assignment_nonce": "nonce_123",
+                "declared_model": "BAAI/bge-large-en-v1.5",
+                "provider_usage_summary": {"input_texts": 1},
+            },
+        )

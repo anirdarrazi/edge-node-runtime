@@ -197,6 +197,86 @@ def test_run_worker_loop_reports_assignment_failure():
     assert control.progress_updates[-1][1]["state"] == "failed"
 
 
+def test_run_worker_loop_marks_nonretryable_completion_failures_as_failed():
+    class AssignmentControl(FakeControl):
+        def __init__(self) -> None:
+            super().__init__(has_credentials=True)
+            self.pulled = False
+
+        def heartbeat(self, *args, **kwargs):
+            return None
+
+        def pull_assignment(self):
+            if self.pulled:
+                raise KeyboardInterrupt()
+            self.pulled = True
+            return SimpleNamespace(
+                assignment_id="assign_complete_413",
+                execution_id="pexec_complete_413",
+                item_count=1,
+                operation="responses",
+                model="meta-llama/Llama-3.1-8B-Instruct",
+                privacy_tier="restricted",
+                allowed_regions=["eu-se-1"],
+                required_vram_gb=16.0,
+                required_context_tokens=8192,
+                token_budget={"total_tokens": 2048},
+            )
+
+        def fetch_artifact(self, _assignment):
+            return {
+                "items": [
+                    {
+                        "batch_item_id": "item_1",
+                        "customer_item_id": "cust_1",
+                        "operation": "responses",
+                        "model": "meta-llama/Llama-3.1-8B-Instruct",
+                        "input": {"messages": [{"role": "user", "content": "hello"}]},
+                    }
+                ]
+            }
+
+        def complete_assignment(self, assignment_id: str, results, runtime_receipt=None):
+            request = httpx.Request("POST", f"http://edge.test/nodes/assignments/{assignment_id}/complete")
+            response = httpx.Response(413, request=request)
+            raise httpx.HTTPStatusError("too large", request=request, response=response)
+
+    class RuntimeStub:
+        def execute(self, _operation, _model, _items):
+            return [
+                {
+                    "batch_item_id": "item_1",
+                    "customer_item_id": "cust_1",
+                    "provider": "autonomousc_edge",
+                    "provider_model": "meta-llama/Llama-3.1-8B-Instruct",
+                    "status": "completed",
+                    "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                    "cost": {
+                        "provider_cost": {"amount": "0.0001", "currency": "usd"},
+                        "customer_charge": {"amount": "0.0002", "currency": "usd"},
+                        "platform_margin": {"amount": "0.0001", "currency": "usd"},
+                    },
+                    "output": {"text": "hello"},
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ]
+
+    control = AssignmentControl()
+
+    with pytest.raises(KeyboardInterrupt):
+        main_module.run_worker_loop(control, RuntimeStub(), attest_on_start=False)
+
+    assert control.failures == [
+        (
+            "assign_complete_413",
+            "upstream_rejected",
+            "http://edge.test/nodes/assignments/assign_complete_413/complete returned HTTP 413.",
+            False,
+        )
+    ]
+    assert control.progress_updates[-1][1]["state"] == "failed"
+
+
 def test_run_worker_loop_keeps_assignments_fresh_while_runtime_is_busy(monkeypatch: pytest.MonkeyPatch):
     class AssignmentControl(FakeControl):
         def __init__(self) -> None:

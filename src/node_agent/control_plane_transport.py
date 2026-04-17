@@ -25,6 +25,16 @@ class EdgeControlTransport:
         response.raise_for_status()
         return response.json()
 
+    def post_content(self, path: str, payload: bytes, headers: dict[str, str]) -> Any:
+        response = self.client.post(path, content=payload, headers=headers)
+        response.raise_for_status()
+        return response.json() if response.content else {}
+
+    def put_content(self, url: str, payload: bytes, headers: dict[str, str]) -> Any:
+        response = self.client.put(url, content=payload, headers=headers)
+        response.raise_for_status()
+        return response.json() if response.content else {}
+
     def get_content(self, url: str) -> bytes:
         response = self.client.get(url)
         response.raise_for_status()

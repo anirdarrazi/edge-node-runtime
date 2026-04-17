@@ -74,7 +74,7 @@ def classify_assignment_failure(error: Exception) -> tuple[str, str, bool]:
     if isinstance(error, httpx.HTTPStatusError):
         status = error.response.status_code
         request_url = str(error.request.url)
-        if status in {400, 404, 409, 422}:
+        if status in {400, 404, 409, 413, 422}:
             return "upstream_rejected", f"{request_url} returned HTTP {status}.", False
         if status in {408, 425, 429} or status >= 500:
             return "upstream_unavailable", f"{request_url} returned HTTP {status}.", True
@@ -505,7 +505,37 @@ def run_worker_loop(control: EdgeControlClient, runtime: VLLMRuntime, attest_on_
                     LOGGER.warning("assignment %s was no longer claimable: %s", assignment.assignment_id, assignment_error)
                     continue
                 if results_ready:
-                    raise
+                    code, message, retryable = classify_assignment_failure(assignment_error)
+                    LOGGER.exception(
+                        "assignment %s completion acknowledgement failed after results were computed",
+                        assignment.assignment_id,
+                    )
+                    if retryable:
+                        raise
+                    try:
+                        control.report_progress(
+                            assignment.assignment_id,
+                            assignment_progress("failed", assignment.item_count, code=code, retryable=retryable),
+                        )
+                    except Exception as progress_error:
+                        if control.is_auth_error(progress_error):
+                            raise
+                        LOGGER.warning(
+                            "failed to report completion failure for %s: %s",
+                            assignment.assignment_id,
+                            progress_error,
+                        )
+                    try:
+                        control.fail_assignment(assignment.assignment_id, code, message, retryable=retryable)
+                    except Exception as fail_error:
+                        if control.is_auth_error(fail_error):
+                            raise
+                        LOGGER.warning(
+                            "failed to mark completion failure for %s; stale reclaim will handle it: %s",
+                            assignment.assignment_id,
+                            fail_error,
+                        )
+                    continue
 
                 code, message, retryable = classify_assignment_failure(assignment_error)
                 autopilot.observe_assignment_failure(
