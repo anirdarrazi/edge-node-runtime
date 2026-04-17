@@ -22,13 +22,18 @@ class VLLMRuntime:
         if isinstance(item_input, list) and all(isinstance(entry, str) for entry in item_input):
             return item_input, len(item_input)
         if isinstance(item_input, dict):
+            openai_input = item_input.get("input")
+            if isinstance(openai_input, str):
+                return openai_input, 1
+            if isinstance(openai_input, list) and all(isinstance(entry, str) for entry in openai_input):
+                return openai_input, len(openai_input)
             texts = item_input.get("texts")
             if isinstance(texts, list) and all(isinstance(entry, str) for entry in texts):
                 return texts, len(texts)
             text = item_input.get("text")
             if isinstance(text, str):
                 return text, 1
-        raise ValueError("Embeddings input must be a string, a list of strings, or an object with text/texts.")
+        raise ValueError("Embeddings input must be a string, a list of strings, or an object with input/text/texts.")
 
     def _embedding_result(self, model: str, item: dict[str, Any]) -> dict[str, Any]:
         embedding_input, input_texts = self._normalize_embedding_input(item["input"])

@@ -57,6 +57,22 @@ def test_embedding_result_unwraps_texts_input_shape():
     )
 
 
+def test_embedding_result_unwraps_openai_input_shape():
+    runtime = VLLMRuntime("http://localhost")
+    runtime.client = DummyClient()
+    result = runtime.execute(
+        "embeddings",
+        "BAAI/bge-large-en-v1.5",
+        [{"batch_item_id": "item_1", "customer_item_id": "cust_1", "input": {"input": ["setup verification ping"]}}],
+    )[0]
+    assert result["status"] == "completed"
+    assert result["usage"]["input_texts"] == 1
+    assert runtime.client.calls[0] == (
+        "/v1/embeddings",
+        {"model": "BAAI/bge-large-en-v1.5", "input": ["setup verification ping"]},
+    )
+
+
 def test_embedding_result_accepts_multiple_raw_texts():
     runtime = VLLMRuntime("http://localhost")
     runtime.client = DummyClient()
