@@ -359,6 +359,79 @@ class EdgeControlClient:
             },
         )
 
+    @staticmethod
+    def _upload_headers(upload_headers: Any) -> dict[str, str]:
+        if not isinstance(upload_headers, dict):
+            raise ValueError("artifact upload plan is missing upload headers")
+        return {str(key): str(value) for key, value in upload_headers.items()}
+
+    def _upload_sharded_result_artifact(
+        self,
+        artifact: dict[str, Any],
+        encrypted_artifact: dict[str, Any],
+    ) -> dict[str, Any]:
+        manifest_upload = artifact.get("manifest_upload")
+        shards = artifact.get("shards")
+        if not isinstance(manifest_upload, dict) or not isinstance(shards, list) or not shards:
+            raise ValueError("sharded result artifact upload plan is incomplete")
+
+        ciphertext = encrypted_artifact["ciphertext"]
+        manifest_shards: list[dict[str, Any]] = []
+        for raw_shard in shards:
+            if not isinstance(raw_shard, dict):
+                raise ValueError("sharded result artifact upload plan contains an invalid shard")
+            index = int(raw_shard["index"])
+            offset = int(raw_shard["offset_bytes"])
+            size = int(raw_shard["size_bytes"])
+            upload_url = raw_shard.get("upload_url")
+            if not isinstance(upload_url, str):
+                raise ValueError("sharded result artifact shard is missing an upload URL")
+            shard_bytes = ciphertext[offset : offset + size]
+            if len(shard_bytes) != size:
+                raise ValueError("sharded result artifact upload plan does not match encrypted payload size")
+            self.transport.put_content(upload_url, shard_bytes, self._upload_headers(raw_shard.get("upload_headers")))
+            manifest_shards.append(
+                {
+                    "index": index,
+                    "result_artifact_key": str(raw_shard["result_artifact_key"]),
+                    "offset_bytes": offset,
+                    "size_bytes": size,
+                    "ciphertext_sha256": hashlib.sha256(shard_bytes).hexdigest(),
+                }
+            )
+
+        manifest_payload = {
+            "artifact_kind": "provider_execution_result",
+            "artifact_format": "sharded_aes_256_gcm_json",
+            "version": 1,
+            "payload_encryption": encrypted_artifact["encryption"],
+            "payload_plaintext_sha256": encrypted_artifact["plaintext_sha256"],
+            "payload_ciphertext_sha256": encrypted_artifact["ciphertext_sha256"],
+            "payload_ciphertext_bytes": len(ciphertext),
+            "shard_size_bytes": int(artifact.get("shard_size_bytes") or 0),
+            "total_shards": len(manifest_shards),
+            "shards": manifest_shards,
+        }
+        encrypted_manifest = encrypt_artifact(manifest_payload)
+        manifest_upload_url = manifest_upload.get("upload_url")
+        if not isinstance(manifest_upload_url, str):
+            raise ValueError("sharded result artifact manifest is missing an upload URL")
+        self.transport.put_content(
+            manifest_upload_url,
+            encrypted_manifest["ciphertext"],
+            self._upload_headers(manifest_upload.get("upload_headers")),
+        )
+
+        return {
+            "result_artifact_key": str(manifest_upload["result_artifact_key"]),
+            "result_artifact_encryption": encrypted_manifest["encryption"],
+            "result_artifact_format": "sharded",
+            "result_artifact_size_bytes": len(ciphertext),
+            "result_artifact_ciphertext_sha256": encrypted_artifact["ciphertext_sha256"],
+            "result_artifact_plaintext_sha256": encrypted_artifact["plaintext_sha256"],
+            "result_artifact_shards": manifest_shards,
+        }
+
     def complete_assignment(
         self,
         assignment_id: str,
@@ -398,12 +471,27 @@ class EdgeControlClient:
 
         upload_url = artifact.get("upload_url")
         upload_headers = artifact.get("upload_headers")
-        if isinstance(upload_url, str) and isinstance(upload_headers, dict):
+        if isinstance(artifact.get("manifest_upload"), dict) or isinstance(artifact.get("shards"), list):
+            result_artifact = self._upload_sharded_result_artifact(artifact, encrypted_artifact)
+        elif isinstance(upload_url, str) and isinstance(upload_headers, dict):
             self.transport.put_content(
                 upload_url,
                 encrypted_artifact["ciphertext"],
-                headers={str(key): str(value) for key, value in upload_headers.items()},
+                {str(key): str(value) for key, value in upload_headers.items()},
             )
+            result_artifact = {
+                "result_artifact_key": str(artifact["result_artifact_key"]),
+                "result_artifact_encryption": artifact.get(
+                    "result_artifact_encryption", encrypted_artifact["encryption"]
+                ),
+            }
+        else:
+            result_artifact = {
+                "result_artifact_key": str(artifact["result_artifact_key"]),
+                "result_artifact_encryption": artifact.get(
+                    "result_artifact_encryption", encrypted_artifact["encryption"]
+                ),
+            }
 
         self.transport.post_json(
             f"/nodes/assignments/{assignment_id}/complete",
@@ -411,12 +499,7 @@ class EdgeControlClient:
                 "node_id": node_id,
                 "node_key": node_key,
                 "runtime_receipt": runtime_receipt,
-                "result_artifact": {
-                    "result_artifact_key": str(artifact["result_artifact_key"]),
-                    "result_artifact_encryption": artifact.get(
-                        "result_artifact_encryption", encrypted_artifact["encryption"]
-                    ),
-                },
+                "result_artifact": result_artifact,
             },
         )
 

@@ -13,7 +13,7 @@ class EdgeControlTransport:
     def __init__(self, settings: NodeAgentSettings):
         self.settings = settings
         self.base_url = settings.edge_control_url
-        self.client = httpx.Client(base_url=settings.edge_control_url, timeout=30.0)
+        self.client = httpx.Client(base_url=settings.edge_control_url, timeout=httpx.Timeout(300.0, connect=30.0))
 
     def is_auth_error(self, error: Exception) -> bool:
         if not isinstance(error, httpx.HTTPStatusError) or error.response.status_code not in {401, 403}:

@@ -681,6 +681,135 @@ def test_complete_assignment_uploads_result_artifact_before_completion(
     ]
 
 
+def test_complete_assignment_uploads_sharded_result_artifact_manifest(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    credentials_path = tmp_path / "credentials" / "node.json"
+    settings = build_settings(credentials_path, operator_token="operator_token")
+    settings.node_id = "node_123"
+    settings.node_key = "key_123456789012345678901234"
+    client = EdgeControlClient(settings)
+    upload_plans = []
+    uploads = []
+    completions = []
+
+    def fake_post_json(path: str, payload: dict[str, object]):
+        if path.endswith("/result-artifact/upload-url"):
+            upload_plans.append((path, payload))
+            content_length = int(payload["content_length_bytes"])
+            first_size = max(1, content_length // 2)
+            second_size = content_length - first_size
+            return {
+                "result_artifact_upload_mode": "sharded",
+                "result_artifact_manifest_key": "provider-executions/pexec_123/result-manifest-aabbcc.json.enc",
+                "manifest_upload": {
+                    "result_artifact_key": "provider-executions/pexec_123/result-manifest-aabbcc.json.enc",
+                    "upload_url": "https://example-bucket.r2.cloudflarestorage.com/manifest?X-Amz-Signature=abc",
+                    "upload_headers": {
+                        "content-type": "application/octet-stream",
+                        "x-amz-meta-artifact-role": "manifest",
+                    },
+                    "upload_method": "PUT",
+                    "expires_at": "2026-04-17T10:10:00Z",
+                },
+                "shard_size_bytes": first_size,
+                "total_shards": 2,
+                "total_ciphertext_bytes": content_length,
+                "shards": [
+                    {
+                        "index": 0,
+                        "offset_bytes": 0,
+                        "size_bytes": first_size,
+                        "result_artifact_key": "provider-executions/pexec_123/result-shards/aabbcc/000000.part",
+                        "upload_url": "https://example-bucket.r2.cloudflarestorage.com/shard-0?X-Amz-Signature=abc",
+                        "upload_headers": {
+                            "content-type": "application/octet-stream",
+                            "x-amz-meta-artifact-role": "shard",
+                        },
+                        "upload_method": "PUT",
+                        "expires_at": "2026-04-17T10:10:00Z",
+                    },
+                    {
+                        "index": 1,
+                        "offset_bytes": first_size,
+                        "size_bytes": second_size,
+                        "result_artifact_key": "provider-executions/pexec_123/result-shards/aabbcc/000001.part",
+                        "upload_url": "https://example-bucket.r2.cloudflarestorage.com/shard-1?X-Amz-Signature=abc",
+                        "upload_headers": {
+                            "content-type": "application/octet-stream",
+                            "x-amz-meta-artifact-role": "shard",
+                        },
+                        "upload_method": "PUT",
+                        "expires_at": "2026-04-17T10:10:00Z",
+                    },
+                ],
+            }
+        completions.append((path, payload))
+        return {}
+
+    def fake_put_content(path: str, payload: bytes, headers: dict[str, str]):
+        uploads.append((path, payload, headers))
+        return {}
+
+    monkeypatch.setattr(client.transport, "post_json", fake_post_json)
+    monkeypatch.setattr(client.transport, "put_content", fake_put_content)
+
+    item_results = [
+        {
+            "batch_item_id": "item-1",
+            "customer_item_id": "customer-item-1",
+            "provider": "autonomousc_edge",
+            "provider_model": "BAAI/bge-large-en-v1.5",
+            "status": "completed",
+            "usage": {"input_tokens": 3, "total_tokens": 3},
+            "cost": {
+                "provider_cost": {"amount": "0.0001", "currency": "usd"},
+                "customer_charge": {"amount": "0.0002", "currency": "usd"},
+                "platform_margin": {"amount": "0.0001", "currency": "usd"},
+            },
+            "output": {"embedding": [0.1, 0.2, 0.3]},
+            "completed_at": "2026-04-17T10:00:00Z",
+        }
+    ]
+    runtime_receipt = {
+        "assignment_nonce": "nonce_123",
+        "declared_model": "BAAI/bge-large-en-v1.5",
+        "provider_usage_summary": {"input_texts": 1},
+    }
+
+    client.complete_assignment("assign_123", item_results, runtime_receipt)
+
+    assert len(upload_plans) == 1
+    assert len(uploads) == 3
+    assert uploads[0][0].startswith("https://example-bucket.r2.cloudflarestorage.com/shard-0")
+    assert uploads[1][0].startswith("https://example-bucket.r2.cloudflarestorage.com/shard-1")
+    assert uploads[2][0].startswith("https://example-bucket.r2.cloudflarestorage.com/manifest")
+
+    completed_payload = completions[0][1]
+    result_artifact = completed_payload["result_artifact"]
+    assert result_artifact["result_artifact_key"] == "provider-executions/pexec_123/result-manifest-aabbcc.json.enc"
+    assert result_artifact["result_artifact_format"] == "sharded"
+    assert len(result_artifact["result_artifact_shards"]) == 2
+
+    manifest = decrypt_artifact(
+        uploads[2][1],
+        {
+            "key_b64": result_artifact["result_artifact_encryption"]["key_b64"],
+            "iv_b64": result_artifact["result_artifact_encryption"]["iv_b64"],
+        },
+    )
+    assert manifest["artifact_format"] == "sharded_aes_256_gcm_json"
+    assert manifest["payload_ciphertext_bytes"] == len(uploads[0][1]) + len(uploads[1][1])
+    assert manifest["shards"][0]["ciphertext_sha256"] == hashlib.sha256(uploads[0][1]).hexdigest()
+    assert manifest["shards"][1]["ciphertext_sha256"] == hashlib.sha256(uploads[1][1]).hexdigest()
+
+    reconstructed_ciphertext = uploads[0][1] + uploads[1][1]
+    decrypted_payload = decrypt_artifact(reconstructed_ciphertext, manifest["payload_encryption"])
+    assert decrypted_payload == {"item_results": item_results}
+
+    assert completions[0][0] == "/nodes/assignments/assign_123/complete"
+
+
 def test_complete_assignment_falls_back_to_worker_uploaded_artifact_when_direct_upload_route_is_unavailable(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
