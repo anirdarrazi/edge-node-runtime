@@ -86,3 +86,66 @@ def test_embedding_result_accepts_multiple_raw_texts():
         "/v1/embeddings",
         {"model": "BAAI/bge-large-en-v1.5", "input": ["one", "two"]},
     )
+
+
+def test_embedding_runtime_microbatches_multiple_assignments():
+    class DynamicEmbeddingClient:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def post(self, path, json):
+            self.calls.append((path, json))
+            payload = {
+                "usage": {"prompt_tokens": len(json["input"]) * 3, "total_tokens": len(json["input"]) * 3},
+                "data": [{"embedding": [float(index)]} for index, _text in enumerate(json["input"])],
+            }
+
+            class Response:
+                def raise_for_status(self):
+                    return None
+
+                def json(self_nonlocal):
+                    return payload
+
+            return Response()
+
+    runtime = VLLMRuntime("http://localhost")
+    runtime.client = DynamicEmbeddingClient()
+
+    results = runtime.execute_microbatch(
+        "embeddings",
+        "BAAI/bge-large-en-v1.5",
+        [
+            (
+                "assign_1",
+                [
+                    {
+                        "batch_item_id": "item_1",
+                        "customer_item_id": "cust_1",
+                        "input": {"text": "one"},
+                    }
+                ],
+            ),
+            (
+                "assign_2",
+                [
+                    {
+                        "batch_item_id": "item_2",
+                        "customer_item_id": "cust_2",
+                        "input": {"texts": ["two", "three"]},
+                    }
+                ],
+            ),
+        ],
+    )
+
+    assert runtime.client.calls == [
+        (
+            "/v1/embeddings",
+            {"model": "BAAI/bge-large-en-v1.5", "input": ["one", "two", "three"]},
+        )
+    ]
+    assert results["assign_1"][0]["usage"]["input_texts"] == 1
+    assert results["assign_1"][0]["output"]["data"] == [{"embedding": [0.0]}]
+    assert results["assign_2"][0]["usage"]["input_texts"] == 2
+    assert results["assign_2"][0]["output"]["data"] == [{"embedding": [1.0]}, {"embedding": [2.0]}]

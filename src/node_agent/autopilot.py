@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import NodeAgentSettings
+from .concurrency import resolved_embeddings_concurrency_limit
 from .runtime_profiles import HOME_EMBEDDINGS_LLAMA_CPP_PROFILE, HOME_LLAMA_CPP_GGUF_PROFILE, LLAMA_CPP_INFERENCE_ENGINE
 
 DEFAULT_RESPONSE_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
@@ -514,6 +515,13 @@ class AutopilotController:
     def capabilities_payload(self) -> dict[str, Any]:
         recommendation = self.state.recommendation
         signals = self.state.signals
+        embedding_concurrency_limit = resolved_embeddings_concurrency_limit(
+            supported_models=recommendation.supported_models,
+            operations=recommendation.operations,
+            gpu_memory_gb=settings_float(self.settings, "gpu_memory_gb", 24.0),
+            max_concurrent_assignments=recommendation.max_concurrent_assignments,
+            override=getattr(self.settings, "max_concurrent_assignments_embeddings", None),
+        )
         payload: dict[str, Any] = {
             "supported_models": [model.strip() for model in recommendation.supported_models.split(",") if model.strip()],
             "operations": recommendation.operations,
@@ -525,6 +533,8 @@ class AutopilotController:
             "thermal_headroom": recommendation.thermal_headroom,
             "heat_demand": normalize_heat_demand(settings_str(self.settings, "heat_demand", "none")),
         }
+        if embedding_concurrency_limit is not None:
+            payload["max_concurrent_assignments_embeddings"] = embedding_concurrency_limit
         configured_heat_output_watts = settings_optional_float(self.settings, "estimated_heat_output_watts")
         optional_values = {
             "room_temp_c": settings_optional_float(self.settings, "room_temp_c"),

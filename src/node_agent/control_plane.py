@@ -12,6 +12,7 @@ from typing import Any
 import httpx
 
 from .config import AssignmentEnvelope, NodeAgentSettings, NodeClaimPollResult, NodeClaimSession
+from .concurrency import resolved_embeddings_concurrency_limit, resolved_embeddings_microbatch_assignment_limit
 from .control_plane_bootstrap import NodeBootstrapOrchestrator
 from .control_plane_store import NodeCredentialStore
 from .control_plane_transport import EdgeControlTransport
@@ -74,6 +75,21 @@ class EdgeControlClient:
 
     def _node_capabilities_payload(self) -> dict[str, Any]:
         runtime_profile = self.settings.resolved_runtime_profile
+        embedding_concurrency_limit = resolved_embeddings_concurrency_limit(
+            supported_models=self.settings.supported_models,
+            operations=list(runtime_profile.supported_apis),
+            gpu_memory_gb=self.settings.gpu_memory_gb,
+            max_concurrent_assignments=self.settings.max_concurrent_assignments,
+            override=getattr(self.settings, "max_concurrent_assignments_embeddings", None),
+        )
+        embedding_microbatch_limit = resolved_embeddings_microbatch_assignment_limit(
+            supported_models=self.settings.supported_models,
+            operations=list(runtime_profile.supported_apis),
+            gpu_memory_gb=self.settings.gpu_memory_gb,
+            max_concurrent_assignments=self.settings.max_concurrent_assignments,
+            pull_bundle_size=self.settings.pull_bundle_size,
+            override=getattr(self.settings, "max_microbatch_assignments_embeddings", None),
+        )
         payload = {
             "supported_models": [model.strip() for model in self.settings.supported_models.split(",") if model.strip()],
             "operations": list(runtime_profile.supported_apis),
@@ -82,9 +98,17 @@ class EdgeControlClient:
             "max_context_tokens": self.settings.max_context_tokens,
             "max_batch_tokens": self.settings.max_batch_tokens,
             "max_concurrent_assignments": self.settings.max_concurrent_assignments,
+            "max_pull_bundle_assignments": max(
+                self.settings.max_concurrent_assignments,
+                embedding_microbatch_limit or self.settings.max_concurrent_assignments,
+            ),
             "thermal_headroom": self.settings.thermal_headroom,
             "heat_demand": self.settings.heat_demand,
         }
+        if embedding_concurrency_limit is not None:
+            payload["max_concurrent_assignments_embeddings"] = embedding_concurrency_limit
+        if embedding_microbatch_limit is not None:
+            payload["max_microbatch_assignments_embeddings"] = embedding_microbatch_limit
         for key in (
             "room_temp_c",
             "target_temp_c",
@@ -184,6 +208,12 @@ class EdgeControlClient:
             "runtime": self._node_runtime_payload(),
         }
 
+    def node_capabilities_payload(self) -> dict[str, Any]:
+        return self._node_capabilities_payload()
+
+    def node_runtime_payload(self, *, autopilot: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self._node_runtime_payload(autopilot=autopilot)
+
     @staticmethod
     def _format_remaining_time(expires_at: str) -> str:
         return NodeBootstrapOrchestrator.format_remaining_time(expires_at)
@@ -282,20 +312,23 @@ class EdgeControlClient:
         active_assignments: int = 0,
         *,
         capabilities: dict[str, Any] | None = None,
+        runtime: dict[str, Any] | None = None,
         autopilot: dict[str, Any] | None = None,
+        include_capabilities: bool = True,
+        include_runtime: bool = True,
     ) -> None:
-        self.transport.post_json(
-            "/nodes/heartbeat",
-            {
-                "node_id": self.settings.node_id,
-                "node_key": self.settings.node_key,
-                "status": "active",
-                "queue_depth": queue_depth,
-                "active_assignments": active_assignments,
-                "capabilities": capabilities or self._node_capabilities_payload(),
-                "runtime": self._node_runtime_payload(autopilot=autopilot),
-            },
-        )
+        payload: dict[str, Any] = {
+            "node_id": self.settings.node_id,
+            "node_key": self.settings.node_key,
+            "status": "active",
+            "queue_depth": queue_depth,
+            "active_assignments": active_assignments,
+        }
+        if include_capabilities:
+            payload["capabilities"] = capabilities or self._node_capabilities_payload()
+        if include_runtime:
+            payload["runtime"] = runtime or self._node_runtime_payload(autopilot=autopilot)
+        self.transport.post_json("/nodes/heartbeat", payload)
         self.clear_recovery_note()
 
     def fetch_node_dashboard_summary(self) -> dict[str, Any]:
@@ -331,17 +364,32 @@ class EdgeControlClient:
         )
         return payload if isinstance(payload, dict) else {}
 
-    def pull_assignment(self) -> AssignmentEnvelope | None:
+    def pull_assignments(
+        self,
+        limit: int,
+        active_assignment_ids: list[str] | None = None,
+    ) -> list[AssignmentEnvelope]:
+        if limit <= 0:
+            return []
         payload = self.transport.post_json(
             "/nodes/assignments/pull",
             {
                 "node_id": self.settings.node_id,
                 "node_key": self.settings.node_key,
+                "limit": limit,
+                "active_assignment_ids": active_assignment_ids or [],
             },
         )
         self.last_control_plane_queue_depth = self._nonnegative_int(payload.get("queue_depth"))
+        assignments = payload.get("assignments")
+        if isinstance(assignments, list):
+            return [AssignmentEnvelope.model_validate(assignment) for assignment in assignments if assignment]
         assignment = payload.get("assignment")
-        return AssignmentEnvelope.model_validate(assignment) if assignment else None
+        return [AssignmentEnvelope.model_validate(assignment)] if assignment else []
+
+    def pull_assignment(self) -> AssignmentEnvelope | None:
+        assignments = self.pull_assignments(1)
+        return assignments[0] if assignments else None
 
     def accept_assignment(self, assignment_id: str) -> None:
         self.transport.post_json(

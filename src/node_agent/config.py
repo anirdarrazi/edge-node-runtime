@@ -68,6 +68,9 @@ class NodeAgentSettings(BaseSettings):
     max_context_tokens: int = 32768
     max_batch_tokens: int = 50000
     max_concurrent_assignments: int = 2
+    max_concurrent_assignments_embeddings: int | None = None
+    max_microbatch_assignments_embeddings: int | None = None
+    pull_bundle_size: int = 16
     thermal_headroom: float = 0.8
     heat_demand: Literal["none", "low", "medium", "high"] = "none"
     room_temp_c: float | None = None
@@ -101,6 +104,8 @@ class NodeAgentSettings(BaseSettings):
         "burst_lease_id",
         "burst_lease_phase",
         "burst_cost_ceiling_usd",
+        "max_concurrent_assignments_embeddings",
+        "max_microbatch_assignments_embeddings",
         "room_temp_c",
         "target_temp_c",
         "gpu_temp_c",
@@ -251,6 +256,7 @@ class AssignmentEnvelope(BaseModel):
     expected_quantization_type: str | None = None
     expected_effective_context_tokens: int | None = None
     expected_runtime_tuple_digest: str | None = None
+    microbatch_key: str | None = None
     input_artifact_url: str
     input_artifact_sha256: str
     input_artifact_encryption: dict

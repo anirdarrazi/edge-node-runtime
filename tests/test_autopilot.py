@@ -90,3 +90,23 @@ def test_autopilot_reports_heating_telemetry_in_capabilities(tmp_path: Path, mon
     assert capabilities["power_watts"] == 285.0
     assert capabilities["estimated_heat_output_watts"] == 285.0
     assert capabilities["energy_price_kwh"] == 0.12
+
+
+def test_autopilot_reports_higher_embeddings_concurrency_for_embedding_only_nodes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = NodeAgentSettings(
+        vllm_model=DEFAULT_EMBEDDING_MODEL,
+        supported_models=DEFAULT_EMBEDDING_MODEL,
+        max_concurrent_assignments=1,
+        gpu_memory_gb=12.0,
+        autopilot_state_path=str(tmp_path / "autopilot-embeddings.json"),
+    )
+    autopilot = AutopilotController(settings)
+    monkeypatch.setattr(autopilot, "sample_gpu_memory_pressure", lambda: 0.4)
+
+    autopilot.observe_idle()
+
+    capabilities = autopilot.capabilities_payload()
+    assert capabilities["max_concurrent_assignments"] == 1
+    assert capabilities["max_concurrent_assignments_embeddings"] == 3

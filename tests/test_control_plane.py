@@ -47,6 +47,42 @@ class PullClient:
         return DummyResponse({"assignment": None, "queue_depth": 3})
 
 
+def assignment_payload(assignment_id: str = "assign_123"):
+    return {
+        "assignment_id": assignment_id,
+        "execution_id": "pexec_123",
+        "assignment_nonce": "nonce_123",
+        "operation": "embeddings",
+        "model": "BAAI/bge-large-en-v1.5",
+        "privacy_tier": "standard",
+        "node_trust_requirement": "untrusted_allowed",
+        "result_guarantee": "community_best_effort",
+        "allowed_regions": ["global"],
+        "required_vram_gb": 1.0,
+        "required_context_tokens": 512,
+        "token_budget": {"total_tokens": 8},
+        "item_count": 1,
+        "microbatch_key": "embeddings|BAAI/bge-large-en-v1.5|standard",
+        "input_artifact_url": "http://localhost/input",
+        "input_artifact_sha256": "a" * 64,
+        "input_artifact_encryption": {"key_b64": "key", "iv_b64": "iv"},
+    }
+
+
+class PullManyClient:
+    def __init__(self):
+        self.calls = []
+
+    def post(self, path, json):
+        self.calls.append((path, json))
+        return DummyResponse(
+            {
+                "assignments": [assignment_payload("assign_1"), assignment_payload("assign_2")],
+                "queue_depth": 7,
+            }
+        )
+
+
 def build_settings(credentials_path: Path, operator_token: str | None):
     return NodeAgentSettings(
         edge_control_url="http://localhost:8787",
@@ -232,6 +268,9 @@ def test_heartbeat_reports_current_model(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert path == "/nodes/heartbeat"
     assert payload["runtime"]["current_model"] == "meta-llama/Llama-3.1-8B-Instruct"
     assert payload["capabilities"]["max_concurrent_assignments"] == settings.max_concurrent_assignments
+    assert payload["capabilities"]["max_concurrent_assignments_embeddings"] == 4
+    assert payload["capabilities"]["max_microbatch_assignments_embeddings"] == settings.pull_bundle_size
+    assert payload["capabilities"]["max_pull_bundle_assignments"] == settings.pull_bundle_size
     evidence = payload["runtime"]["runtime_evidence"]
     assert evidence["digest"].startswith("sha256:")
     assert evidence["signature"].startswith("sha256:")
@@ -275,6 +314,24 @@ def test_heartbeat_reports_home_heating_telemetry(tmp_path: Path):
     assert payload["capabilities"]["energy_price_kwh"] == 0.14
 
 
+def test_heartbeat_can_omit_capabilities_and_runtime(tmp_path: Path):
+    credentials_path = tmp_path / "credentials" / "node.json"
+    settings = build_settings(credentials_path, operator_token="operator_token")
+    settings.node_id = "node_123"
+    settings.node_key = "key_123456789012345678901234"
+    client = EdgeControlClient(settings)
+    recording_client = RecordingClient()
+    client.client = recording_client
+
+    client.heartbeat(queue_depth=1, active_assignments=1, include_capabilities=False, include_runtime=False)
+
+    _path, payload = recording_client.calls[0]
+    assert payload["queue_depth"] == 1
+    assert payload["active_assignments"] == 1
+    assert "capabilities" not in payload
+    assert "runtime" not in payload
+
+
 def test_pull_assignment_tracks_control_plane_queue_depth(tmp_path: Path):
     credentials_path = tmp_path / "credentials" / "node.json"
     settings = build_settings(credentials_path, operator_token="operator_token")
@@ -287,6 +344,29 @@ def test_pull_assignment_tracks_control_plane_queue_depth(tmp_path: Path):
 
     assert assignment is None
     assert client.last_control_plane_queue_depth == 3
+
+
+def test_pull_assignments_sends_limit_and_active_ids(tmp_path: Path):
+    credentials_path = tmp_path / "credentials" / "node.json"
+    settings = build_settings(credentials_path, operator_token="operator_token")
+    settings.node_id = "node_123"
+    settings.node_key = "key_123456789012345678901234"
+    client = EdgeControlClient(settings)
+    pull_client = PullManyClient()
+    client.client = pull_client
+
+    assignments = client.pull_assignments(2, active_assignment_ids=["assign_running"])
+
+    assert [assignment.assignment_id for assignment in assignments] == ["assign_1", "assign_2"]
+    assert [assignment.microbatch_key for assignment in assignments] == [
+        "embeddings|BAAI/bge-large-en-v1.5|standard",
+        "embeddings|BAAI/bge-large-en-v1.5|standard",
+    ]
+    assert client.last_control_plane_queue_depth == 7
+    path, payload = pull_client.calls[0]
+    assert path == "/nodes/assignments/pull"
+    assert payload["limit"] == 2
+    assert payload["active_assignment_ids"] == ["assign_running"]
 
 
 def test_node_request_payload_uses_bundled_release_metadata_for_the_primary_model(tmp_path: Path):

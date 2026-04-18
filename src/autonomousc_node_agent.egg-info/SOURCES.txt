@@ -9,6 +9,7 @@ src/autonomousc_node_agent.egg-info/top_level.txt
 src/node_agent/__init__.py
 src/node_agent/autopilot.py
 src/node_agent/autostart.py
+src/node_agent/concurrency.py
 src/node_agent/config.py
 src/node_agent/control_plane.py
 src/node_agent/control_plane_bootstrap.py

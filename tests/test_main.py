@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 import node_agent.main as main_module
+from node_agent.concurrency import max_worker_assignments_from_capabilities
 from node_agent.gguf_artifacts import find_gguf_artifact
 from node_agent.model_artifacts import find_model_artifact
 
@@ -83,8 +84,18 @@ class FakeControl:
             raise httpx.HTTPStatusError("unauthorized", request=request, response=response)
         raise KeyboardInterrupt()
 
+    def node_runtime_payload(self):
+        return {
+            "current_model": self.settings.vllm_model,
+            "docker_image": self.settings.docker_image,
+        }
+
     def pull_assignment(self):
         return None
+
+    def pull_assignments(self, _limit: int, active_assignment_ids=None):
+        assignment = self.pull_assignment()
+        return [assignment] if assignment else []
 
     def accept_assignment(self, _assignment_id: str):
         return None
@@ -159,15 +170,17 @@ def test_run_worker_loop_reports_assignment_failure():
     class AssignmentControl(FakeControl):
         def __init__(self) -> None:
             super().__init__(has_credentials=True)
-            self.pulled = False
+            self.pull_calls = 0
 
         def heartbeat(self, *args, **kwargs):
             return None
 
         def pull_assignment(self):
-            if self.pulled:
-                raise KeyboardInterrupt()
-            self.pulled = True
+            self.pull_calls += 1
+            if self.pull_calls > 1:
+                if self.failures:
+                    raise KeyboardInterrupt()
+                return None
             return SimpleNamespace(
                 assignment_id="assign_123",
                 execution_id="pexec_123",
@@ -197,19 +210,119 @@ def test_run_worker_loop_reports_assignment_failure():
     assert control.progress_updates[-1][1]["state"] == "failed"
 
 
+def test_worker_limit_uses_embedding_specific_capacity():
+    assert (
+        max_worker_assignments_from_capabilities(
+            {
+                "max_concurrent_assignments": 1,
+                "max_concurrent_assignments_embeddings": 4,
+            }
+        )
+        == 4
+    )
+
+
+def test_process_assignment_bundle_microbatches_compatible_embeddings():
+    class AssignmentControl(FakeControl):
+        def fetch_artifact(self, assignment):
+            return {
+                "items": [
+                    {
+                        "batch_item_id": f"item_{assignment.assignment_id}",
+                        "customer_item_id": f"cust_{assignment.assignment_id}",
+                        "operation": "embeddings",
+                        "model": "BAAI/bge-large-en-v1.5",
+                        "input": {"text": assignment.assignment_id},
+                    }
+                ]
+            }
+
+    class RuntimeStub:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def execute_microbatch(self, operation, model, assignment_items):
+            self.calls.append(
+                (
+                    operation,
+                    model,
+                    [(assignment_id, [item["batch_item_id"] for item in items]) for assignment_id, items in assignment_items],
+                )
+            )
+            return {
+                assignment_id: [
+                    {
+                        "batch_item_id": items[0]["batch_item_id"],
+                        "customer_item_id": items[0]["customer_item_id"],
+                        "provider": "autonomousc_edge",
+                        "provider_model": model,
+                        "status": "completed",
+                        "usage": {"input_texts": 1, "total_tokens": 1},
+                        "cost": {
+                            "provider_cost": {"amount": "0.0001", "currency": "usd"},
+                            "customer_charge": {"amount": "0.0002", "currency": "usd"},
+                            "platform_margin": {"amount": "0.0001", "currency": "usd"},
+                        },
+                        "output": {"data": [{"embedding": [1.0]}]},
+                        "completed_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                ]
+                for assignment_id, items in assignment_items
+            }
+
+    def assignment(assignment_id: str):
+        return SimpleNamespace(
+            assignment_id=assignment_id,
+            execution_id=f"pexec_{assignment_id}",
+            assignment_nonce=f"nonce_{assignment_id}",
+            item_count=1,
+            operation="embeddings",
+            model="BAAI/bge-large-en-v1.5",
+            privacy_tier="standard",
+            node_trust_requirement="untrusted_allowed",
+            result_guarantee="community_best_effort",
+            allowed_regions=["global"],
+            required_vram_gb=1.0,
+            required_context_tokens=512,
+            token_budget={"total_tokens": 8},
+            microbatch_key="embeddings|BAAI/bge-large-en-v1.5|standard",
+        )
+
+    control = AssignmentControl()
+    runtime = RuntimeStub()
+    assignments = [assignment("assign_1"), assignment("assign_2")]
+
+    results = main_module.process_assignment_bundle(control, runtime, assignments, queue_depth=2)
+
+    assert runtime.calls == [
+        (
+            "embeddings",
+            "BAAI/bge-large-en-v1.5",
+            [("assign_1", ["item_assign_1"]), ("assign_2", ["item_assign_2"])],
+        )
+    ]
+    assert [result.kind for result in results] == ["success", "success"]
+    assert [completion[0] for completion in control.completions] == ["assign_1", "assign_2"]
+    running_updates = [progress for _assignment_id, progress in control.progress_updates if progress["state"] == "running"]
+    assert running_updates
+    assert all(progress["microbatch_assignments"] == 2 for progress in running_updates)
+
+
 def test_run_worker_loop_marks_nonretryable_completion_failures_as_failed():
     class AssignmentControl(FakeControl):
         def __init__(self) -> None:
             super().__init__(has_credentials=True)
-            self.pulled = False
+            self.pull_calls = 0
 
         def heartbeat(self, *args, **kwargs):
             return None
 
         def pull_assignment(self):
-            if self.pulled:
-                raise KeyboardInterrupt()
-            self.pulled = True
+            self.pull_calls += 1
+            if self.pull_calls > 1:
+                if self.failures:
+                    raise KeyboardInterrupt()
+                return None
             return SimpleNamespace(
                 assignment_id="assign_complete_413",
                 execution_id="pexec_complete_413",
@@ -281,15 +394,17 @@ def test_run_worker_loop_keeps_assignments_fresh_while_runtime_is_busy(monkeypat
     class AssignmentControl(FakeControl):
         def __init__(self) -> None:
             super().__init__(has_credentials=True)
-            self.pulled = False
+            self.pull_calls = 0
 
         def heartbeat(self, *args, **kwargs):
             return None
 
         def pull_assignment(self):
-            if self.pulled:
-                raise KeyboardInterrupt()
-            self.pulled = True
+            self.pull_calls += 1
+            if self.pull_calls > 1:
+                if any(progress["state"] == "completed" for _assignment_id, progress in self.progress_updates):
+                    raise KeyboardInterrupt()
+                return None
             return SimpleNamespace(
                 assignment_id="assign_keepalive",
                 execution_id="pexec_keepalive",
@@ -331,6 +446,59 @@ def test_run_worker_loop_keeps_assignments_fresh_while_runtime_is_busy(monkeypat
     assert len(running_updates) >= 2
     assert any(progress.get("keepalive") is True for progress in running_updates[1:])
     assert control.progress_updates[-1][1]["state"] == "completed"
+
+
+def test_maybe_send_heartbeat_throttles_idle_updates_and_flushes_slot_changes():
+    class HeartbeatRecordingControl(FakeControl):
+        def __init__(self) -> None:
+            super().__init__(has_credentials=True)
+            self.heartbeat_calls = []
+
+        def heartbeat(self, *args, **kwargs):
+            self.heartbeat_calls.append((args, kwargs))
+            return None
+
+    control = HeartbeatRecordingControl()
+    state = main_module.HeartbeatState()
+    capabilities = {"max_concurrent_assignments": 2}
+    runtime = {"current_model": "meta-llama/Llama-3.1-8B-Instruct"}
+
+    state = main_module.maybe_send_heartbeat(
+        control,
+        state,
+        status="active",
+        queue_depth=0,
+        active_assignments=0,
+        capabilities=capabilities,
+        runtime=runtime,
+        now_monotonic=100.0,
+    )
+    state = main_module.maybe_send_heartbeat(
+        control,
+        state,
+        status="active",
+        queue_depth=0,
+        active_assignments=0,
+        capabilities=capabilities,
+        runtime=runtime,
+        now_monotonic=110.0,
+    )
+    assert len(control.heartbeat_calls) == 1
+
+    state = main_module.maybe_send_heartbeat(
+        control,
+        state,
+        status="active",
+        queue_depth=0,
+        active_assignments=1,
+        capabilities=capabilities,
+        runtime=runtime,
+        now_monotonic=111.0,
+    )
+
+    assert len(control.heartbeat_calls) == 2
+    assert control.heartbeat_calls[-1][1]["include_capabilities"] is False
+    assert control.heartbeat_calls[-1][1]["include_runtime"] is False
 
 
 def test_validate_assignment_rejects_restricted_work_without_hardware_attestation():
