@@ -566,6 +566,28 @@ class ArtifactClient:
         return ArtifactResponse(self.content)
 
 
+class FlakyArtifactResponse:
+    def __init__(self, status_code: int, content: bytes = b""):
+        self.status_code = status_code
+        self.content = content
+        self.request = httpx.Request("GET", "https://edge.autonomousc.test/artifacts/pexec_123/input")
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise httpx.HTTPStatusError("artifact fetch failed", request=self.request, response=httpx.Response(self.status_code))
+
+
+class FlakyArtifactClient:
+    def __init__(self, responses: list[FlakyArtifactResponse]):
+        self.responses = responses
+        self.calls = 0
+
+    def get(self, _path: str):
+        response = self.responses[min(self.calls, len(self.responses) - 1)]
+        self.calls += 1
+        return response
+
+
 def test_fetch_artifact_verifies_ciphertext_hash(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     client = EdgeControlClient(build_settings(tmp_path / "credentials" / "node.json", operator_token=None))
     ciphertext = b"ciphertext"
@@ -588,6 +610,32 @@ def test_fetch_artifact_verifies_ciphertext_hash(monkeypatch: pytest.MonkeyPatch
 
     assert payload == {"items": []}
     assert decrypt_calls == [(ciphertext, {"key_b64": "a2V5", "iv_b64": "aXY="})]
+
+
+def test_fetch_artifact_retries_transient_404_before_hash_check(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    client = EdgeControlClient(build_settings(tmp_path / "credentials" / "node.json", operator_token=None))
+    ciphertext = b"ciphertext"
+    artifact_client = FlakyArtifactClient(
+        [
+            FlakyArtifactResponse(404),
+            FlakyArtifactResponse(404),
+            FlakyArtifactResponse(200, ciphertext),
+        ]
+    )
+    client.client = artifact_client
+    monkeypatch.setattr("node_agent.control_plane.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr("node_agent.control_plane.decrypt_artifact", lambda _payload, _encryption: {"items": []})
+
+    payload = client.fetch_artifact(
+        SimpleNamespace(
+            input_artifact_url="https://edge.autonomousc.test/artifacts/pexec_123/input",
+            input_artifact_sha256=hashlib.sha256(ciphertext).hexdigest(),
+            input_artifact_encryption={"key_b64": "a2V5", "iv_b64": "aXY="},
+        )
+    )
+
+    assert payload == {"items": []}
+    assert artifact_client.calls == 3
 
 
 def test_fetch_artifact_rejects_hash_mismatch_before_decrypt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):

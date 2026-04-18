@@ -27,6 +27,56 @@ heartbeat_interval_seconds = 15.0
 supported_operations = frozenset({"responses", "embeddings"})
 
 
+def normalize_region_token(value: object) -> str:
+    return str(value).strip().lower() if isinstance(value, str) else ""
+
+
+def infer_country_code_from_region(region: str) -> str | None:
+    trimmed = region.strip()
+    if not trimmed:
+        return None
+
+    parts = [part for part in trimmed.replace("_", "-").split("-") if part]
+    last_part = parts[-1] if parts else ""
+    if (
+        len(parts) >= 3
+        and len(parts[0]) == 2
+        and parts[0].isalpha()
+        and len(parts[1]) == 2
+        and parts[1].isalpha()
+        and last_part.isdigit()
+    ):
+        return parts[1].upper()
+
+    if len(parts) >= 2 and len(parts[0]) == 2 and parts[0].isalpha() and len(parts[1]) > 2:
+        return parts[0].upper()
+
+    return None
+
+
+def node_region_scope_tokens(region: str) -> set[str]:
+    trimmed = region.strip()
+    if not trimmed:
+        return set()
+
+    scopes = {normalize_region_token(trimmed)}
+    country_code = infer_country_code_from_region(trimmed)
+    if country_code:
+        scopes.add(normalize_region_token(country_code))
+    return scopes
+
+
+def allowed_regions_include_node_region(allowed_regions: object, node_region: str) -> bool:
+    if not isinstance(allowed_regions, list):
+        return False
+    normalized_allowed_regions = {
+        normalize_region_token(value) for value in allowed_regions if normalize_region_token(value)
+    }
+    if "global" in normalized_allowed_regions:
+        return True
+    return any(scope in normalized_allowed_regions for scope in node_region_scope_tokens(node_region))
+
+
 @dataclass
 class AssignmentWorkerResult:
     assignment_id: str
@@ -241,9 +291,7 @@ def validate_assignment_policy(control: EdgeControlClient, assignment: object) -
     if assignment_model not in configured_supported_models(settings):
         raise ValueError(f"assignment model {getattr(assignment, 'model', None)!r} is not supported by this node")
     allowed_regions = getattr(assignment, "allowed_regions", [])
-    if not isinstance(allowed_regions, list) or (
-        "global" not in allowed_regions and settings.node_region not in allowed_regions
-    ):
+    if not allowed_regions_include_node_region(allowed_regions, settings.node_region):
         raise ValueError(f"assignment is not allowed to run in node region {settings.node_region!r}")
 
     token_budget = getattr(assignment, "token_budget", {})

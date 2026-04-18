@@ -210,6 +210,35 @@ def test_run_worker_loop_reports_assignment_failure():
     assert control.progress_updates[-1][1]["state"] == "failed"
 
 
+def policy_assignment(**overrides):
+    values = {
+        "assignment_id": "assign_policy",
+        "execution_id": "pexec_policy",
+        "operation": "embeddings",
+        "model": "BAAI/bge-large-en-v1.5",
+        "privacy_tier": "standard",
+        "allowed_regions": ["eu-se-1"],
+        "required_vram_gb": 1.0,
+        "required_context_tokens": 512,
+        "token_budget": {"total_tokens": 8},
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def test_validate_assignment_policy_accepts_country_code_region_scope():
+    control = FakeControl()
+
+    main_module.validate_assignment_policy(control, policy_assignment(allowed_regions=["SE"]))
+
+
+def test_validate_assignment_policy_rejects_unmatched_country_code_region_scope():
+    control = FakeControl()
+
+    with pytest.raises(ValueError, match="node region 'eu-se-1'"):
+        main_module.validate_assignment_policy(control, policy_assignment(allowed_regions=["US"]))
+
+
 def test_worker_limit_uses_embedding_specific_capacity():
     assert (
         max_worker_assignments_from_capabilities(

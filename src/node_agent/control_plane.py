@@ -22,6 +22,10 @@ from .runtime_evidence import resolved_signed_runtime_evidence
 from .runtime_tuple import resolved_default_runtime_tuple
 
 
+ARTIFACT_FETCH_RETRY_STATUSES = {404, 408, 409, 425, 429, 500, 502, 503, 504}
+ARTIFACT_FETCH_RETRY_DELAYS_SECONDS = (0.5, 1.0, 2.0)
+
+
 class EdgeControlClient:
     def __init__(self, settings: NodeAgentSettings):
         self.settings = settings
@@ -562,7 +566,7 @@ class EdgeControlClient:
         )
 
     def fetch_artifact(self, assignment: AssignmentEnvelope) -> dict[str, Any]:
-        content = self.transport.get_content(assignment.input_artifact_url)
+        content = self._fetch_artifact_content(assignment.input_artifact_url)
         ciphertext_sha256 = hashlib.sha256(content).hexdigest()
         if ciphertext_sha256 != assignment.input_artifact_sha256:
             raise ValueError(
@@ -570,6 +574,20 @@ class EdgeControlClient:
                 f"expected {assignment.input_artifact_sha256}, got {ciphertext_sha256}"
             )
         return decrypt_artifact(content, assignment.input_artifact_encryption)
+
+    def _fetch_artifact_content(self, url: str) -> bytes:
+        for attempt, delay_seconds in enumerate((*ARTIFACT_FETCH_RETRY_DELAYS_SECONDS, None)):
+            try:
+                return self.transport.get_content(url)
+            except httpx.HTTPStatusError as exc:
+                retryable_status = exc.response.status_code in ARTIFACT_FETCH_RETRY_STATUSES
+                if delay_seconds is None or not retryable_status:
+                    raise
+            except httpx.TransportError:
+                if delay_seconds is None:
+                    raise
+            time.sleep(delay_seconds)
+        raise RuntimeError("input artifact fetch retry loop exhausted")
 
 
 def decrypt_artifact(payload: bytes, encryption: dict[str, str]) -> dict[str, Any]:
