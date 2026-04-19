@@ -110,3 +110,5 @@ def test_autopilot_reports_higher_embeddings_concurrency_for_embedding_only_node
     capabilities = autopilot.capabilities_payload()
     assert capabilities["max_concurrent_assignments"] == 1
     assert capabilities["max_concurrent_assignments_embeddings"] == 3
+    assert capabilities["max_microbatch_assignments_embeddings"] == 16
+    assert capabilities["max_pull_bundle_assignments"] == 16
