@@ -239,6 +239,21 @@ def test_validate_assignment_policy_rejects_unmatched_country_code_region_scope(
         main_module.validate_assignment_policy(control, policy_assignment(allowed_regions=["US"]))
 
 
+def test_validate_assignment_policy_accepts_small_vram_rounding_gap():
+    control = FakeControl()
+    control.settings.gpu_memory_gb = 11.9
+
+    main_module.validate_assignment_policy(control, policy_assignment(required_vram_gb=12.0))
+
+
+def test_validate_assignment_policy_rejects_vram_gap_beyond_tolerance():
+    control = FakeControl()
+    control.settings.gpu_memory_gb = 11.7
+
+    with pytest.raises(ValueError, match="requires 12.0 GiB of VRAM"):
+        main_module.validate_assignment_policy(control, policy_assignment(required_vram_gb=12.0))
+
+
 def test_worker_limit_uses_embedding_specific_capacity():
     assert (
         max_worker_assignments_from_capabilities(

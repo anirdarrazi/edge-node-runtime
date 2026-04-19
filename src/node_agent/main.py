@@ -25,6 +25,7 @@ LOGGER = logging.getLogger("autonomousc-node-agent")
 assignment_progress_keepalive_seconds = 30.0
 heartbeat_interval_seconds = 15.0
 supported_operations = frozenset({"responses", "embeddings"})
+vram_comparison_tolerance_gb = 0.25
 
 
 def normalize_region_token(value: object) -> str:
@@ -306,7 +307,7 @@ def validate_assignment_policy(control: EdgeControlClient, assignment: object) -
     required_vram_gb = getattr(assignment, "required_vram_gb", None)
     if not isinstance(required_vram_gb, (int, float)) or required_vram_gb <= 0:
         raise ValueError("assignment required_vram_gb is invalid")
-    if float(required_vram_gb) > settings.gpu_memory_gb:
+    if float(required_vram_gb) > settings.gpu_memory_gb + vram_comparison_tolerance_gb:
         raise ValueError(
             f"assignment requires {required_vram_gb} GiB of VRAM but this node only reports {settings.gpu_memory_gb}"
         )
