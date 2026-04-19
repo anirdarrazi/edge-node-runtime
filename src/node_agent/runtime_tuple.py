@@ -13,6 +13,10 @@ from .model_artifacts import (
 )
 from .runtime_profiles import DEFAULT_EMBEDDING_MODEL, llama_cpp_model_source
 
+KNOWN_EFFECTIVE_CONTEXT_TOKENS: dict[tuple[str, str], int] = {
+    (DEFAULT_EMBEDDING_MODEL, "embeddings"): 512,
+}
+
 
 @dataclass(frozen=True)
 class RuntimeTuple:
@@ -51,12 +55,26 @@ def _sha256_json(value: Any) -> str:
     return f"sha256:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
 
 
-def _effective_context_tokens(settings: object, gguf_expected_context: int | None) -> int | None:
+def _known_effective_context_tokens(model: str | None, operation: str | None) -> int | None:
+    if not isinstance(model, str) or not model or not isinstance(operation, str) or not operation:
+        return None
+    value = KNOWN_EFFECTIVE_CONTEXT_TOKENS.get((model, operation))
+    return value if isinstance(value, int) and value > 0 else None
+
+
+def _effective_context_tokens(
+    settings: object,
+    model: str | None,
+    operation: str | None,
+    gguf_expected_context: int | None,
+) -> int | None:
     max_context = getattr(settings, "max_context_tokens", None)
     local_max = max_context if isinstance(max_context, int) and max_context > 0 else None
-    if local_max is not None and gguf_expected_context is not None:
-        return min(local_max, gguf_expected_context)
-    return local_max or gguf_expected_context
+    known_context = _known_effective_context_tokens(model, operation)
+    expected_context = gguf_expected_context if gguf_expected_context is not None else known_context
+    if local_max is not None and expected_context is not None:
+        return min(local_max, expected_context)
+    return local_max or expected_context
 
 
 def _default_operation_for_settings(settings: object) -> str:
@@ -89,6 +107,8 @@ def resolved_runtime_tuple(settings: object, model: str | None, operation: str |
     quantization_type = gguf_artifact.quantization_type if gguf_artifact is not None else None
     effective_context_tokens = _effective_context_tokens(
         settings,
+        model,
+        operation,
         gguf_artifact.expected_context_tokens if gguf_artifact is not None else None,
     )
     if chat_template_digest is None and gguf_artifact is not None and gguf_artifact.capabilities.chat:

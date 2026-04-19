@@ -673,6 +673,26 @@ def test_build_runtime_receipt_uses_release_metadata_for_the_assignment_model():
     assert isinstance(receipt["declared_runtime_tuple_digest"], str)
 
 
+def test_build_runtime_receipt_uses_embedding_model_context_limit():
+    control = FakeControl(has_credentials=True)
+    assignment = SimpleNamespace(
+        assignment_id="assign_receipt_embedding",
+        execution_id="pexec_receipt_embedding",
+        assignment_nonce="nonce_embedding",
+        operation="embeddings",
+        model="BAAI/bge-large-en-v1.5",
+    )
+    artifact = find_model_artifact("BAAI/bge-large-en-v1.5", "embeddings")
+
+    receipt = main_module.build_runtime_receipt(control, assignment, [{"usage": {"total_tokens": 5}}])
+
+    assert artifact is not None
+    assert receipt["declared_model_manifest_digest"] == artifact.model_manifest_digest
+    assert receipt["declared_tokenizer_digest"] == artifact.tokenizer_digest
+    assert receipt["declared_effective_context_tokens"] == 512
+    assert isinstance(receipt["declared_runtime_tuple_digest"], str)
+
+
 def test_build_runtime_receipt_declares_gguf_artifact_for_llama_cpp():
     control = FakeControl(has_credentials=True)
     control.settings.runtime_profile = "home_llama_cpp_gguf"

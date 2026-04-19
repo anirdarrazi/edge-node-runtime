@@ -314,6 +314,25 @@ def test_heartbeat_reports_home_heating_telemetry(tmp_path: Path):
     assert payload["capabilities"]["energy_price_kwh"] == 0.14
 
 
+def test_heartbeat_reports_embedding_runtime_context_from_current_model(tmp_path: Path):
+    credentials_path = tmp_path / "credentials" / "node.json"
+    settings = build_settings(credentials_path, operator_token="operator_token")
+    settings.node_id = "node_123"
+    settings.node_key = "key_123456789012345678901234"
+    settings.runtime_profile = "vast_vllm_safetensors"
+    settings.vllm_model = "BAAI/bge-large-en-v1.5"
+    client = EdgeControlClient(settings)
+    recording_client = RecordingClient()
+    client.client = recording_client
+
+    client.heartbeat(queue_depth=0, active_assignments=0)
+
+    _path, payload = recording_client.calls[0]
+    assert payload["capabilities"]["max_context_tokens"] == settings.max_context_tokens
+    assert payload["runtime"]["current_model"] == "BAAI/bge-large-en-v1.5"
+    assert payload["runtime"]["effective_context_tokens"] == 512
+
+
 def test_heartbeat_can_omit_capabilities_and_runtime(tmp_path: Path):
     credentials_path = tmp_path / "credentials" / "node.json"
     settings = build_settings(credentials_path, operator_token="operator_token")
