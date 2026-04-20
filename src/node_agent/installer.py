@@ -94,6 +94,8 @@ ENV_ORDER = [
     "MAX_CONTEXT_TOKENS",
     "MAX_BATCH_TOKENS",
     "MAX_CONCURRENT_ASSIGNMENTS",
+    "TARGET_GPU_UTILIZATION_PCT",
+    "MIN_GPU_MEMORY_HEADROOM_PCT",
     "THERMAL_HEADROOM",
     "HEAT_DEMAND",
     "ROOM_TEMP_C",
@@ -235,8 +237,8 @@ NVIDIA_SUPPORT_PRESETS = (
         supported_models=(DEFAULT_EMBEDDING_MODEL,),
         recommended_profile="balanced",
         quiet_concurrency="1",
-        balanced_concurrency="1",
-        performance_concurrency="2",
+        balanced_concurrency="4",
+        performance_concurrency="6",
         summary=(
             "12-23 GB NVIDIA stays on the embeddings/community preset so setup stays predictable on smaller cards."
         ),
@@ -257,8 +259,8 @@ NVIDIA_SUPPORT_PRESETS = (
         supported_models=(DEFAULT_VLLM_MODEL, DEFAULT_EMBEDDING_MODEL),
         recommended_profile="balanced",
         quiet_concurrency="1",
-        balanced_concurrency="2",
-        performance_concurrency="3",
+        balanced_concurrency="3",
+        performance_concurrency="5",
         summary=(
             "24-47 GB NVIDIA runs the Llama 8B + embeddings preset with balanced tuning by default."
         ),
@@ -278,9 +280,9 @@ NVIDIA_SUPPORT_PRESETS = (
         startup_model=DEFAULT_VLLM_MODEL,
         supported_models=(DEFAULT_VLLM_MODEL, DEFAULT_EMBEDDING_MODEL),
         recommended_profile="performance",
-        quiet_concurrency="1",
-        balanced_concurrency="3",
-        performance_concurrency="4",
+        quiet_concurrency="2",
+        balanced_concurrency="4",
+        performance_concurrency="6",
         summary=(
             "48+ GB NVIDIA uses the large preset today and keeps room for larger premium profiles later."
         ),
@@ -742,16 +744,7 @@ def optional_env_value(value: Any) -> str:
 
 
 def suggest_concurrency(memory_gb: float | None) -> str:
-    preset = nvidia_support_preset(memory_gb)
-    if preset is not None:
-        return preset.concurrency_for_profile(preset.recommended_profile)
-    if memory_gb is None:
-        return "2"
-    if memory_gb < 16:
-        return "1"
-    if memory_gb >= 40:
-        return "3"
-    return "2"
+    return profile_concurrency(recommended_setup_profile(memory_gb), memory_gb)
 
 
 def recommended_setup_profile(memory_gb: float | None) -> str:
@@ -773,17 +766,21 @@ def normalize_setup_profile(profile: str | None, memory_gb: float | None) -> str
 
 
 def profile_concurrency(profile: str, memory_gb: float | None) -> str:
-    preset = nvidia_support_preset(memory_gb)
-    if preset is not None:
-        return preset.concurrency_for_profile(profile)
-    base = max(1, int(suggest_concurrency(memory_gb)))
     if profile == "quiet":
+        if memory_gb is not None and memory_gb >= 48:
+            return "2"
         return "1"
+    if memory_gb is None:
+        return "2" if profile == "balanced" else "3"
+    if memory_gb < 24:
+        return "2" if profile == "performance" else "1"
+    if memory_gb < 48:
+        if profile == "performance":
+            return "3"
+        return "2"
     if profile == "performance":
-        if memory_gb is not None and memory_gb >= 24:
-            return str(min(4, base + 1))
-        return str(base)
-    return str(base)
+        return "4"
+    return "3"
 
 
 def profile_thermal_headroom(profile: str, fallback: float) -> str:
@@ -1117,6 +1114,8 @@ class GuidedInstaller:
             "MAX_CONTEXT_TOKENS",
             "MAX_BATCH_TOKENS",
             "MAX_CONCURRENT_ASSIGNMENTS",
+            "TARGET_GPU_UTILIZATION_PCT",
+            "MIN_GPU_MEMORY_HEADROOM_PCT",
             "THERMAL_HEADROOM",
             "HEAT_DEMAND",
             "ROOM_TEMP_C",
@@ -1226,6 +1225,12 @@ class GuidedInstaller:
             "MAX_CONCURRENT_ASSIGNMENTS": str(
                 _safe_int(config.get("max_concurrent_assignments"), defaults.max_concurrent_assignments)
             ),
+            "TARGET_GPU_UTILIZATION_PCT": str(
+                _safe_int(config.get("target_gpu_utilization_pct"), defaults.target_gpu_utilization_pct)
+            ),
+            "MIN_GPU_MEMORY_HEADROOM_PCT": str(
+                _safe_float(config.get("min_gpu_memory_headroom_pct"), defaults.min_gpu_memory_headroom_pct)
+            ),
             "THERMAL_HEADROOM": str(_safe_float(config.get("thermal_headroom"), defaults.thermal_headroom)),
             "HEAT_DEMAND": first_nonempty(str(config.get("heat_demand", "")), defaults.heat_demand),
             "ROOM_TEMP_C": optional_env_value(config.get("room_temp_c")),
@@ -1311,6 +1316,14 @@ class GuidedInstaller:
                 "max_concurrent_assignments": _safe_int(
                     env_values.get("MAX_CONCURRENT_ASSIGNMENTS"),
                     defaults.max_concurrent_assignments,
+                ),
+                "target_gpu_utilization_pct": _safe_int(
+                    env_values.get("TARGET_GPU_UTILIZATION_PCT"),
+                    defaults.target_gpu_utilization_pct,
+                ),
+                "min_gpu_memory_headroom_pct": _safe_float(
+                    env_values.get("MIN_GPU_MEMORY_HEADROOM_PCT"),
+                    defaults.min_gpu_memory_headroom_pct,
                 ),
                 "thermal_headroom": _safe_float(env_values.get("THERMAL_HEADROOM"), defaults.thermal_headroom),
                 "supported_models": env_values.get("SUPPORTED_MODELS", defaults.supported_models),
@@ -1501,6 +1514,14 @@ class GuidedInstaller:
             persisted.get("MAX_CONCURRENT_ASSIGNMENTS"),
             profile_concurrency(profile, numeric_gpu_memory),
         )
+        target_gpu_utilization_pct = first_nonempty(
+            persisted.get("TARGET_GPU_UTILIZATION_PCT"),
+            str(default_settings.target_gpu_utilization_pct),
+        )
+        min_gpu_memory_headroom_pct = first_nonempty(
+            persisted.get("MIN_GPU_MEMORY_HEADROOM_PCT"),
+            str(default_settings.min_gpu_memory_headroom_pct),
+        )
         thermal_headroom = first_nonempty(
             persisted.get("THERMAL_HEADROOM"),
             profile_thermal_headroom(profile, default_settings.thermal_headroom),
@@ -1568,6 +1589,8 @@ class GuidedInstaller:
             "bootstrap_pending_upgrade": bootstrap_pending_upgrade,
             "startup_model_fallback": startup_model_fallback,
             "max_concurrent_assignments": concurrency,
+            "target_gpu_utilization_pct": target_gpu_utilization_pct,
+            "min_gpu_memory_headroom_pct": min_gpu_memory_headroom_pct,
             "setup_profile": profile,
             "recommended_setup_profile": recommended_profile,
             "profile_summary": profile_summary(profile, gpu_name, concurrency),
@@ -1603,6 +1626,8 @@ class GuidedInstaller:
             "recommended_model": inferred_startup_model,
             "recommended_supported_models": inferred_supported_models,
             "recommended_max_concurrent_assignments": profile_concurrency(recommended_profile, numeric_gpu_memory),
+            "recommended_target_gpu_utilization_pct": default_settings.target_gpu_utilization_pct,
+            "recommended_min_gpu_memory_headroom_pct": default_settings.min_gpu_memory_headroom_pct,
             "recommended_thermal_headroom": profile_thermal_headroom(
                 recommended_profile,
                 default_settings.thermal_headroom,
@@ -3009,6 +3034,24 @@ class GuidedInstaller:
                     default_concurrency,
                 )
             ),
+            "TARGET_GPU_UTILIZATION_PCT": (
+                str(defaults.target_gpu_utilization_pct)
+                if advanced_defaults_only
+                else first_nonempty(
+                    str(config.get("target_gpu_utilization_pct", "")),
+                    persisted.get("TARGET_GPU_UTILIZATION_PCT"),
+                    str(defaults.target_gpu_utilization_pct),
+                )
+            ),
+            "MIN_GPU_MEMORY_HEADROOM_PCT": (
+                str(defaults.min_gpu_memory_headroom_pct)
+                if advanced_defaults_only
+                else first_nonempty(
+                    str(config.get("min_gpu_memory_headroom_pct", "")),
+                    persisted.get("MIN_GPU_MEMORY_HEADROOM_PCT"),
+                    str(defaults.min_gpu_memory_headroom_pct),
+                )
+            ),
             "THERMAL_HEADROOM": (
                 default_thermal_headroom
                 if advanced_defaults_only
@@ -3462,6 +3505,12 @@ class GuidedInstaller:
             max_context_tokens=int(env_values["MAX_CONTEXT_TOKENS"]),
             max_batch_tokens=int(env_values["MAX_BATCH_TOKENS"]),
             max_concurrent_assignments=int(env_values["MAX_CONCURRENT_ASSIGNMENTS"]),
+            target_gpu_utilization_pct=int(
+                env_values.get("TARGET_GPU_UTILIZATION_PCT", defaults.target_gpu_utilization_pct)
+            ),
+            min_gpu_memory_headroom_pct=float(
+                env_values.get("MIN_GPU_MEMORY_HEADROOM_PCT", defaults.min_gpu_memory_headroom_pct)
+            ),
             thermal_headroom=float(env_values["THERMAL_HEADROOM"]),
             heat_demand=env_values.get("HEAT_DEMAND", defaults.heat_demand),
             room_temp_c=coerce_float_or_none(env_values.get("ROOM_TEMP_C")),

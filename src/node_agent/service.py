@@ -2007,7 +2007,7 @@ class NodeRuntimeService:
         next_env = dict(env_values)
         changed = False
         for key, value in env_updates.items():
-            if key not in {"SETUP_PROFILE", "MAX_CONCURRENT_ASSIGNMENTS", "THERMAL_HEADROOM", "SUPPORTED_MODELS", "VLLM_MODEL"}:
+            if key not in {"SETUP_PROFILE", "MAX_CONCURRENT_ASSIGNMENTS", "THERMAL_HEADROOM", "SUPPORTED_MODELS", "VLLM_MODEL", "RUNTIME_PROFILE"}:
                 continue
             next_value = str(value)
             if next_env.get(key) != next_value:

@@ -529,6 +529,16 @@
                     Max concurrent assignments
                     <input id="max_concurrent_assignments" name="max_concurrent_assignments" type="number" min="1" max="16">
                   </label>
+
+                  <label>
+                    Target GPU utilization %
+                    <input id="target_gpu_utilization_pct" name="target_gpu_utilization_pct" type="number" min="30" max="100" step="5">
+                  </label>
+
+                  <label>
+                    Minimum GPU memory headroom %
+                    <input id="min_gpu_memory_headroom_pct" name="min_gpu_memory_headroom_pct" type="number" min="5" max="60" step="1">
+                  </label>
                 </div>
               </details>
             </div>
@@ -774,7 +784,9 @@
           restricted_capable: document.getElementById("restricted_capable").checked,
           vllm_model: document.getElementById("vllm_model").value.trim(),
           supported_models: document.getElementById("supported_models").value.trim(),
-          max_concurrent_assignments: document.getElementById("max_concurrent_assignments").value.trim()
+          max_concurrent_assignments: document.getElementById("max_concurrent_assignments").value.trim(),
+          target_gpu_utilization_pct: document.getElementById("target_gpu_utilization_pct").value.trim(),
+          min_gpu_memory_headroom_pct: document.getElementById("min_gpu_memory_headroom_pct").value.trim()
         };
       }
 
@@ -788,6 +800,8 @@
         document.getElementById("vllm_model").value = config.vllm_model || "";
         document.getElementById("supported_models").value = config.supported_models || "";
         document.getElementById("max_concurrent_assignments").value = config.max_concurrent_assignments || "";
+        document.getElementById("target_gpu_utilization_pct").value = config.target_gpu_utilization_pct || "100";
+        document.getElementById("min_gpu_memory_headroom_pct").value = config.min_gpu_memory_headroom_pct || "20";
         selectProfile(config.setup_profile || config.recommended_setup_profile || "balanced");
         formHydrated = true;
       }

@@ -27,6 +27,10 @@ DEFAULT_RESPONSE_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-large-en-v1.5"
 AUTOPILOT_STATE_VERSION = 1
 HEAT_DEMAND_LEVELS = {"none", "low", "medium", "high"}
+MIN_TARGET_GPU_UTILIZATION_PCT = 30
+MAX_TARGET_GPU_UTILIZATION_PCT = 100
+MIN_GPU_MEMORY_HEADROOM_PCT = 5.0
+MAX_GPU_MEMORY_HEADROOM_PCT = 60.0
 
 
 def now_iso() -> str:
@@ -124,6 +128,8 @@ class AutopilotSignals:
     queue_depth: int = 0
     active_assignments: int = 0
     gpu_memory_pressure: float | None = None
+    gpu_utilization_pct: float | None = None
+    gpu_memory_utilization_pct: float | None = None
     gpu_temp_c: float | None = None
     power_watts: float | None = None
     estimated_heat_output_watts: float | None = None
@@ -193,6 +199,16 @@ def state_from_payload(payload: dict[str, Any], settings: NodeAgentSettings) -> 
             gpu_memory_pressure=(
                 clamp(safe_float(signals_payload.get("gpu_memory_pressure"), 0.0), 0.0, 1.0)
                 if signals_payload.get("gpu_memory_pressure") is not None
+                else None
+            ),
+            gpu_utilization_pct=(
+                clamp(safe_float(signals_payload.get("gpu_utilization_pct"), 0.0), 0.0, 100.0)
+                if signals_payload.get("gpu_utilization_pct") is not None
+                else None
+            ),
+            gpu_memory_utilization_pct=(
+                clamp(safe_float(signals_payload.get("gpu_memory_utilization_pct"), 0.0), 0.0, 100.0)
+                if signals_payload.get("gpu_memory_utilization_pct") is not None
                 else None
             ),
             gpu_temp_c=(
@@ -333,6 +349,28 @@ class AutopilotController:
             return None
         return clamp(used / total, 0.0, 1.0)
 
+    def sample_gpu_utilization_pct(self) -> float | None:
+        if shutil.which("nvidia-smi") is None:
+            return None
+        try:
+            completed = subprocess.run(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=utilization.gpu",
+                    "--format=csv,noheader,nounits",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=3.0,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        first_line = completed.stdout.splitlines()[0].strip() if completed.stdout.splitlines() else ""
+        if not first_line:
+            return None
+        return clamp(safe_float(first_line, 0.0), 0.0, 100.0)
+
     def sample_gpu_thermal_metrics(self) -> dict[str, float] | None:
         if shutil.which("nvidia-smi") is None:
             return None
@@ -362,21 +400,107 @@ class AutopilotController:
             "estimated_heat_output_watts": power_watts,
         }
 
-    def refresh_gpu_signals(self) -> None:
+    def refresh_gpu_signals(self, *, gpu_sample: Any | None = None) -> None:
+        if gpu_sample is not None:
+            sampled_memory_utilization_raw = getattr(gpu_sample, "memory_utilization_percent", None)
+            sampled_utilization_raw = getattr(gpu_sample, "utilization_percent", None)
+            if sampled_memory_utilization_raw is not None:
+                sampled_memory_utilization_pct = safe_float(sampled_memory_utilization_raw, 0.0)
+                memory_utilization_pct = clamp(sampled_memory_utilization_pct, 0.0, 100.0)
+                self.state.signals.gpu_memory_utilization_pct = memory_utilization_pct
+                self.state.signals.gpu_memory_pressure = clamp(memory_utilization_pct / 100.0, 0.0, 1.0)
+            if sampled_utilization_raw is not None:
+                sampled_utilization_pct = safe_float(sampled_utilization_raw, 0.0)
+                self.state.signals.gpu_utilization_pct = clamp(sampled_utilization_pct, 0.0, 100.0)
+            sampled_power_watts = getattr(gpu_sample, "power_watts", None)
+            if sampled_power_watts is not None:
+                self.state.signals.power_watts = max(0.0, safe_float(sampled_power_watts, 0.0))
+                self.state.signals.estimated_heat_output_watts = self.state.signals.power_watts
+            sampled_gpu_temp_c = getattr(gpu_sample, "temperature_c", None)
+            if sampled_gpu_temp_c is not None:
+                self.state.signals.gpu_temp_c = max(0.0, safe_float(sampled_gpu_temp_c, 0.0))
+            return
+
         sampled_pressure = self.sample_gpu_memory_pressure()
         if sampled_pressure is not None:
             self.state.signals.gpu_memory_pressure = sampled_pressure
+            self.state.signals.gpu_memory_utilization_pct = clamp(sampled_pressure * 100.0, 0.0, 100.0)
+        sampled_utilization_pct = self.sample_gpu_utilization_pct()
+        if sampled_utilization_pct is not None:
+            self.state.signals.gpu_utilization_pct = sampled_utilization_pct
         sampled_thermal = self.sample_gpu_thermal_metrics()
         if sampled_thermal is not None:
             self.state.signals.gpu_temp_c = sampled_thermal["gpu_temp_c"]
             self.state.signals.power_watts = sampled_thermal["power_watts"]
             self.state.signals.estimated_heat_output_watts = sampled_thermal["estimated_heat_output_watts"]
 
-    def observe_idle(self, *, queue_depth: int = 0, active_assignments: int = 0) -> None:
+    @staticmethod
+    def _target_concurrency_ceiling_for_model(model: str, settings: NodeAgentSettings) -> int:
+        gpu_memory_gb = settings_float(settings, "gpu_memory_gb", 24.0)
+        operations = operations_for_model(model, settings)
+        embedding_only = operations == ["embeddings"]
+        if embedding_only:
+            if gpu_memory_gb < 12:
+                return 1
+            if gpu_memory_gb < 16:
+                return 3
+            if gpu_memory_gb < 24:
+                return 5
+            if gpu_memory_gb < 48:
+                return 7
+            return 10
+        if gpu_memory_gb < 12:
+            return 1
+        if gpu_memory_gb < 16:
+            return 2
+        if gpu_memory_gb < 24:
+            return 3
+        if gpu_memory_gb < 48:
+            return 5
+        return 6
+
+    def configured_target_gpu_utilization_pct(self) -> int:
+        return int(
+            clamp(
+                float(settings_int(self.settings, "target_gpu_utilization_pct", MAX_TARGET_GPU_UTILIZATION_PCT)),
+                MIN_TARGET_GPU_UTILIZATION_PCT,
+                MAX_TARGET_GPU_UTILIZATION_PCT,
+            )
+        )
+
+    def configured_min_gpu_memory_headroom_pct(self) -> float:
+        return clamp(
+            settings_float(self.settings, "min_gpu_memory_headroom_pct", 20.0),
+            MIN_GPU_MEMORY_HEADROOM_PCT,
+            MAX_GPU_MEMORY_HEADROOM_PCT,
+        )
+
+    def configured_memory_utilization_ceiling_pct(self) -> float:
+        return clamp(100.0 - self.configured_min_gpu_memory_headroom_pct(), 40.0, 95.0)
+
+    def dynamic_concurrency_ceiling(self, *, model: str) -> int:
+        safe_ceiling = self._target_concurrency_ceiling_for_model(model, self.settings)
+        target_gpu_utilization_pct = self.configured_target_gpu_utilization_pct()
+        scaled_ceiling = max(1, round(safe_ceiling * (target_gpu_utilization_pct / 100.0)))
+        return max(1, scaled_ceiling)
+
+    def target_thermal_headroom(self, *, configured_headroom: float, target_gpu_utilization_pct: int) -> float:
+        scaled_headroom = 0.55 + (
+            (
+                clamp(float(target_gpu_utilization_pct), MIN_TARGET_GPU_UTILIZATION_PCT, MAX_TARGET_GPU_UTILIZATION_PCT)
+                - MIN_TARGET_GPU_UTILIZATION_PCT
+            )
+            / (MAX_TARGET_GPU_UTILIZATION_PCT - MIN_TARGET_GPU_UTILIZATION_PCT)
+        ) * 0.37
+        if target_gpu_utilization_pct >= MAX_TARGET_GPU_UTILIZATION_PCT:
+            return clamp(max(configured_headroom, scaled_headroom), 0.2, 1.0)
+        return clamp(min(configured_headroom, scaled_headroom), 0.2, 1.0)
+
+    def observe_idle(self, *, queue_depth: int = 0, active_assignments: int = 0, gpu_sample: Any | None = None) -> None:
         signals = self.state.signals
         signals.queue_depth = max(0, queue_depth)
         signals.active_assignments = max(0, active_assignments)
-        self.refresh_gpu_signals()
+        self.refresh_gpu_signals(gpu_sample=gpu_sample)
         signals.last_observed_at = now_iso()
         self.evaluate()
         self.save()
@@ -387,6 +511,7 @@ class AutopilotController:
         latency_seconds: float,
         queue_depth: int = 0,
         active_assignments: int = 0,
+        gpu_sample: Any | None = None,
     ) -> None:
         signals = self.state.signals
         signals.completed_count += 1
@@ -401,7 +526,7 @@ class AutopilotController:
         signals.last_failure_code = None
         signals.last_failure_retryable = None
         self._refresh_failure_rate()
-        self.refresh_gpu_signals()
+        self.refresh_gpu_signals(gpu_sample=gpu_sample)
         signals.last_observed_at = now_iso()
         self.evaluate()
         self.save()
@@ -413,6 +538,7 @@ class AutopilotController:
         retryable: bool,
         queue_depth: int = 0,
         active_assignments: int = 0,
+        gpu_sample: Any | None = None,
     ) -> None:
         signals = self.state.signals
         signals.failed_count += 1
@@ -421,7 +547,7 @@ class AutopilotController:
         signals.queue_depth = max(0, queue_depth)
         signals.active_assignments = max(0, active_assignments)
         self._refresh_failure_rate()
-        self.refresh_gpu_signals()
+        self.refresh_gpu_signals(gpu_sample=gpu_sample)
         signals.last_observed_at = now_iso()
         self.evaluate()
         self.save()
@@ -436,26 +562,53 @@ class AutopilotController:
     def evaluate(self) -> AutopilotRecommendation:
         signals = self.state.signals
         baseline = max(1, self.state.baseline_concurrency)
+        previous_recommendation = self.state.recommendation
         pressure = signals.gpu_memory_pressure
+        gpu_memory_utilization_pct = (
+            signals.gpu_memory_utilization_pct
+            if signals.gpu_memory_utilization_pct is not None
+            else (pressure * 100.0 if pressure is not None else None)
+        )
+        gpu_utilization_pct = signals.gpu_utilization_pct
         latency = signals.ewma_latency_seconds
         enough_samples = signals.completed_count + signals.failed_count >= 3
         failure_high = enough_samples and signals.failure_rate >= 0.25
-        pressure_high = pressure is not None and pressure >= 0.92
-        pressure_critical = pressure is not None and pressure >= 0.96
+        memory_utilization_ceiling_pct = self.configured_memory_utilization_ceiling_pct()
+        pressure_high = (
+            gpu_memory_utilization_pct is not None
+            and gpu_memory_utilization_pct >= memory_utilization_ceiling_pct
+        ) or (pressure is not None and pressure >= 0.92)
+        pressure_critical = (
+            gpu_memory_utilization_pct is not None
+            and gpu_memory_utilization_pct >= min(99.0, memory_utilization_ceiling_pct + 8.0)
+        ) or (pressure is not None and pressure >= 0.96)
         latency_high = latency is not None and latency >= 180
-        demand_high = signals.queue_depth >= 2 or signals.active_assignments >= baseline
+        target_gpu_utilization_pct = self.configured_target_gpu_utilization_pct()
+        demand_high = signals.queue_depth >= 1 or signals.active_assignments >= max(1, previous_recommendation.max_concurrent_assignments)
         stable = not failure_high and not pressure_high and (latency is None or latency < 120)
 
         configured_model = settings_str(self.settings, "vllm_model", self.state.baseline_model or DEFAULT_RESPONSE_MODEL)
         configured_models_csv = settings_str(self.settings, "supported_models", configured_model)
-        configured_concurrency = max(1, settings_int(self.settings, "max_concurrent_assignments", baseline))
         configured_headroom = clamp(settings_float(self.settings, "thermal_headroom", 0.8), 0.2, 1.0)
+        current_concurrency = max(1, previous_recommendation.max_concurrent_assignments or baseline)
         target_model = configured_model
         supported_models = configured_models_csv
-        profile = self.profile_from_headroom(configured_headroom)
-        concurrency = max(1, min(baseline, configured_concurrency))
-        thermal_headroom = configured_headroom
-        reason = "Autopilot is holding the current plan while it gathers real workload data."
+        concurrency = current_concurrency
+        thermal_headroom = self.target_thermal_headroom(
+            configured_headroom=configured_headroom,
+            target_gpu_utilization_pct=target_gpu_utilization_pct,
+        )
+        profile = self.profile_from_headroom(thermal_headroom)
+        reason = "Autopilot is holding the current plan while it collects enough GPU utilization data to retune safely."
+        target_concurrency_ceiling = self.dynamic_concurrency_ceiling(model=configured_model)
+        utilization_below_target = (
+            gpu_utilization_pct is None
+            or gpu_utilization_pct <= max(0.0, target_gpu_utilization_pct - 12.0)
+        )
+        utilization_far_above_target = (
+            gpu_utilization_pct is not None
+            and gpu_utilization_pct >= min(100.0, target_gpu_utilization_pct + 18.0)
+        )
 
         if (pressure_critical or failure_high) and self.smaller_model_available():
             target_model = DEFAULT_EMBEDDING_MODEL
@@ -469,23 +622,40 @@ class AutopilotController:
             )
         elif pressure_high or failure_high or latency_high:
             profile = "quiet"
-            concurrency = 1
-            thermal_headroom = 0.58
-            reason = "Autopilot reduced concurrency and thermal headroom after latency, failures, or GPU pressure rose."
-        elif demand_high and stable and pressure is not None and pressure <= 0.76:
-            profile = "performance"
-            concurrency = min(max(baseline, 2), 4)
-            thermal_headroom = 0.92
-            target_model = self.state.baseline_model
+            concurrency = max(1, current_concurrency - 1)
+            thermal_headroom = min(thermal_headroom, 0.6)
+            reason = (
+                "Autopilot reduced active concurrency because latency, failures, or the configured GPU memory "
+                "headroom guardrail was breached."
+            )
+        elif demand_high and stable and current_concurrency < target_concurrency_ceiling and utilization_below_target:
+            concurrency = min(target_concurrency_ceiling, current_concurrency + 1)
+            thermal_headroom = self.target_thermal_headroom(
+                configured_headroom=configured_headroom,
+                target_gpu_utilization_pct=target_gpu_utilization_pct,
+            )
+            profile = self.profile_from_headroom(thermal_headroom)
             supported_models = configured_models_csv
-            reason = "Autopilot increased capacity because demand is high and the GPU has safe headroom."
-        elif stable:
-            profile = "balanced"
-            concurrency = max(1, min(baseline, 2))
-            thermal_headroom = 0.8
-            target_model = self.state.baseline_model
+            reason = (
+                "Autopilot increased active concurrency because work is queued, the GPU is still below the owner "
+                "utilization target, and memory headroom remains healthy."
+            )
+        elif stable and utilization_far_above_target and current_concurrency > 1:
+            concurrency = max(1, current_concurrency - 1)
+            thermal_headroom = min(thermal_headroom, configured_headroom)
+            profile = self.profile_from_headroom(thermal_headroom)
             supported_models = configured_models_csv
-            reason = "Autopilot is using balanced tuning because recent latency, failures, and GPU pressure look normal."
+            reason = (
+                "Autopilot reduced active concurrency because the node is already above the owner utilization target "
+                "without needing more parallel work."
+            )
+        else:
+            concurrency = min(current_concurrency, target_concurrency_ceiling)
+            thermal_headroom = self.target_thermal_headroom(
+                configured_headroom=configured_headroom,
+                target_gpu_utilization_pct=target_gpu_utilization_pct,
+            )
+            profile = self.profile_from_headroom(thermal_headroom)
 
         operations = operations_for_model(target_model, self.settings)
         pending_restart = target_model != configured_model
@@ -527,6 +697,8 @@ class AutopilotController:
                     "startup_model": recommendation.startup_model,
                     "max_concurrent_assignments": recommendation.max_concurrent_assignments,
                     "gpu_memory_pressure": signals.gpu_memory_pressure,
+                    "gpu_utilization_pct": signals.gpu_utilization_pct,
+                    "gpu_memory_utilization_pct": signals.gpu_memory_utilization_pct,
                     "failure_rate": signals.failure_rate,
                     "ewma_latency_seconds": signals.ewma_latency_seconds,
                 }
@@ -551,14 +723,38 @@ class AutopilotController:
             supported_models=live_supported_models,
             operations=live_operations,
             gpu_memory_gb=settings_float(self.settings, "gpu_memory_gb", 24.0),
-            max_concurrent_assignments=recommendation.max_concurrent_assignments,
-            override=getattr(self.settings, "max_concurrent_assignments_embeddings", None),
+            max_concurrent_assignments=max(
+                1,
+                min(
+                    recommendation.max_concurrent_assignments,
+                    settings_int(
+                        self.settings,
+                        "max_concurrent_assignments_embeddings",
+                        recommendation.max_concurrent_assignments,
+                    ),
+                ),
+            ),
+            override=max(
+                1,
+                min(
+                    recommendation.max_concurrent_assignments,
+                    settings_int(
+                        self.settings,
+                        "max_concurrent_assignments_embeddings",
+                        recommendation.max_concurrent_assignments,
+                    ),
+                ),
+            ),
+        )
+        prefetch_concurrency_target = max(
+            recommendation.max_concurrent_assignments,
+            self.dynamic_concurrency_ceiling(model=live_model),
         )
         embedding_microbatch_limit = resolved_embeddings_microbatch_assignment_limit(
             supported_models=live_supported_models,
             operations=live_operations,
             gpu_memory_gb=settings_float(self.settings, "gpu_memory_gb", 24.0),
-            max_concurrent_assignments=recommendation.max_concurrent_assignments,
+            max_concurrent_assignments=prefetch_concurrency_target,
             pull_bundle_size=settings_int(self.settings, "pull_bundle_size", 16),
             override=getattr(self.settings, "max_microbatch_assignments_embeddings", None),
         )
@@ -571,6 +767,8 @@ class AutopilotController:
             or settings_int(self.settings, "max_context_tokens", 32768),
             "max_batch_tokens": settings_int(self.settings, "max_batch_tokens", 50000),
             "max_concurrent_assignments": recommendation.max_concurrent_assignments,
+            "target_gpu_utilization_pct": self.configured_target_gpu_utilization_pct(),
+            "min_gpu_memory_headroom_pct": self.configured_min_gpu_memory_headroom_pct(),
             "thermal_headroom": recommendation.thermal_headroom,
             "heat_demand": normalize_heat_demand(settings_str(self.settings, "heat_demand", "none")),
         }

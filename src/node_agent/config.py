@@ -71,6 +71,8 @@ class NodeAgentSettings(BaseSettings):
     max_concurrent_assignments_embeddings: int | None = None
     max_microbatch_assignments_embeddings: int | None = None
     pull_bundle_size: int = 16
+    target_gpu_utilization_pct: int = 100
+    min_gpu_memory_headroom_pct: float = 20.0
     thermal_headroom: float = 0.8
     heat_demand: Literal["none", "low", "medium", "high"] = "none"
     room_temp_c: float | None = None
@@ -121,6 +123,28 @@ class NodeAgentSettings(BaseSettings):
         if isinstance(value, str) and not value.strip():
             return None
         return value
+
+    @field_validator("target_gpu_utilization_pct", mode="before")
+    @classmethod
+    def _clamp_target_gpu_utilization_pct(cls, value: Any) -> int:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return 100
+        try:
+            parsed = int(float(str(value).strip()))
+        except (TypeError, ValueError):
+            return 100
+        return min(100, max(30, parsed))
+
+    @field_validator("min_gpu_memory_headroom_pct", mode="before")
+    @classmethod
+    def _clamp_min_gpu_memory_headroom_pct(cls, value: Any) -> float:
+        if value is None or (isinstance(value, str) and not str(value).strip()):
+            return 20.0
+        try:
+            parsed = float(str(value).strip())
+        except (TypeError, ValueError):
+            return 20.0
+        return min(60.0, max(5.0, parsed))
 
     @property
     def runtime_backend(self) -> str:

@@ -1365,6 +1365,7 @@ def run_worker_loop(control: EdgeControlClient, runtime: VLLMRuntime, attest_on_
 
     while True:
         try:
+            loop_gpu_sample = gpu_telemetry_sampler.sample()
             while True:
                 try:
                     result = completion_queue.get_nowait()
@@ -1381,6 +1382,7 @@ def run_worker_loop(control: EdgeControlClient, runtime: VLLMRuntime, attest_on_
                         latency_seconds=max(0.0, result.latency_seconds or 0.0),
                         queue_depth=result.queue_depth,
                         active_assignments=len(active_workers),
+                        gpu_sample=loop_gpu_sample,
                     )
                 else:
                     autopilot.observe_assignment_failure(
@@ -1388,6 +1390,7 @@ def run_worker_loop(control: EdgeControlClient, runtime: VLLMRuntime, attest_on_
                         retryable=bool(result.retryable),
                         queue_depth=result.queue_depth,
                         active_assignments=len(active_workers),
+                        gpu_sample=loop_gpu_sample,
                     )
 
             if (
@@ -1400,14 +1403,18 @@ def run_worker_loop(control: EdgeControlClient, runtime: VLLMRuntime, attest_on_
                 control.attest()
             queue_depth = control_plane_queue_depth(control)
             active_assignments = len(active_workers)
+            loop_time = time.monotonic()
+            gpu_sample = gpu_telemetry_sampler.sample(now_monotonic=loop_time)
+            local_queue_depth = len(pending_assignments)
+            observable_queue_depth = max(queue_depth, local_queue_depth)
+            autopilot.observe_idle(
+                queue_depth=observable_queue_depth,
+                active_assignments=active_assignments,
+                gpu_sample=gpu_sample,
+            )
             capabilities = autopilot.capabilities_payload()
             worker_limit = max_worker_assignments_from_capabilities(capabilities)
             local_queue_limit = max_local_queue_assignments_from_capabilities(capabilities)
-            local_queue_depth = len(pending_assignments)
-            observable_queue_depth = max(queue_depth, local_queue_depth)
-            autopilot.observe_idle(queue_depth=observable_queue_depth, active_assignments=active_assignments)
-            loop_time = time.monotonic()
-            gpu_sample = gpu_telemetry_sampler.sample(now_monotonic=loop_time)
             throughput_logger.observe_loop(
                 active_assignments=active_assignments,
                 worker_limit=worker_limit,

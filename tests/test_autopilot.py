@@ -27,7 +27,7 @@ def test_autopilot_reduces_concurrency_under_gpu_pressure(tmp_path: Path, monkey
     assert recommendation.setup_profile == "quiet"
     assert recommendation.max_concurrent_assignments == 1
     assert recommendation.thermal_headroom < 0.7
-    assert "reduced concurrency" in recommendation.reason
+    assert "lighter model" in recommendation.reason
     assert autopilot.capabilities_payload()["max_concurrent_assignments"] == 1
 
 
@@ -133,6 +133,70 @@ def test_autopilot_reports_higher_embeddings_concurrency_for_embedding_only_node
     assert capabilities["operations"] == ["embeddings"]
     assert capabilities["max_context_tokens"] == 512
     assert capabilities["max_concurrent_assignments"] == 1
-    assert capabilities["max_concurrent_assignments_embeddings"] == 3
+    assert capabilities["max_concurrent_assignments_embeddings"] == 1
     assert capabilities["max_microbatch_assignments_embeddings"] == 16
     assert capabilities["max_pull_bundle_assignments"] == 16
+
+
+def test_autopilot_scales_up_dynamic_concurrency_when_gpu_is_below_target(tmp_path: Path) -> None:
+    settings = NodeAgentSettings(
+        vllm_model=DEFAULT_EMBEDDING_MODEL,
+        supported_models=DEFAULT_EMBEDDING_MODEL,
+        max_concurrent_assignments=1,
+        gpu_memory_gb=16.0,
+        autopilot_state_path=str(tmp_path / "autopilot-dynamic.json"),
+    )
+    autopilot = AutopilotController(settings)
+
+    autopilot.observe_idle(
+        queue_depth=3,
+        active_assignments=1,
+        gpu_sample=type(
+            "Sample",
+            (),
+            {
+                "utilization_percent": 22.0,
+                "memory_utilization_percent": 41.0,
+                "power_watts": 80.0,
+                "temperature_c": 52.0,
+            },
+        )(),
+    )
+
+    recommendation = autopilot.state.recommendation
+    capabilities = autopilot.capabilities_payload()
+    assert recommendation.max_concurrent_assignments == 2
+    assert capabilities["max_concurrent_assignments_embeddings"] == 2
+    assert capabilities["max_pull_bundle_assignments"] >= 16
+
+
+def test_autopilot_respects_owner_utilization_target_when_scaling(tmp_path: Path) -> None:
+    settings = NodeAgentSettings(
+        vllm_model=DEFAULT_EMBEDDING_MODEL,
+        supported_models=DEFAULT_EMBEDDING_MODEL,
+        max_concurrent_assignments=1,
+        gpu_memory_gb=24.0,
+        target_gpu_utilization_pct=50,
+        autopilot_state_path=str(tmp_path / "autopilot-owner-target.json"),
+    )
+    autopilot = AutopilotController(settings)
+
+    for _ in range(5):
+        autopilot.observe_idle(
+            queue_depth=4,
+            active_assignments=autopilot.state.recommendation.max_concurrent_assignments,
+            gpu_sample=type(
+                "Sample",
+                (),
+                {
+                    "utilization_percent": 18.0,
+                    "memory_utilization_percent": 36.0,
+                    "power_watts": 70.0,
+                    "temperature_c": 49.0,
+                },
+            )(),
+        )
+
+    recommendation = autopilot.state.recommendation
+    assert recommendation.max_concurrent_assignments <= 4
+    assert autopilot.capabilities_payload()["target_gpu_utilization_pct"] == 50
