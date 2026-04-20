@@ -49,6 +49,27 @@ def test_autopilot_stages_smaller_model_after_repeated_pressure_failures(
     assert recommendation.env_updates["VLLM_MODEL"] == DEFAULT_EMBEDDING_MODEL
 
 
+def test_autopilot_capabilities_remain_on_live_model_until_restart_applies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = build_settings(tmp_path)
+    autopilot = AutopilotController(settings)
+    monkeypatch.setattr(autopilot, "sample_gpu_memory_pressure", lambda: 0.97)
+
+    for _ in range(3):
+        autopilot.observe_assignment_failure(code="upstream_unavailable", retryable=True)
+
+    recommendation = autopilot.state.recommendation
+    capabilities = autopilot.capabilities_payload()
+    assert recommendation.startup_model == DEFAULT_EMBEDDING_MODEL
+    assert recommendation.pending_restart is True
+    assert capabilities["supported_models"] == [DEFAULT_RESPONSE_MODEL]
+    assert capabilities["operations"] == ["responses"]
+    assert "max_concurrent_assignments_embeddings" not in capabilities
+    assert "max_microbatch_assignments_embeddings" not in capabilities
+    assert capabilities["max_context_tokens"] == settings.max_context_tokens
+
+
 def test_autopilot_uses_performance_when_demand_is_high_and_pressure_is_low(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -108,6 +129,9 @@ def test_autopilot_reports_higher_embeddings_concurrency_for_embedding_only_node
     autopilot.observe_idle()
 
     capabilities = autopilot.capabilities_payload()
+    assert capabilities["supported_models"] == [DEFAULT_EMBEDDING_MODEL]
+    assert capabilities["operations"] == ["embeddings"]
+    assert capabilities["max_context_tokens"] == 512
     assert capabilities["max_concurrent_assignments"] == 1
     assert capabilities["max_concurrent_assignments_embeddings"] == 3
     assert capabilities["max_microbatch_assignments_embeddings"] == 16

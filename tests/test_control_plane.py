@@ -328,7 +328,7 @@ def test_heartbeat_reports_embedding_runtime_context_from_current_model(tmp_path
     client.heartbeat(queue_depth=0, active_assignments=0)
 
     _path, payload = recording_client.calls[0]
-    assert payload["capabilities"]["max_context_tokens"] == settings.max_context_tokens
+    assert payload["capabilities"]["max_context_tokens"] == 512
     assert payload["runtime"]["current_model"] == "BAAI/bge-large-en-v1.5"
     assert payload["runtime"]["effective_context_tokens"] == 512
 

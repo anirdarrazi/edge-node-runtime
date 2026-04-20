@@ -29,7 +29,7 @@ def test_build_vllm_command_includes_model_host_port_and_extra_args() -> None:
         "--gpu-memory-utilization",
         "0.85",
         "--max-model-len",
-        "8192",
+        "512",
     ]
 
 
@@ -88,6 +88,7 @@ def test_embedded_runtime_defaults_to_vast_burst_capacity(tmp_path) -> None:
     assert values["BURST_LEASE_PHASE"] == "accept_burst_work"
     assert values["BURST_COST_CEILING_USD"] == "0.25"
     assert values["VLLM_MODEL"] == "BAAI/bge-large-en-v1.5"
+    assert values["MAX_CONTEXT_TOKENS"] == "512"
     assert values["SUPPORTED_MODELS"] == "BAAI/bge-large-en-v1.5"
     assert values["OWNER_TARGET_MODEL"] == "meta-llama/Llama-3.1-8B-Instruct"
     assert values["OWNER_TARGET_SUPPORTED_MODELS"] == "meta-llama/Llama-3.1-8B-Instruct,BAAI/bge-large-en-v1.5"
@@ -126,6 +127,7 @@ def test_embedded_runtime_rewrites_home_defaults_for_single_container(tmp_path) 
     assert values["BURST_LEASE_PHASE"] == "accept_burst_work"
     assert values["BURST_COST_CEILING_USD"] == "0.25"
     assert values["VLLM_MODEL"] == "BAAI/bge-large-en-v1.5"
+    assert values["MAX_CONTEXT_TOKENS"] == "512"
     assert values["SUPPORTED_MODELS"] == "BAAI/bge-large-en-v1.5"
     assert values["OWNER_TARGET_MODEL"] == "meta-llama/Llama-3.1-8B-Instruct"
     assert values["OWNER_TARGET_SUPPORTED_MODELS"] == "meta-llama/Llama-3.1-8B-Instruct,BAAI/bge-large-en-v1.5"
@@ -169,9 +171,21 @@ def test_embedded_runtime_uses_public_bootstrap_on_low_vram_even_with_token(tmp_
     values = supervisor.env_values()
 
     assert values["VLLM_MODEL"] == "BAAI/bge-large-en-v1.5"
+    assert values["MAX_CONTEXT_TOKENS"] == "512"
     assert values["SUPPORTED_MODELS"] == "BAAI/bge-large-en-v1.5"
     assert values["OWNER_TARGET_MODEL"] == "meta-llama/Llama-3.1-8B-Instruct"
     assert values["OWNER_TARGET_SUPPORTED_MODELS"] == "meta-llama/Llama-3.1-8B-Instruct,BAAI/bge-large-en-v1.5"
+
+
+def test_explicit_embedding_startup_model_clamps_max_context_tokens() -> None:
+    config = single_container.SingleContainerConfig.from_mapping(
+        {
+            "VLLM_MODEL": "BAAI/bge-large-en-v1.5",
+            "MAX_CONTEXT_TOKENS": "32768",
+        }
+    )
+
+    assert config.max_context_tokens == 512
 
 
 def test_main_starts_node_agent_without_nested_docker_when_vllm_is_external(monkeypatch) -> None:

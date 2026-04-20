@@ -15,7 +15,13 @@ from .concurrency import (
     resolved_embeddings_concurrency_limit,
     resolved_embeddings_microbatch_assignment_limit,
 )
-from .runtime_profiles import HOME_EMBEDDINGS_LLAMA_CPP_PROFILE, HOME_LLAMA_CPP_GGUF_PROFILE, LLAMA_CPP_INFERENCE_ENGINE
+from .runtime_profiles import (
+    HOME_EMBEDDINGS_LLAMA_CPP_PROFILE,
+    HOME_LLAMA_CPP_GGUF_PROFILE,
+    LLAMA_CPP_INFERENCE_ENGINE,
+    llama_cpp_model_source,
+)
+from .runtime_tuple import resolved_runtime_tuple
 
 DEFAULT_RESPONSE_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-large-en-v1.5"
@@ -80,17 +86,32 @@ def configured_models(settings: object) -> list[str]:
     return models or [fallback_model]
 
 
+def live_runtime_model(settings: object) -> str:
+    configured_model = settings_str(settings, "vllm_model", DEFAULT_RESPONSE_MODEL)
+    current_model = settings_str(settings, "current_model", configured_model)
+    return current_model or configured_model or DEFAULT_RESPONSE_MODEL
+
+
 def operations_for_model(model: str, settings: object) -> list[str]:
+    normalized_model = str(model or "").strip()
+    if not normalized_model:
+        return ["responses"]
+
+    llama_cpp_source = llama_cpp_model_source(normalized_model)
+    if llama_cpp_source is not None:
+        return ["embeddings"] if llama_cpp_source.embedding_enabled else ["responses"]
+
+    if normalized_model == DEFAULT_EMBEDDING_MODEL:
+        return ["embeddings"]
+
     runtime_profile = getattr(settings, "resolved_runtime_profile", None)
     supported_apis = getattr(runtime_profile, "supported_apis", None)
-    default_model = getattr(runtime_profile, "default_model", None)
-    if isinstance(supported_apis, (list, tuple)) and model == default_model:
-        return [str(api) for api in supported_apis if str(api) in {"responses", "embeddings"}] or ["responses"]
-    if model == DEFAULT_EMBEDDING_MODEL and DEFAULT_RESPONSE_MODEL not in configured_models(settings):
-        return ["embeddings"]
-    if model == DEFAULT_EMBEDDING_MODEL:
-        return ["embeddings"]
-    return ["responses", "embeddings"]
+    if isinstance(supported_apis, (list, tuple)):
+        filtered_supported_apis = [str(api) for api in supported_apis if str(api) in {"responses", "embeddings"}]
+        if len(filtered_supported_apis) == 1:
+            return filtered_supported_apis
+
+    return ["responses"]
 
 
 @dataclass
@@ -518,27 +539,36 @@ class AutopilotController:
     def capabilities_payload(self) -> dict[str, Any]:
         recommendation = self.state.recommendation
         signals = self.state.signals
+        live_model = live_runtime_model(self.settings)
+        live_supported_models = live_model
+        live_operations = operations_for_model(live_model, self.settings)
+        runtime_tuple = resolved_runtime_tuple(
+            self.settings,
+            live_model,
+            live_operations[0] if live_operations else None,
+        )
         embedding_concurrency_limit = resolved_embeddings_concurrency_limit(
-            supported_models=recommendation.supported_models,
-            operations=recommendation.operations,
+            supported_models=live_supported_models,
+            operations=live_operations,
             gpu_memory_gb=settings_float(self.settings, "gpu_memory_gb", 24.0),
             max_concurrent_assignments=recommendation.max_concurrent_assignments,
             override=getattr(self.settings, "max_concurrent_assignments_embeddings", None),
         )
         embedding_microbatch_limit = resolved_embeddings_microbatch_assignment_limit(
-            supported_models=recommendation.supported_models,
-            operations=recommendation.operations,
+            supported_models=live_supported_models,
+            operations=live_operations,
             gpu_memory_gb=settings_float(self.settings, "gpu_memory_gb", 24.0),
             max_concurrent_assignments=recommendation.max_concurrent_assignments,
             pull_bundle_size=settings_int(self.settings, "pull_bundle_size", 16),
             override=getattr(self.settings, "max_microbatch_assignments_embeddings", None),
         )
         payload: dict[str, Any] = {
-            "supported_models": [model.strip() for model in recommendation.supported_models.split(",") if model.strip()],
-            "operations": recommendation.operations,
+            "supported_models": [live_model],
+            "operations": live_operations,
             "gpu_name": settings_str(self.settings, "gpu_name", "Generic GPU"),
             "gpu_memory_gb": settings_float(self.settings, "gpu_memory_gb", 24.0),
-            "max_context_tokens": settings_int(self.settings, "max_context_tokens", 32768),
+            "max_context_tokens": runtime_tuple.effective_context_tokens
+            or settings_int(self.settings, "max_context_tokens", 32768),
             "max_batch_tokens": settings_int(self.settings, "max_batch_tokens", 50000),
             "max_concurrent_assignments": recommendation.max_concurrent_assignments,
             "thermal_headroom": recommendation.thermal_headroom,

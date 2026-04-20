@@ -20,6 +20,9 @@ DEFAULT_GATED_STARTUP_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 DEFAULT_PUBLIC_BOOTSTRAP_MODEL = "BAAI/bge-large-en-v1.5"
 MIN_VRAM_FOR_GATED_STARTUP_GB = 24.0
 GATED_HF_REPOSITORY_PREFIXES = ("meta-llama/",)
+KNOWN_SAFE_MAX_MODEL_LEN: dict[str, int] = {
+    DEFAULT_PUBLIC_BOOTSTRAP_MODEL: 512,
+}
 
 
 def env_bool(name: str, default: bool) -> bool:
@@ -56,6 +59,21 @@ def split_command(value: str | None) -> list[str]:
     return shlex.split(value or "")
 
 
+def known_safe_max_model_len(model: str | None) -> int | None:
+    normalized = str(model or "").strip()
+    value = KNOWN_SAFE_MAX_MODEL_LEN.get(normalized)
+    return value if isinstance(value, int) and value > 0 else None
+
+
+def normalized_max_context_tokens(model: str | None, configured_max_context_tokens: int) -> int:
+    if configured_max_context_tokens <= 0:
+        return configured_max_context_tokens
+    safe_limit = known_safe_max_model_len(model)
+    if safe_limit is None:
+        return configured_max_context_tokens
+    return min(configured_max_context_tokens, safe_limit)
+
+
 @dataclass(frozen=True)
 class SingleContainerConfig:
     vllm_model: str
@@ -75,11 +93,16 @@ class SingleContainerConfig:
         def read(name: str, default: str | None = None) -> str | None:
             return values.get(name, default)
 
+        vllm_model = nonempty_value(values, "VLLM_MODEL", DEFAULT_GATED_STARTUP_MODEL)
+
         return cls(
-            vllm_model=nonempty_value(values, "VLLM_MODEL", DEFAULT_GATED_STARTUP_MODEL),
+            vllm_model=vllm_model,
             vllm_host=nonempty_value(values, "VLLM_HOST", "0.0.0.0"),
             vllm_port=env_int_from_mapping(values, "VLLM_PORT", 8000),
-            max_context_tokens=env_int_from_mapping(values, "MAX_CONTEXT_TOKENS", 32768),
+            max_context_tokens=normalized_max_context_tokens(
+                vllm_model,
+                env_int_from_mapping(values, "MAX_CONTEXT_TOKENS", 32768),
+            ),
             vllm_startup_timeout_seconds=env_int_from_mapping(values, "VLLM_STARTUP_TIMEOUT_SECONDS", 600),
             vllm_server_command=tuple(
                 split_command(read("VLLM_SERVER_COMMAND"))
@@ -105,6 +128,7 @@ class SingleContainerConfig:
 
 def build_vllm_command(config: SingleContainerConfig) -> list[str]:
     command = list(config.vllm_server_command)
+    effective_max_context_tokens = normalized_max_context_tokens(config.vllm_model, config.max_context_tokens)
     command.extend(
         [
             "--model",
@@ -116,8 +140,8 @@ def build_vllm_command(config: SingleContainerConfig) -> list[str]:
         ]
     )
     command.extend(config.vllm_extra_args)
-    if config.max_context_tokens > 0 and not has_cli_flag(command, "--max-model-len"):
-        command.extend(["--max-model-len", str(config.max_context_tokens)])
+    if effective_max_context_tokens > 0 and not has_cli_flag(command, "--max-model-len"):
+        command.extend(["--max-model-len", str(effective_max_context_tokens)])
     return command
 
 
@@ -246,6 +270,12 @@ def apply_single_container_runtime_defaults(
     force_when_blank_or(values, "BURST_LEASE_PHASE", "accept_burst_work", set())
     force_when_blank_or(values, "BURST_COST_CEILING_USD", "0.25", set())
     fallback_note = apply_public_bootstrap_fallback(values)
+    values["MAX_CONTEXT_TOKENS"] = str(
+        normalized_max_context_tokens(
+            values["VLLM_MODEL"],
+            env_int_from_mapping(values, "MAX_CONTEXT_TOKENS", 32768),
+        )
+    )
 
     start_vllm = env_bool_from_mapping(values, "START_VLLM", True)
     inference_url = local_inference_url or f"http://127.0.0.1:{values['VLLM_PORT']}"

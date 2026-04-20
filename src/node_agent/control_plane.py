@@ -79,6 +79,7 @@ class EdgeControlClient:
 
     def _node_capabilities_payload(self) -> dict[str, Any]:
         runtime_profile = self.settings.resolved_runtime_profile
+        runtime_tuple = resolved_default_runtime_tuple(self.settings)
         embedding_concurrency_limit = resolved_embeddings_concurrency_limit(
             supported_models=self.settings.supported_models,
             operations=list(runtime_profile.supported_apis),
@@ -99,7 +100,7 @@ class EdgeControlClient:
             "operations": list(runtime_profile.supported_apis),
             "gpu_name": self.settings.gpu_name,
             "gpu_memory_gb": self.settings.gpu_memory_gb,
-            "max_context_tokens": self.settings.max_context_tokens,
+            "max_context_tokens": runtime_tuple.effective_context_tokens or self.settings.max_context_tokens,
             "max_batch_tokens": self.settings.max_batch_tokens,
             "max_concurrent_assignments": self.settings.max_concurrent_assignments,
             "max_pull_bundle_assignments": max(
