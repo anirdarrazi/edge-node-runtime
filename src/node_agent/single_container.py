@@ -7,8 +7,10 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Mapping, MutableMapping
 from dataclasses import dataclass
+from http import HTTPStatus
 from pathlib import Path
 from typing import Sequence
 
@@ -34,6 +36,10 @@ def env_int(name: str, default: int) -> int:
     raw = os.getenv(name)
     if raw is None or not str(raw).strip():
         return default
+    try:
+        return int(str(raw).strip())
+    except ValueError:
+        return default
 
 
 def env_float_from_mapping(env: Mapping[str, str], name: str, default: float | None = None) -> float | None:
@@ -42,10 +48,6 @@ def env_float_from_mapping(env: Mapping[str, str], name: str, default: float | N
         return default
     try:
         return float(str(raw).strip())
-    except ValueError:
-        return default
-    try:
-        return int(str(raw).strip())
     except ValueError:
         return default
 
@@ -163,8 +165,16 @@ def force_when_blank_or(values: MutableMapping[str, str], name: str, default: st
         values[name] = default
 
 
+def configured_hugging_face_token(values: Mapping[str, str]) -> str | None:
+    for key in ("HUGGING_FACE_HUB_TOKEN", "HF_TOKEN"):
+        token = str(values.get(key, "")).strip()
+        if token:
+            return token
+    return None
+
+
 def hugging_face_token_configured(values: Mapping[str, str]) -> bool:
-    return any(str(values.get(key, "")).strip() for key in ("HUGGING_FACE_HUB_TOKEN", "HF_TOKEN"))
+    return configured_hugging_face_token(values) is not None
 
 
 def requires_gated_hugging_face_access(model: str | None) -> bool:
@@ -247,12 +257,85 @@ def apply_single_container_runtime_defaults(
     return fallback_note
 
 
-def wait_for_inference_runtime_ready(config: SingleContainerConfig, process: subprocess.Popen[str] | None) -> None:
+def validate_gated_model_access(values: Mapping[str, str], model: str) -> None:
+    if not requires_gated_hugging_face_access(model):
+        return
+
+    token = configured_hugging_face_token(values)
+    if not token:
+        return
+
+    try:
+        response = httpx.get(
+            f"https://huggingface.co/api/models/{model}",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10.0,
+        )
+    except httpx.HTTPError as error:
+        raise RuntimeError(
+            f"Could not validate Hugging Face access for {model}. Check the network connection and token, then retry."
+        ) from error
+
+    if response.status_code == HTTPStatus.OK:
+        return
+    if response.status_code in {HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN}:
+        raise RuntimeError(
+            f"Hugging Face denied access to {model}. Make sure HUGGING_FACE_HUB_TOKEN or HF_TOKEN is valid and approved for this Meta model."
+        )
+    if response.status_code == HTTPStatus.NOT_FOUND:
+        raise RuntimeError(f"The startup model {model} is unavailable on Hugging Face right now.")
+    raise RuntimeError(
+        f"Could not validate Hugging Face access for {model}. Hugging Face returned HTTP {response.status_code}."
+    )
+
+
+class ProcessOutputRelay:
+    def __init__(self, *, max_lines: int = 40) -> None:
+        self.max_lines = max_lines
+        self.lines: deque[str] = deque(maxlen=max_lines)
+        self.lock = threading.Lock()
+        self.thread: threading.Thread | None = None
+
+    def attach(self, process: subprocess.Popen[str]) -> None:
+        stream = getattr(process, "stdout", None)
+        if stream is None:
+            return
+
+        def _pump() -> None:
+            try:
+                for raw_line in stream:
+                    line = raw_line.rstrip("\r\n")
+                    print(line, flush=True)
+                    with self.lock:
+                        self.lines.append(line)
+            finally:
+                stream.close()
+
+        self.thread = threading.Thread(target=_pump, name="vllm-output-relay", daemon=True)
+        self.thread.start()
+
+    def tail_text(self) -> str:
+        with self.lock:
+            return "\n".join(self.lines).strip()
+
+
+def wait_for_inference_runtime_ready(
+    config: SingleContainerConfig,
+    process: subprocess.Popen[str] | None,
+    *,
+    output_tail: Callable[[], str] | None = None,
+) -> None:
     deadline = time.monotonic() + max(1, config.vllm_startup_timeout_seconds)
     url = f"{config.local_inference_url}/v1/models"
     last_error = "The local inference runtime is still starting."
     while time.monotonic() < deadline:
         if process is not None and process.poll() is not None:
+            recent_output = output_tail().strip() if output_tail is not None else ""
+            if recent_output:
+                raise RuntimeError(
+                    "The local inference runtime exited before it became ready "
+                    f"with status {process.returncode}. Recent vLLM output:\n{recent_output}"
+                )
             raise RuntimeError(
                 f"The local inference runtime exited before it became ready with status {process.returncode}."
             )
@@ -311,6 +394,7 @@ class EmbeddedRuntimeSupervisor:
         self.vllm_process: subprocess.Popen[str] | None = None
         self.node_process: subprocess.Popen[str] | None = None
         self.last_exit_codes: dict[str, int] = {}
+        self.vllm_output_relay: ProcessOutputRelay | None = None
 
     def prepared_env_values(self) -> tuple[dict[str, str], str | None]:
         values = dict(self.env_provider())
@@ -387,7 +471,16 @@ class EmbeddedRuntimeSupervisor:
     ) -> subprocess.Popen[str]:
         command = build_vllm_command(config)
         self.log(f"Starting the local inference runtime in this container: {' '.join(shlex.quote(part) for part in command)}")
-        self.vllm_process = subprocess.Popen(command, text=True, env=dict(process_env))
+        self.vllm_output_relay = ProcessOutputRelay()
+        self.vllm_process = subprocess.Popen(
+            command,
+            text=True,
+            env=dict(process_env),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=1,
+        )
+        self.vllm_output_relay.attach(self.vllm_process)
         return self.vllm_process
 
     def start(
@@ -403,6 +496,7 @@ class EmbeddedRuntimeSupervisor:
         self.ensure_dirs()
         if fallback_note:
             self.log(fallback_note)
+        validate_gated_model_access(process_env, config.vllm_model)
 
         with self.lock:
             if recreate:
@@ -413,7 +507,11 @@ class EmbeddedRuntimeSupervisor:
             vllm_process = self.vllm_process
 
         if start_vllm:
-            wait_for_inference_runtime_ready(config, vllm_process)
+            wait_for_inference_runtime_ready(
+                config,
+                vllm_process,
+                output_tail=self.vllm_output_relay.tail_text if self.vllm_output_relay is not None else None,
+            )
 
         with self.lock:
             self.sync_processes()
@@ -429,13 +527,18 @@ class EmbeddedRuntimeSupervisor:
         self.ensure_dirs()
         if fallback_note:
             self.log(fallback_note)
+        validate_gated_model_access(process_env, config.vllm_model)
 
         with self.lock:
             terminate_process(self.vllm_process)
             self.sync_processes()
             vllm_process = self._start_vllm_locked(config=config, process_env=process_env)
 
-        wait_for_inference_runtime_ready(config, vllm_process)
+        wait_for_inference_runtime_ready(
+            config,
+            vllm_process,
+            output_tail=self.vllm_output_relay.tail_text if self.vllm_output_relay is not None else None,
+        )
 
     def stop_locked(self) -> None:
         terminate_process(self.node_process)
@@ -485,9 +588,11 @@ def main() -> int:
     os.environ.setdefault("HF_HOME", "/root/.cache/huggingface")
     if fallback_note:
         print(fallback_note, flush=True)
+    validate_gated_model_access(os.environ, config.vllm_model)
 
     vllm_process: subprocess.Popen[str] | None = None
     node_process: subprocess.Popen[str] | None = None
+    vllm_output_relay: ProcessOutputRelay | None = None
 
     def handle_signal(signum: int, _frame: object) -> None:
         print(f"Single-container runtime received signal {signum}; shutting down.", flush=True)
@@ -507,8 +612,20 @@ def main() -> int:
                 f"Starting the local inference runtime in this container: {' '.join(shlex.quote(part) for part in vllm_command)}",
                 flush=True,
             )
-            vllm_process = subprocess.Popen(vllm_command, text=True)
-            wait_for_inference_runtime_ready(config, vllm_process)
+            vllm_output_relay = ProcessOutputRelay()
+            vllm_process = subprocess.Popen(
+                vllm_command,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                bufsize=1,
+            )
+            vllm_output_relay.attach(vllm_process)
+            wait_for_inference_runtime_ready(
+                config,
+                vllm_process,
+                output_tail=vllm_output_relay.tail_text if vllm_output_relay is not None else None,
+            )
         else:
             print(
                 "START_VLLM=false; expecting INFERENCE_BASE_URL (or deprecated VLLM_BASE_URL) to point at an already running inference runtime.",

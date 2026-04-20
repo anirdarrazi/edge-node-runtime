@@ -180,7 +180,7 @@ def test_main_starts_node_agent_without_nested_docker_when_vllm_is_external(monk
     class FakeProcess:
         returncode = 0
 
-        def __init__(self, command, text=False) -> None:
+        def __init__(self, command, text=False, **_kwargs) -> None:
             started.append(list(command))
 
         def poll(self):
@@ -209,7 +209,7 @@ def test_main_recomputes_startup_model_after_defaults(monkeypatch) -> None:
     class FakeProcess:
         returncode = 0
 
-        def __init__(self, command, text=False) -> None:
+        def __init__(self, command, text=False, **_kwargs) -> None:
             started.append(list(command))
 
         def poll(self):
@@ -226,7 +226,7 @@ def test_main_recomputes_startup_model_after_defaults(monkeypatch) -> None:
     monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
     monkeypatch.setenv("NODE_AGENT_COMMAND", "node-agent run")
     monkeypatch.setattr(single_container.subprocess, "Popen", FakeProcess)
-    monkeypatch.setattr(single_container, "wait_for_inference_runtime_ready", lambda config, process: None)
+    monkeypatch.setattr(single_container, "wait_for_inference_runtime_ready", lambda *args, **kwargs: None)
     monkeypatch.setattr(single_container, "wait_for_any_process", lambda processes: processes[1])
 
     exit_code = single_container.main()
@@ -259,3 +259,46 @@ def test_wait_for_vllm_fails_fast_when_process_exits() -> None:
         assert "local inference runtime exited" in str(error)
     else:  # pragma: no cover
         raise AssertionError("wait_for_vllm_ready should fail when vLLM exits early")
+
+
+def test_wait_for_vllm_includes_recent_output_when_process_exits() -> None:
+    class FailedProcess:
+        returncode = 1
+
+        def poll(self):
+            return self.returncode
+
+    config = single_container.SingleContainerConfig(
+        vllm_model="meta-llama/Llama-3.1-8B-Instruct",
+        vllm_startup_timeout_seconds=1,
+    )
+
+    try:
+        single_container.wait_for_inference_runtime_ready(
+            config,
+            FailedProcess(),  # type: ignore[arg-type]
+            output_tail=lambda: "CUDA out of memory\nEngine process failed to start",
+        )
+    except RuntimeError as error:
+        detail = str(error)
+        assert "Recent vLLM output" in detail
+        assert "CUDA out of memory" in detail
+    else:  # pragma: no cover
+        raise AssertionError("wait_for_inference_runtime_ready should include recent process output")
+
+
+def test_validate_gated_model_access_rejects_unauthorized_token(monkeypatch) -> None:
+    class FakeResponse:
+        status_code = 403
+
+    monkeypatch.setattr(single_container.httpx, "get", lambda *args, **kwargs: FakeResponse())
+
+    try:
+        single_container.validate_gated_model_access(
+            {"HF_TOKEN": "hf_invalid"},
+            "meta-llama/Llama-3.1-8B-Instruct",
+        )
+    except RuntimeError as error:
+        assert "Hugging Face denied access" in str(error)
+    else:  # pragma: no cover
+        raise AssertionError("validate_gated_model_access should reject unauthorized tokens")
