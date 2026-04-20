@@ -44,6 +44,7 @@ class SingleContainerConfig:
     vllm_model: str
     vllm_host: str = "0.0.0.0"
     vllm_port: int = 8000
+    max_context_tokens: int = 32768
     vllm_startup_timeout_seconds: int = 600
     vllm_server_command: tuple[str, ...] = (sys.executable, "-m", "vllm.entrypoints.openai.api_server")
     vllm_extra_args: tuple[str, ...] = ()
@@ -61,6 +62,7 @@ class SingleContainerConfig:
             vllm_model=nonempty_value(values, "VLLM_MODEL", "meta-llama/Llama-3.1-8B-Instruct"),
             vllm_host=nonempty_value(values, "VLLM_HOST", "0.0.0.0"),
             vllm_port=env_int_from_mapping(values, "VLLM_PORT", 8000),
+            max_context_tokens=env_int_from_mapping(values, "MAX_CONTEXT_TOKENS", 32768),
             vllm_startup_timeout_seconds=env_int_from_mapping(values, "VLLM_STARTUP_TIMEOUT_SECONDS", 600),
             vllm_server_command=tuple(
                 split_command(read("VLLM_SERVER_COMMAND"))
@@ -97,7 +99,13 @@ def build_vllm_command(config: SingleContainerConfig) -> list[str]:
         ]
     )
     command.extend(config.vllm_extra_args)
+    if config.max_context_tokens > 0 and not has_cli_flag(command, "--max-model-len"):
+        command.extend(["--max-model-len", str(config.max_context_tokens)])
     return command
+
+
+def has_cli_flag(command: Sequence[str], flag: str) -> bool:
+    return any(part == flag or part.startswith(f"{flag}=") for part in command)
 
 
 def env_bool_from_mapping(env: Mapping[str, str], name: str, default: bool) -> bool:

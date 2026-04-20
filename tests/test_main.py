@@ -1,3 +1,4 @@
+import logging
 from types import SimpleNamespace
 import time
 import tempfile
@@ -346,10 +347,78 @@ def test_process_assignment_bundle_microbatches_compatible_embeddings():
         )
     ]
     assert [result.kind for result in results] == ["success", "success"]
+    assert all(result.operation == "embeddings" for result in results)
+    assert all(result.model == "BAAI/bge-large-en-v1.5" for result in results)
+    assert all(result.usage_summary == {"input_tokens": 0, "output_tokens": 0, "total_tokens": 1, "input_texts": 1, "item_count": 1} for result in results)
+    assert all(result.microbatch_assignments == 2 for result in results)
     assert [completion[0] for completion in control.completions] == ["assign_1", "assign_2"]
     running_updates = [progress for _assignment_id, progress in control.progress_updates if progress["state"] == "running"]
     assert running_updates
     assert all(progress["microbatch_assignments"] == 2 for progress in running_updates)
+
+
+def test_node_throughput_logger_logs_embedding_and_response_metrics(caplog: pytest.LogCaptureFixture):
+    throughput_logger = main_module.NodeThroughputLogger(interval_seconds=30.0)
+    start_time = time.monotonic()
+
+    with caplog.at_level(logging.INFO, logger="autonomousc-node-agent"):
+        throughput_logger.observe_loop(active_assignments=3, worker_limit=4, queue_depth=8)
+        throughput_logger.observe_loop(active_assignments=4, worker_limit=4, queue_depth=6)
+        throughput_logger.observe_result(
+            main_module.AssignmentWorkerResult(
+                assignment_id="assign_embed",
+                kind="success",
+                queue_depth=6,
+                latency_seconds=3.0,
+                operation="embeddings",
+                model="BAAI/bge-large-en-v1.5",
+                item_count=2,
+                usage_summary={
+                    "input_texts": 4,
+                    "input_tokens": 120,
+                    "total_tokens": 120,
+                    "item_count": 2,
+                },
+                microbatch_assignments=2,
+            )
+        )
+        throughput_logger.observe_result(
+            main_module.AssignmentWorkerResult(
+                assignment_id="assign_text",
+                kind="success",
+                queue_depth=6,
+                latency_seconds=1.5,
+                operation="responses",
+                model="meta-llama/Llama-3.1-8B-Instruct",
+                item_count=1,
+                usage_summary={
+                    "input_tokens": 30,
+                    "output_tokens": 10,
+                    "total_tokens": 40,
+                    "item_count": 1,
+                },
+                microbatch_assignments=1,
+            )
+        )
+        throughput_logger.maybe_log(now_monotonic=start_time + 31.0)
+
+    messages = [record.getMessage() for record in caplog.records if "node throughput" in record.getMessage()]
+
+    assert any("node throughput summary" in message for message in messages)
+    assert any("slot_utilization_avg=0.88" in message for message in messages)
+    assert any(
+        "op=embeddings" in message
+        and "texts_per_s=0.13" in message
+        and "input_tokens_per_s=3.9" in message
+        and "avg_microbatch_assignments=2.00" in message
+        for message in messages
+    )
+    assert any(
+        "op=responses" in message
+        and "output_tokens_per_s=0.3" in message
+        and "avg_microbatch_assignments=1.00" in message
+        for message in messages
+    )
 
 
 def test_run_worker_loop_marks_nonretryable_completion_failures_as_failed():

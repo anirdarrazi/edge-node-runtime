@@ -24,6 +24,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 LOGGER = logging.getLogger("autonomousc-node-agent")
 assignment_progress_keepalive_seconds = 30.0
 heartbeat_interval_seconds = 15.0
+throughput_log_interval_seconds = 30.0
 supported_operations = frozenset({"responses", "embeddings"})
 vram_comparison_tolerance_gb = 0.25
 
@@ -84,6 +85,11 @@ class AssignmentWorkerResult:
     kind: str
     queue_depth: int
     latency_seconds: float | None = None
+    operation: str | None = None
+    model: str | None = None
+    item_count: int = 0
+    usage_summary: dict[str, int] | None = None
+    microbatch_assignments: int | None = None
     code: str | None = None
     retryable: bool | None = None
     error: Exception | None = None
@@ -96,6 +102,165 @@ class HeartbeatState:
     active_assignments: int | None = None
     capabilities_signature: str | None = None
     runtime_signature: str | None = None
+
+
+@dataclass
+class ThroughputWindowBucket:
+    operation: str
+    model: str
+    completed_assignments: int = 0
+    completed_items: int = 0
+    input_texts: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    latency_seconds_sum: float = 0.0
+    latency_observations: int = 0
+    microbatch_assignments_sum: int = 0
+    microbatch_observations: int = 0
+
+
+class NodeThroughputLogger:
+    def __init__(self, interval_seconds: float = throughput_log_interval_seconds) -> None:
+        self.interval_seconds = max(1.0, float(interval_seconds))
+        self._reset_window(time.monotonic())
+
+    def _reset_window(self, now_monotonic: float) -> None:
+        self._window_started_at = now_monotonic
+        self._sample_count = 0
+        self._active_assignments_sum = 0
+        self._worker_limit_sum = 0
+        self._queue_depth_sum = 0
+        self._active_assignments_peak = 0
+        self._last_active_assignments = 0
+        self._last_worker_limit = 0
+        self._last_queue_depth = 0
+        self._buckets: dict[tuple[str, str], ThroughputWindowBucket] = {}
+
+    @staticmethod
+    def _metric_value(summary: dict[str, int] | None, key: str) -> int:
+        if not isinstance(summary, dict):
+            return 0
+        value = summary.get(key, 0)
+        return value if isinstance(value, int) and value > 0 else 0
+
+    def observe_loop(self, *, active_assignments: int, worker_limit: int, queue_depth: int) -> None:
+        active_value = max(0, int(active_assignments))
+        worker_limit_value = max(0, int(worker_limit))
+        queue_depth_value = max(0, int(queue_depth))
+        self._sample_count += 1
+        self._active_assignments_sum += active_value
+        self._worker_limit_sum += worker_limit_value
+        self._queue_depth_sum += queue_depth_value
+        self._active_assignments_peak = max(self._active_assignments_peak, active_value)
+        self._last_active_assignments = active_value
+        self._last_worker_limit = worker_limit_value
+        self._last_queue_depth = queue_depth_value
+
+    def observe_result(self, result: AssignmentWorkerResult) -> None:
+        if result.kind != "success":
+            return
+        operation = result.operation or "unknown"
+        model = result.model or "unknown"
+        bucket = self._buckets.setdefault(
+            (operation, model),
+            ThroughputWindowBucket(operation=operation, model=model),
+        )
+        bucket.completed_assignments += 1
+        bucket.completed_items += max(0, int(result.item_count))
+        bucket.input_texts += self._metric_value(result.usage_summary, "input_texts")
+        bucket.input_tokens += self._metric_value(result.usage_summary, "input_tokens")
+        bucket.output_tokens += self._metric_value(result.usage_summary, "output_tokens")
+        bucket.total_tokens += self._metric_value(result.usage_summary, "total_tokens")
+        if result.latency_seconds is not None:
+            bucket.latency_seconds_sum += max(0.0, float(result.latency_seconds))
+            bucket.latency_observations += 1
+        if isinstance(result.microbatch_assignments, int) and result.microbatch_assignments > 0:
+            bucket.microbatch_assignments_sum += result.microbatch_assignments
+            bucket.microbatch_observations += 1
+
+    def maybe_log(self, *, now_monotonic: float | None = None) -> None:
+        current_time = time.monotonic() if now_monotonic is None else now_monotonic
+        elapsed = current_time - self._window_started_at
+        if elapsed < self.interval_seconds:
+            return
+        effective_elapsed = max(elapsed, 0.001)
+        average_active_assignments = (
+            self._active_assignments_sum / self._sample_count
+            if self._sample_count
+            else float(self._last_active_assignments)
+        )
+        average_worker_limit = (
+            self._worker_limit_sum / self._sample_count
+            if self._sample_count
+            else float(self._last_worker_limit)
+        )
+        average_queue_depth = (
+            self._queue_depth_sum / self._sample_count
+            if self._sample_count
+            else float(self._last_queue_depth)
+        )
+        average_slot_utilization = (
+            average_active_assignments / average_worker_limit if average_worker_limit > 0 else 0.0
+        )
+        completed_assignments = sum(bucket.completed_assignments for bucket in self._buckets.values())
+        completed_items = sum(bucket.completed_items for bucket in self._buckets.values())
+        if completed_assignments == 0 and self._active_assignments_peak == 0 and average_queue_depth <= 0.0:
+            self._reset_window(current_time)
+            return
+
+        LOGGER.info(
+            "node throughput summary window=%.1fs active_now=%s active_avg=%.2f active_peak=%s "
+            "worker_limit_now=%s worker_limit_avg=%.2f slot_utilization_avg=%.2f "
+            "queue_depth_now=%s queue_depth_avg=%.2f completed_assignments=%s completed_items=%s",
+            effective_elapsed,
+            self._last_active_assignments,
+            average_active_assignments,
+            self._active_assignments_peak,
+            self._last_worker_limit,
+            average_worker_limit,
+            average_slot_utilization,
+            self._last_queue_depth,
+            average_queue_depth,
+            completed_assignments,
+            completed_items,
+        )
+        for bucket in sorted(self._buckets.values(), key=lambda value: (value.operation, value.model)):
+            average_latency = (
+                bucket.latency_seconds_sum / bucket.latency_observations
+                if bucket.latency_observations
+                else 0.0
+            )
+            average_microbatch_assignments = (
+                bucket.microbatch_assignments_sum / bucket.microbatch_observations
+                if bucket.microbatch_observations
+                else 0.0
+            )
+            LOGGER.info(
+                "node throughput detail window=%.1fs op=%s model=%s completed_assignments=%s "
+                "completed_items=%s assignments_per_s=%.2f items_per_s=%.2f input_texts=%s "
+                "texts_per_s=%.2f input_tokens=%s input_tokens_per_s=%.1f output_tokens=%s "
+                "output_tokens_per_s=%.1f total_tokens=%s total_tokens_per_s=%.1f "
+                "avg_latency_s=%.2f avg_microbatch_assignments=%.2f",
+                effective_elapsed,
+                bucket.operation,
+                bucket.model,
+                bucket.completed_assignments,
+                bucket.completed_items,
+                bucket.completed_assignments / effective_elapsed,
+                bucket.completed_items / effective_elapsed,
+                bucket.input_texts,
+                bucket.input_texts / effective_elapsed,
+                bucket.input_tokens,
+                bucket.input_tokens / effective_elapsed,
+                bucket.output_tokens,
+                bucket.output_tokens / effective_elapsed,
+                bucket.total_tokens,
+                bucket.total_tokens / effective_elapsed,
+                average_latency,
+                average_microbatch_assignments,
+            )
+        self._reset_window(current_time)
 
 
 def heartbeat_payload_signature(payload: dict[str, object] | None) -> str | None:
@@ -593,6 +758,9 @@ def report_assignment_failure(
         kind="success" if results_ready else "failure",
         queue_depth=max(1, queue_depth),
         latency_seconds=latency_seconds,
+        operation=getattr(assignment, "operation", None),
+        model=getattr(assignment, "model", None),
+        item_count=max(0, int(item_count)),
         code=code,
         retryable=retryable,
     )
@@ -638,6 +806,7 @@ def process_accepted_assignment(
         latency_seconds = time.monotonic() - runtime_started_at
         results_ready = True
         control.report_progress(assignment.assignment_id, assignment_progress("completed", item_count))
+        usage_summary = summarize_provider_usage(results)
         runtime_receipt = build_runtime_receipt(control, assignment, results)
         complete_assignment_with_retry(control, assignment.assignment_id, results, runtime_receipt)
         return AssignmentWorkerResult(
@@ -645,6 +814,13 @@ def process_accepted_assignment(
             kind="success",
             queue_depth=max(1, queue_depth),
             latency_seconds=latency_seconds,
+            operation=getattr(assignment, "operation", None),
+            model=getattr(assignment, "model", None),
+            item_count=int(usage_summary.get("item_count", item_count) or item_count),
+            usage_summary={
+                key: int(value) for key, value in usage_summary.items() if isinstance(value, int)
+            },
+            microbatch_assignments=1,
         )
     except Exception as assignment_error:
         return report_assignment_failure(
@@ -784,6 +960,7 @@ def process_microbatch_assignments(
             if results is None:
                 raise RuntimeError("runtime did not return microbatch results for assignment")
             control.report_progress(assignment.assignment_id, assignment_progress("completed", item_count))
+            usage_summary = summarize_provider_usage(results)
             runtime_receipt = build_runtime_receipt(control, assignment, results)
             complete_assignment_with_retry(control, assignment.assignment_id, results, runtime_receipt)
             worker_results.append(
@@ -792,6 +969,13 @@ def process_microbatch_assignments(
                     kind="success",
                     queue_depth=max(1, queue_depth),
                     latency_seconds=latency_seconds,
+                    operation=getattr(assignment, "operation", None),
+                    model=getattr(assignment, "model", None),
+                    item_count=int(usage_summary.get("item_count", item_count) or item_count),
+                    usage_summary={
+                        key: int(value) for key, value in usage_summary.items() if isinstance(value, int)
+                    },
+                    microbatch_assignments=len(prepared),
                 )
             )
         except Exception as assignment_error:
@@ -888,6 +1072,7 @@ def run_worker_loop(control: EdgeControlClient, runtime: VLLMRuntime, attest_on_
     node_id, _node_key = control.require_credentials()
     autopilot = AutopilotController(control.settings)
     heartbeat_state = HeartbeatState()
+    throughput_logger = NodeThroughputLogger()
     completion_queue: Queue[AssignmentWorkerResult] = Queue()
     active_workers: dict[str, threading.Thread] = {}
     LOGGER.info("node enrolled or restored: %s", node_id)
@@ -910,6 +1095,7 @@ def run_worker_loop(control: EdgeControlClient, runtime: VLLMRuntime, attest_on_
                 if result.kind == "fatal":
                     raise result.error if result.error is not None else RuntimeError("assignment worker failed")
                 if result.kind == "success":
+                    throughput_logger.observe_result(result)
                     autopilot.observe_assignment_success(
                         latency_seconds=max(0.0, result.latency_seconds or 0.0),
                         queue_depth=result.queue_depth,
@@ -936,6 +1122,12 @@ def run_worker_loop(control: EdgeControlClient, runtime: VLLMRuntime, attest_on_
             autopilot.observe_idle(queue_depth=queue_depth, active_assignments=active_assignments)
             capabilities = autopilot.capabilities_payload()
             worker_limit = max_worker_assignments_from_capabilities(capabilities)
+            throughput_logger.observe_loop(
+                active_assignments=active_assignments,
+                worker_limit=worker_limit,
+                queue_depth=queue_depth,
+            )
+            throughput_logger.maybe_log()
             heartbeat_state = maybe_send_heartbeat(
                 queue_depth=queue_depth,
                 control=control,

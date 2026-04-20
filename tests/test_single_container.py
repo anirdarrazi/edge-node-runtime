@@ -8,6 +8,7 @@ def test_build_vllm_command_includes_model_host_port_and_extra_args() -> None:
         vllm_model="BAAI/bge-large-en-v1.5",
         vllm_host="0.0.0.0",
         vllm_port=9000,
+        max_context_tokens=8192,
         vllm_server_command=("python", "-m", "vllm.entrypoints.openai.api_server"),
         vllm_extra_args=("--gpu-memory-utilization", "0.85"),
     )
@@ -26,12 +27,15 @@ def test_build_vllm_command_includes_model_host_port_and_extra_args() -> None:
         "9000",
         "--gpu-memory-utilization",
         "0.85",
+        "--max-model-len",
+        "8192",
     ]
 
 
 def test_config_from_env_allows_custom_commands(monkeypatch) -> None:
     monkeypatch.setenv("VLLM_MODEL", "test/model")
     monkeypatch.setenv("VLLM_PORT", "8123")
+    monkeypatch.setenv("MAX_CONTEXT_TOKENS", "16384")
     monkeypatch.setenv("VLLM_SERVER_COMMAND", "vllm serve")
     monkeypatch.setenv("VLLM_EXTRA_ARGS", "--dtype auto --max-model-len 4096")
     monkeypatch.setenv("NODE_AGENT_COMMAND", "node-agent run")
@@ -41,12 +45,27 @@ def test_config_from_env_allows_custom_commands(monkeypatch) -> None:
 
     assert config.vllm_model == "test/model"
     assert config.vllm_port == 8123
+    assert config.max_context_tokens == 16384
     assert config.vllm_server_command == ("vllm", "serve")
     assert config.vllm_extra_args == ("--dtype", "auto", "--max-model-len", "4096")
     assert config.node_agent_command == ("node-agent", "run")
     assert config.start_vllm is False
     assert config.local_inference_url == "http://127.0.0.1:8123"
     assert config.local_vllm_url == "http://127.0.0.1:8123"
+
+
+def test_build_vllm_command_does_not_duplicate_explicit_max_model_len() -> None:
+    config = single_container.SingleContainerConfig(
+        vllm_model="meta-llama/Llama-3.1-8B-Instruct",
+        max_context_tokens=32768,
+        vllm_server_command=("vllm", "serve"),
+        vllm_extra_args=("--dtype", "auto", "--max-model-len", "4096"),
+    )
+
+    command = single_container.build_vllm_command(config)
+
+    assert command.count("--max-model-len") == 1
+    assert command[-2:] == ["--max-model-len", "4096"]
 
 
 def test_embedded_runtime_defaults_to_vast_burst_capacity(tmp_path) -> None:
