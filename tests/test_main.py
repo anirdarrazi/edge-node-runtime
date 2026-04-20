@@ -9,7 +9,10 @@ import httpx
 import pytest
 
 import node_agent.main as main_module
-from node_agent.concurrency import max_worker_assignments_from_capabilities
+from node_agent.concurrency import (
+    max_local_queue_assignments_from_capabilities,
+    max_worker_assignments_from_capabilities,
+)
 from node_agent.gguf_artifacts import find_gguf_artifact
 from node_agent.model_artifacts import find_model_artifact
 
@@ -267,6 +270,53 @@ def test_worker_limit_uses_embedding_specific_capacity():
     )
 
 
+def test_worker_limit_ignores_prefetch_depth():
+    assert (
+        max_worker_assignments_from_capabilities(
+            {
+                "max_concurrent_assignments": 1,
+                "max_concurrent_assignments_embeddings": 2,
+                "max_microbatch_assignments_embeddings": 8,
+                "max_pull_bundle_assignments": 16,
+            }
+        )
+        == 2
+    )
+
+
+def test_local_queue_limit_uses_prefetch_depth():
+    assert (
+        max_local_queue_assignments_from_capabilities(
+            {
+                "max_concurrent_assignments": 1,
+                "max_concurrent_assignments_embeddings": 2,
+                "max_microbatch_assignments_embeddings": 8,
+                "max_pull_bundle_assignments": 16,
+            }
+        )
+        == 16
+    )
+
+
+def test_select_assignment_bundles_for_dispatch_prefers_largest_compatible_group():
+    assignments = [
+        SimpleNamespace(assignment_id="assign_single", operation="responses", microbatch_key=None),
+        SimpleNamespace(assignment_id="assign_embed_1", operation="embeddings", microbatch_key="embed|A"),
+        SimpleNamespace(assignment_id="assign_embed_2", operation="embeddings", microbatch_key="embed|A"),
+        SimpleNamespace(assignment_id="assign_embed_3", operation="embeddings", microbatch_key="embed|B"),
+    ]
+
+    bundles = main_module.select_assignment_bundles_for_dispatch(assignments, available_slots=2)
+
+    assert [[assignment.assignment_id for assignment in bundle] for bundle in bundles] == [
+        ["assign_embed_1", "assign_embed_2"],
+    ]
+    assert [assignment.assignment_id for assignment in assignments] == [
+        "assign_single",
+        "assign_embed_3",
+    ]
+
+
 def test_process_assignment_bundle_microbatches_compatible_embeddings():
     class AssignmentControl(FakeControl):
         def fetch_artifact(self, assignment):
@@ -362,8 +412,32 @@ def test_node_throughput_logger_logs_embedding_and_response_metrics(caplog: pyte
     start_time = time.monotonic()
 
     with caplog.at_level(logging.INFO, logger="autonomousc-node-agent"):
-        throughput_logger.observe_loop(active_assignments=3, worker_limit=4, queue_depth=8)
-        throughput_logger.observe_loop(active_assignments=4, worker_limit=4, queue_depth=6)
+        throughput_logger.observe_loop(
+            active_assignments=3,
+            worker_limit=4,
+            queue_depth=8,
+            gpu_sample=main_module.GPUTelemetrySample(
+                utilization_percent=82.0,
+                memory_utilization_percent=64.0,
+                power_watts=210.0,
+                temperature_c=69.0,
+                source="nvidia-smi",
+            ),
+            now_monotonic=start_time,
+        )
+        throughput_logger.observe_loop(
+            active_assignments=4,
+            worker_limit=4,
+            queue_depth=6,
+            gpu_sample=main_module.GPUTelemetrySample(
+                utilization_percent=94.0,
+                memory_utilization_percent=71.0,
+                power_watts=235.0,
+                temperature_c=72.0,
+                source="nvidia-smi",
+            ),
+            now_monotonic=start_time + 10.0,
+        )
         throughput_logger.observe_result(
             main_module.AssignmentWorkerResult(
                 assignment_id="assign_embed",
@@ -407,6 +481,14 @@ def test_node_throughput_logger_logs_embedding_and_response_metrics(caplog: pyte
     assert any("node throughput summary" in message for message in messages)
     assert any("slot_utilization_avg=0.88" in message for message in messages)
     assert any(
+        "gpu_source=nvidia-smi" in message
+        and "gpu_util_avg=88.0%" in message
+        and "gpu_mem_avg=67.5%" in message
+        and "gpu_power_avg=222.5W" in message
+        and "queued_idle_s=0.00" in message
+        for message in messages
+    )
+    assert any(
         "op=embeddings" in message
         and "texts_per_s=0.13" in message
         and "input_tokens_per_s=3.9" in message
@@ -419,6 +501,129 @@ def test_node_throughput_logger_logs_embedding_and_response_metrics(caplog: pyte
         and "avg_microbatch_assignments=1.00" in message
         for message in messages
     )
+
+
+def test_gpu_telemetry_sampler_parses_nvidia_smi(monkeypatch: pytest.MonkeyPatch):
+    sampler = main_module.GPUTelemetrySampler(refresh_interval_seconds=5.0)
+
+    monkeypatch.setattr(main_module.shutil, "which", lambda name: "nvidia-smi" if name == "nvidia-smi" else None)
+    monkeypatch.setattr(
+        main_module.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(stdout="87, 10240, 16384, 218.50, 71\n"),
+    )
+    monkeypatch.setattr(main_module, "pynvml", None)
+
+    sample = sampler.sample(now_monotonic=100.0)
+
+    assert sample is not None
+    assert sample.source == "nvidia-smi"
+    assert sample.utilization_percent == 87.0
+    assert sample.memory_utilization_percent == pytest.approx(62.5)
+    assert sample.power_watts == pytest.approx(218.5)
+    assert sample.temperature_c == pytest.approx(71.0)
+
+
+def test_run_worker_loop_prefetches_local_queue_and_drains_it_in_microbatches(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class AssignmentControl(FakeControl):
+        def __init__(self) -> None:
+            super().__init__(has_credentials=True)
+            self.pull_limits = []
+            self.batch_returned = False
+
+        def heartbeat(self, *args, **kwargs):
+            return None
+
+        def pull_assignments(self, limit: int, active_assignment_ids=None):
+            self.pull_limits.append(limit)
+            if len(self.completions) >= 4:
+                raise KeyboardInterrupt()
+            if self.batch_returned:
+                return []
+            self.batch_returned = True
+            return [
+                SimpleNamespace(
+                    assignment_id=f"assign_prefetch_{index}",
+                    execution_id=f"pexec_prefetch_{index}",
+                    assignment_nonce=f"nonce_prefetch_{index}",
+                    item_count=1,
+                    operation="embeddings",
+                    model="BAAI/bge-large-en-v1.5",
+                    privacy_tier="standard",
+                    node_trust_requirement="untrusted_allowed",
+                    result_guarantee="community_best_effort",
+                    allowed_regions=["global"],
+                    required_vram_gb=1.0,
+                    required_context_tokens=512,
+                    token_budget={"total_tokens": 8},
+                    microbatch_key=None,
+                )
+                for index in range(4)
+            ]
+
+        def fetch_artifact(self, assignment):
+            return {
+                "items": [
+                    {
+                        "batch_item_id": f"item_{assignment.assignment_id}",
+                        "customer_item_id": f"cust_{assignment.assignment_id}",
+                        "operation": "embeddings",
+                        "model": "BAAI/bge-large-en-v1.5",
+                        "input": {"text": assignment.assignment_id},
+                    }
+                ]
+            }
+
+    class RuntimeStub:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def execute_microbatch(self, operation, model, assignment_items):
+            self.calls.append([assignment_id for assignment_id, _items in assignment_items])
+            return {
+                assignment_id: [
+                    {
+                        "batch_item_id": items[0]["batch_item_id"],
+                        "customer_item_id": items[0]["customer_item_id"],
+                        "provider": "autonomousc_edge",
+                        "provider_model": model,
+                        "status": "completed",
+                        "usage": {"input_texts": 1, "total_tokens": 1},
+                        "cost": {
+                            "provider_cost": {"amount": "0.0001", "currency": "usd"},
+                            "customer_charge": {"amount": "0.0002", "currency": "usd"},
+                            "platform_margin": {"amount": "0.0001", "currency": "usd"},
+                        },
+                        "output": {"data": [{"embedding": [1.0]}]},
+                        "completed_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                ]
+                for assignment_id, items in assignment_items
+            }
+
+    monkeypatch.setattr(main_module, "max_worker_assignments_from_capabilities", lambda _capabilities: 2)
+    monkeypatch.setattr(main_module, "max_local_queue_assignments_from_capabilities", lambda _capabilities: 4)
+    monkeypatch.setattr(main_module.time, "sleep", lambda _seconds: None)
+
+    control = AssignmentControl()
+    runtime = RuntimeStub()
+
+    with pytest.raises(KeyboardInterrupt):
+        main_module.run_worker_loop(control, runtime, attest_on_start=False)
+
+    assert control.pull_limits[0] == 4
+    assert runtime.calls == [
+        ["assign_prefetch_0", "assign_prefetch_1"],
+        ["assign_prefetch_2", "assign_prefetch_3"],
+    ]
+    assert [completion[0] for completion in control.completions] == [
+        "assign_prefetch_0",
+        "assign_prefetch_1",
+        "assign_prefetch_2",
+        "assign_prefetch_3",
+    ]
 
 
 def test_run_worker_loop_marks_nonretryable_completion_failures_as_failed():

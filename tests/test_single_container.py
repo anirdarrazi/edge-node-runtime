@@ -1,4 +1,5 @@
 import subprocess
+import sys
 
 import node_agent.single_container as single_container
 
@@ -86,6 +87,10 @@ def test_embedded_runtime_defaults_to_vast_burst_capacity(tmp_path) -> None:
     assert values["BURST_PROVIDER"] == "vast_ai"
     assert values["BURST_LEASE_PHASE"] == "accept_burst_work"
     assert values["BURST_COST_CEILING_USD"] == "0.25"
+    assert values["VLLM_MODEL"] == "BAAI/bge-large-en-v1.5"
+    assert values["SUPPORTED_MODELS"] == "BAAI/bge-large-en-v1.5"
+    assert values["OWNER_TARGET_MODEL"] == "meta-llama/Llama-3.1-8B-Instruct"
+    assert values["OWNER_TARGET_SUPPORTED_MODELS"] == "meta-llama/Llama-3.1-8B-Instruct,BAAI/bge-large-en-v1.5"
     assert values["INFERENCE_BASE_URL"] == "http://127.0.0.1:8000"
     assert values["VLLM_BASE_URL"] == "http://127.0.0.1:8000"
 
@@ -120,8 +125,53 @@ def test_embedded_runtime_rewrites_home_defaults_for_single_container(tmp_path) 
     assert values["BURST_PROVIDER"] == "vast_ai"
     assert values["BURST_LEASE_PHASE"] == "accept_burst_work"
     assert values["BURST_COST_CEILING_USD"] == "0.25"
+    assert values["VLLM_MODEL"] == "BAAI/bge-large-en-v1.5"
+    assert values["SUPPORTED_MODELS"] == "BAAI/bge-large-en-v1.5"
+    assert values["OWNER_TARGET_MODEL"] == "meta-llama/Llama-3.1-8B-Instruct"
+    assert values["OWNER_TARGET_SUPPORTED_MODELS"] == "meta-llama/Llama-3.1-8B-Instruct,BAAI/bge-large-en-v1.5"
     assert values["INFERENCE_BASE_URL"] == "http://127.0.0.1:8000"
     assert values["VLLM_BASE_URL"] == "http://127.0.0.1:8000"
+
+
+def test_embedded_runtime_keeps_gated_startup_when_token_is_configured(tmp_path) -> None:
+    supervisor = single_container.EmbeddedRuntimeSupervisor(
+        lambda: {
+            "VLLM_MODEL": "meta-llama/Llama-3.1-8B-Instruct",
+            "SUPPORTED_MODELS": "meta-llama/Llama-3.1-8B-Instruct,BAAI/bge-large-en-v1.5",
+            "GPU_MEMORY_GB": "24",
+            "HF_TOKEN": "hf_secret_token",
+        },
+        cache_dir=tmp_path / "cache",
+        credentials_dir=tmp_path / "credentials",
+        scratch_dir=tmp_path / "scratch",
+    )
+
+    values = supervisor.env_values()
+
+    assert values["VLLM_MODEL"] == "meta-llama/Llama-3.1-8B-Instruct"
+    assert values["SUPPORTED_MODELS"] == "meta-llama/Llama-3.1-8B-Instruct,BAAI/bge-large-en-v1.5"
+    assert "OWNER_TARGET_MODEL" not in values
+
+
+def test_embedded_runtime_uses_public_bootstrap_on_low_vram_even_with_token(tmp_path) -> None:
+    supervisor = single_container.EmbeddedRuntimeSupervisor(
+        lambda: {
+            "VLLM_MODEL": "meta-llama/Llama-3.1-8B-Instruct",
+            "SUPPORTED_MODELS": "meta-llama/Llama-3.1-8B-Instruct,BAAI/bge-large-en-v1.5",
+            "GPU_MEMORY_GB": "16",
+            "HF_TOKEN": "hf_secret_token",
+        },
+        cache_dir=tmp_path / "cache",
+        credentials_dir=tmp_path / "credentials",
+        scratch_dir=tmp_path / "scratch",
+    )
+
+    values = supervisor.env_values()
+
+    assert values["VLLM_MODEL"] == "BAAI/bge-large-en-v1.5"
+    assert values["SUPPORTED_MODELS"] == "BAAI/bge-large-en-v1.5"
+    assert values["OWNER_TARGET_MODEL"] == "meta-llama/Llama-3.1-8B-Instruct"
+    assert values["OWNER_TARGET_SUPPORTED_MODELS"] == "meta-llama/Llama-3.1-8B-Instruct,BAAI/bge-large-en-v1.5"
 
 
 def test_main_starts_node_agent_without_nested_docker_when_vllm_is_external(monkeypatch) -> None:
@@ -151,6 +201,44 @@ def test_main_starts_node_agent_without_nested_docker_when_vllm_is_external(monk
 
     assert exit_code == 0
     assert started == [["node-agent", "run"]]
+
+
+def test_main_recomputes_startup_model_after_defaults(monkeypatch) -> None:
+    started: list[list[str]] = []
+
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self, command, text=False) -> None:
+            started.append(list(command))
+
+        def poll(self):
+            return None
+
+        def terminate(self) -> None:
+            pass
+
+        def wait(self, timeout=None) -> int:
+            return self.returncode
+
+    monkeypatch.delenv("VLLM_MODEL", raising=False)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+    monkeypatch.setenv("NODE_AGENT_COMMAND", "node-agent run")
+    monkeypatch.setattr(single_container.subprocess, "Popen", FakeProcess)
+    monkeypatch.setattr(single_container, "wait_for_inference_runtime_ready", lambda config, process: None)
+    monkeypatch.setattr(single_container, "wait_for_any_process", lambda processes: processes[1])
+
+    exit_code = single_container.main()
+
+    assert exit_code == 0
+    assert started[0][:5] == [
+        sys.executable,
+        "-m",
+        "vllm.entrypoints.openai.api_server",
+        "--model",
+        "BAAI/bge-large-en-v1.5",
+    ]
 
 
 def test_wait_for_vllm_fails_fast_when_process_exits() -> None:

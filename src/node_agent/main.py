@@ -4,6 +4,8 @@ from dataclasses import dataclass
 import json
 import logging
 from queue import Empty, Queue
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -11,9 +13,17 @@ from datetime import datetime, timezone
 
 import httpx
 
+try:  # pragma: no cover - optional dependency
+    import pynvml  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover - optional dependency
+    pynvml = None
+
 from .autopilot import AutopilotController
 from .config import NodeAgentSettings
-from .concurrency import max_worker_assignments_from_capabilities
+from .concurrency import (
+    max_local_queue_assignments_from_capabilities,
+    max_worker_assignments_from_capabilities,
+)
 from .control_plane import EdgeControlClient
 from .gguf_artifacts import resolved_gguf_artifact_contract
 from .inference_engine import VLLM_INFERENCE_ENGINE
@@ -25,6 +35,7 @@ LOGGER = logging.getLogger("autonomousc-node-agent")
 assignment_progress_keepalive_seconds = 30.0
 heartbeat_interval_seconds = 15.0
 throughput_log_interval_seconds = 30.0
+gpu_telemetry_refresh_interval_seconds = 5.0
 supported_operations = frozenset({"responses", "embeddings"})
 vram_comparison_tolerance_gb = 0.25
 
@@ -120,6 +131,111 @@ class ThroughputWindowBucket:
     microbatch_observations: int = 0
 
 
+@dataclass
+class GPUTelemetrySample:
+    utilization_percent: float
+    memory_utilization_percent: float
+    power_watts: float | None = None
+    temperature_c: float | None = None
+    source: str = "nvidia-smi"
+
+
+class GPUTelemetrySampler:
+    def __init__(self, refresh_interval_seconds: float = gpu_telemetry_refresh_interval_seconds) -> None:
+        self.refresh_interval_seconds = max(1.0, float(refresh_interval_seconds))
+        self._last_sample_time: float | None = None
+        self._last_sample: GPUTelemetrySample | None = None
+        self._nvml_handle = None
+        self._nvml_disabled = False
+
+    def sample(self, *, now_monotonic: float | None = None) -> GPUTelemetrySample | None:
+        current_time = time.monotonic() if now_monotonic is None else now_monotonic
+        if (
+            self._last_sample_time is not None
+            and current_time - self._last_sample_time < self.refresh_interval_seconds
+        ):
+            return self._last_sample
+
+        sample = self._sample_nvml() or self._sample_nvidia_smi()
+        self._last_sample_time = current_time
+        self._last_sample = sample
+        return sample
+
+    def _sample_nvml(self) -> GPUTelemetrySample | None:
+        if pynvml is None or self._nvml_disabled:
+            return None
+        try:
+            if self._nvml_handle is None:
+                pynvml.nvmlInit()
+                self._nvml_handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+            handle = self._nvml_handle
+            utilization = pynvml.nvmlDeviceGetUtilizationRates(handle)
+            memory = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            power_mw = pynvml.nvmlDeviceGetPowerUsage(handle)
+            temperature_c = pynvml.nvmlDeviceGetTemperature(
+                handle,
+                pynvml.NVML_TEMPERATURE_GPU,
+            )
+            memory_utilization_percent = (
+                (float(memory.used) / float(memory.total)) * 100.0 if getattr(memory, "total", 0) else 0.0
+            )
+            return GPUTelemetrySample(
+                utilization_percent=max(0.0, float(utilization.gpu)),
+                memory_utilization_percent=max(0.0, memory_utilization_percent),
+                power_watts=max(0.0, float(power_mw) / 1000.0),
+                temperature_c=max(0.0, float(temperature_c)),
+                source="nvml",
+            )
+        except Exception:
+            self._nvml_disabled = True
+            return None
+
+    @staticmethod
+    def _safe_float(value: str) -> float | None:
+        try:
+            return float(str(value).strip())
+        except (TypeError, ValueError):
+            return None
+
+    def _sample_nvidia_smi(self) -> GPUTelemetrySample | None:
+        if shutil.which("nvidia-smi") is None:
+            return None
+        try:
+            completed = subprocess.run(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu",
+                    "--format=csv,noheader,nounits",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=3.0,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+        first_line = completed.stdout.splitlines()[0].strip() if completed.stdout.splitlines() else ""
+        parts = [part.strip() for part in first_line.split(",")]
+        if len(parts) < 5:
+            return None
+        utilization_percent = self._safe_float(parts[0])
+        memory_used_mb = self._safe_float(parts[1])
+        memory_total_mb = self._safe_float(parts[2])
+        power_watts = self._safe_float(parts[3])
+        temperature_c = self._safe_float(parts[4])
+        if utilization_percent is None or memory_used_mb is None or memory_total_mb is None or memory_total_mb <= 0:
+            return None
+        memory_utilization_percent = (memory_used_mb / memory_total_mb) * 100.0
+        return GPUTelemetrySample(
+            utilization_percent=max(0.0, utilization_percent),
+            memory_utilization_percent=max(0.0, memory_utilization_percent),
+            power_watts=None if power_watts is None else max(0.0, power_watts),
+            temperature_c=None if temperature_c is None else max(0.0, temperature_c),
+            source="nvidia-smi",
+        )
+
+
 class NodeThroughputLogger:
     def __init__(self, interval_seconds: float = throughput_log_interval_seconds) -> None:
         self.interval_seconds = max(1.0, float(interval_seconds))
@@ -127,6 +243,7 @@ class NodeThroughputLogger:
 
     def _reset_window(self, now_monotonic: float) -> None:
         self._window_started_at = now_monotonic
+        self._last_observed_at = now_monotonic
         self._sample_count = 0
         self._active_assignments_sum = 0
         self._worker_limit_sum = 0
@@ -135,6 +252,24 @@ class NodeThroughputLogger:
         self._last_active_assignments = 0
         self._last_worker_limit = 0
         self._last_queue_depth = 0
+        self._queued_idle_seconds = 0.0
+        self._refill_gap_started_at: float | None = None
+        self._refill_gap_seconds_sum = 0.0
+        self._refill_gap_count = 0
+        self._refill_gap_max_seconds = 0.0
+        self._gpu_utilization_sum = 0.0
+        self._gpu_utilization_count = 0
+        self._gpu_utilization_peak = 0.0
+        self._gpu_memory_utilization_sum = 0.0
+        self._gpu_memory_utilization_count = 0
+        self._gpu_memory_utilization_peak = 0.0
+        self._gpu_power_sum = 0.0
+        self._gpu_power_count = 0
+        self._gpu_power_peak = 0.0
+        self._gpu_temperature_sum = 0.0
+        self._gpu_temperature_count = 0
+        self._gpu_temperature_peak = 0.0
+        self._gpu_source: str | None = None
         self._buckets: dict[tuple[str, str], ThroughputWindowBucket] = {}
 
     @staticmethod
@@ -144,10 +279,38 @@ class NodeThroughputLogger:
         value = summary.get(key, 0)
         return value if isinstance(value, int) and value > 0 else 0
 
-    def observe_loop(self, *, active_assignments: int, worker_limit: int, queue_depth: int) -> None:
+    @staticmethod
+    def _format_metric(value: float | None, *, suffix: str = "", decimals: int = 1) -> str:
+        if value is None:
+            return "n/a"
+        return f"{value:.{decimals}f}{suffix}"
+
+    def observe_loop(
+        self,
+        *,
+        active_assignments: int,
+        worker_limit: int,
+        queue_depth: int,
+        gpu_sample: GPUTelemetrySample | None = None,
+        now_monotonic: float | None = None,
+    ) -> None:
+        current_time = time.monotonic() if now_monotonic is None else now_monotonic
         active_value = max(0, int(active_assignments))
         worker_limit_value = max(0, int(worker_limit))
         queue_depth_value = max(0, int(queue_depth))
+        if self._sample_count:
+            interval_seconds = max(0.0, current_time - self._last_observed_at)
+            if self._last_queue_depth > 0 and self._last_active_assignments == 0:
+                self._queued_idle_seconds += interval_seconds
+        if self._refill_gap_started_at is not None and (active_value > 0 or queue_depth_value <= 0):
+            refill_gap_seconds = max(0.0, current_time - self._refill_gap_started_at)
+            self._refill_gap_seconds_sum += refill_gap_seconds
+            self._refill_gap_count += 1
+            self._refill_gap_max_seconds = max(self._refill_gap_max_seconds, refill_gap_seconds)
+            self._refill_gap_started_at = None
+        if self._refill_gap_started_at is None and queue_depth_value > 0 and active_value == 0:
+            self._refill_gap_started_at = current_time
+
         self._sample_count += 1
         self._active_assignments_sum += active_value
         self._worker_limit_sum += worker_limit_value
@@ -156,6 +319,26 @@ class NodeThroughputLogger:
         self._last_active_assignments = active_value
         self._last_worker_limit = worker_limit_value
         self._last_queue_depth = queue_depth_value
+        self._last_observed_at = current_time
+        if gpu_sample is not None:
+            self._gpu_source = gpu_sample.source
+            self._gpu_utilization_sum += max(0.0, gpu_sample.utilization_percent)
+            self._gpu_utilization_count += 1
+            self._gpu_utilization_peak = max(self._gpu_utilization_peak, gpu_sample.utilization_percent)
+            self._gpu_memory_utilization_sum += max(0.0, gpu_sample.memory_utilization_percent)
+            self._gpu_memory_utilization_count += 1
+            self._gpu_memory_utilization_peak = max(
+                self._gpu_memory_utilization_peak,
+                gpu_sample.memory_utilization_percent,
+            )
+            if gpu_sample.power_watts is not None:
+                self._gpu_power_sum += max(0.0, gpu_sample.power_watts)
+                self._gpu_power_count += 1
+                self._gpu_power_peak = max(self._gpu_power_peak, gpu_sample.power_watts)
+            if gpu_sample.temperature_c is not None:
+                self._gpu_temperature_sum += max(0.0, gpu_sample.temperature_c)
+                self._gpu_temperature_count += 1
+                self._gpu_temperature_peak = max(self._gpu_temperature_peak, gpu_sample.temperature_c)
 
     def observe_result(self, result: AssignmentWorkerResult) -> None:
         if result.kind != "success":
@@ -203,6 +386,24 @@ class NodeThroughputLogger:
         average_slot_utilization = (
             average_active_assignments / average_worker_limit if average_worker_limit > 0 else 0.0
         )
+        queued_idle_fraction = self._queued_idle_seconds / effective_elapsed if effective_elapsed > 0 else 0.0
+        average_refill_gap_seconds = (
+            self._refill_gap_seconds_sum / self._refill_gap_count if self._refill_gap_count else 0.0
+        )
+        average_gpu_utilization = (
+            self._gpu_utilization_sum / self._gpu_utilization_count if self._gpu_utilization_count else None
+        )
+        average_gpu_memory_utilization = (
+            self._gpu_memory_utilization_sum / self._gpu_memory_utilization_count
+            if self._gpu_memory_utilization_count
+            else None
+        )
+        average_gpu_power = (
+            self._gpu_power_sum / self._gpu_power_count if self._gpu_power_count else None
+        )
+        average_gpu_temperature = (
+            self._gpu_temperature_sum / self._gpu_temperature_count if self._gpu_temperature_count else None
+        )
         completed_assignments = sum(bucket.completed_assignments for bucket in self._buckets.values())
         completed_items = sum(bucket.completed_items for bucket in self._buckets.values())
         if completed_assignments == 0 and self._active_assignments_peak == 0 and average_queue_depth <= 0.0:
@@ -212,7 +413,10 @@ class NodeThroughputLogger:
         LOGGER.info(
             "node throughput summary window=%.1fs active_now=%s active_avg=%.2f active_peak=%s "
             "worker_limit_now=%s worker_limit_avg=%.2f slot_utilization_avg=%.2f "
-            "queue_depth_now=%s queue_depth_avg=%.2f completed_assignments=%s completed_items=%s",
+            "queue_depth_now=%s queue_depth_avg=%.2f queued_idle_s=%.2f queued_idle_pct=%.2f "
+            "refill_gap_avg_s=%.2f refill_gap_max_s=%.2f gpu_source=%s gpu_util_avg=%s gpu_util_peak=%s "
+            "gpu_mem_avg=%s gpu_mem_peak=%s gpu_power_avg=%s gpu_power_peak=%s gpu_temp_avg=%s gpu_temp_peak=%s "
+            "completed_assignments=%s completed_items=%s",
             effective_elapsed,
             self._last_active_assignments,
             average_active_assignments,
@@ -222,6 +426,35 @@ class NodeThroughputLogger:
             average_slot_utilization,
             self._last_queue_depth,
             average_queue_depth,
+            self._queued_idle_seconds,
+            queued_idle_fraction,
+            average_refill_gap_seconds,
+            self._refill_gap_max_seconds,
+            self._gpu_source or "n/a",
+            self._format_metric(average_gpu_utilization, suffix="%", decimals=1),
+            self._format_metric(
+                self._gpu_utilization_peak if self._gpu_utilization_count else None,
+                suffix="%",
+                decimals=1,
+            ),
+            self._format_metric(average_gpu_memory_utilization, suffix="%", decimals=1),
+            self._format_metric(
+                self._gpu_memory_utilization_peak if self._gpu_memory_utilization_count else None,
+                suffix="%",
+                decimals=1,
+            ),
+            self._format_metric(average_gpu_power, suffix="W", decimals=1),
+            self._format_metric(
+                self._gpu_power_peak if self._gpu_power_count else None,
+                suffix="W",
+                decimals=1,
+            ),
+            self._format_metric(average_gpu_temperature, suffix="C", decimals=1),
+            self._format_metric(
+                self._gpu_temperature_peak if self._gpu_temperature_count else None,
+                suffix="C",
+                decimals=1,
+            ),
             completed_assignments,
             completed_items,
         )
@@ -873,6 +1106,49 @@ def group_assignments_for_local_execution(assignments: list[object]) -> list[lis
     return ordered_groups
 
 
+def select_assignment_bundles_for_dispatch(
+    pending_assignments: list[object],
+    *,
+    available_slots: int,
+) -> list[list[object]]:
+    if available_slots <= 0 or not pending_assignments:
+        return []
+
+    remaining = list(pending_assignments)
+    bundles: list[list[object]] = []
+
+    while remaining and available_slots > 0:
+        grouped = group_assignments_for_local_execution(remaining)
+        ranked_groups = sorted(
+            enumerate(grouped),
+            key=lambda entry: (
+                min(len(entry[1]), available_slots),
+                1 if assignment_microbatch_key(entry[1][0]) is not None else 0,
+                -entry[0],
+            ),
+            reverse=True,
+        )
+        _group_index, selected_group = ranked_groups[0]
+        selected_key = assignment_microbatch_key(selected_group[0])
+        bundle_size = 1 if selected_key is None else min(len(selected_group), available_slots)
+        bundle = selected_group[:bundle_size]
+        bundle_ids = {
+            getattr(assignment, "assignment_id", "")
+            for assignment in bundle
+            if getattr(assignment, "assignment_id", "")
+        }
+        remaining = [
+            assignment
+            for assignment in remaining
+            if getattr(assignment, "assignment_id", "") not in bundle_ids
+        ]
+        available_slots -= len(bundle)
+        bundles.append(bundle)
+
+    pending_assignments[:] = remaining
+    return bundles
+
+
 def process_microbatch_assignments(
     control: EdgeControlClient,
     runtime: VLLMRuntime,
@@ -1073,8 +1349,10 @@ def run_worker_loop(control: EdgeControlClient, runtime: VLLMRuntime, attest_on_
     autopilot = AutopilotController(control.settings)
     heartbeat_state = HeartbeatState()
     throughput_logger = NodeThroughputLogger()
+    gpu_telemetry_sampler = GPUTelemetrySampler()
     completion_queue: Queue[AssignmentWorkerResult] = Queue()
     active_workers: dict[str, threading.Thread] = {}
+    pending_assignments: list[object] = []
     LOGGER.info("node enrolled or restored: %s", node_id)
     if attest_on_start:
         print("Refreshing node attestation before entering the worker loop...")
@@ -1119,46 +1397,75 @@ def run_worker_loop(control: EdgeControlClient, runtime: VLLMRuntime, attest_on_
                 control.attest()
             queue_depth = control_plane_queue_depth(control)
             active_assignments = len(active_workers)
-            autopilot.observe_idle(queue_depth=queue_depth, active_assignments=active_assignments)
             capabilities = autopilot.capabilities_payload()
             worker_limit = max_worker_assignments_from_capabilities(capabilities)
+            local_queue_limit = max_local_queue_assignments_from_capabilities(capabilities)
+            local_queue_depth = len(pending_assignments)
+            observable_queue_depth = max(queue_depth, local_queue_depth)
+            autopilot.observe_idle(queue_depth=observable_queue_depth, active_assignments=active_assignments)
+            loop_time = time.monotonic()
+            gpu_sample = gpu_telemetry_sampler.sample(now_monotonic=loop_time)
             throughput_logger.observe_loop(
                 active_assignments=active_assignments,
                 worker_limit=worker_limit,
-                queue_depth=queue_depth,
+                queue_depth=observable_queue_depth,
+                gpu_sample=gpu_sample,
+                now_monotonic=loop_time,
             )
-            throughput_logger.maybe_log()
+            throughput_logger.maybe_log(now_monotonic=loop_time)
             heartbeat_state = maybe_send_heartbeat(
-                queue_depth=queue_depth,
+                queue_depth=local_queue_depth,
                 control=control,
                 heartbeat_state=heartbeat_state,
                 status="active",
                 active_assignments=active_assignments,
                 capabilities=capabilities,
                 runtime=control.node_runtime_payload(),
+                now_monotonic=loop_time,
             )
             pulled_assignment = False
-            free_slots = max(0, worker_limit - len(active_workers))
+            local_assignment_ids = [
+                assignment_id
+                for assignment_id in (
+                    list(active_workers.keys())
+                    + [
+                        str(getattr(assignment, "assignment_id", "") or "")
+                        for assignment in pending_assignments
+                    ]
+                )
+                if assignment_id
+            ]
+            local_claimed_assignments = len(local_assignment_ids)
+            pull_budget = max(0, local_queue_limit - local_claimed_assignments)
             assignments = control.pull_assignments(
-                free_slots,
-                active_assignment_ids=list(active_workers.keys()),
+                pull_budget,
+                active_assignment_ids=local_assignment_ids,
             )
             queue_depth = control_plane_queue_depth(control)
-            new_assignments: list[object] = []
-            for assignment in assignments[:free_slots]:
-                if assignment.assignment_id in active_workers:
+            pending_assignment_ids = {
+                str(getattr(assignment, "assignment_id", "") or "") for assignment in pending_assignments
+            }
+            for assignment in assignments[:pull_budget]:
+                if assignment.assignment_id in active_workers or assignment.assignment_id in pending_assignment_ids:
                     LOGGER.debug("assignment %s is already running locally; skipping duplicate pull", assignment.assignment_id)
                     continue
-                new_assignments.append(assignment)
+                pending_assignments.append(assignment)
+                pending_assignment_ids.add(assignment.assignment_id)
+                pulled_assignment = True
 
-            for bundle in group_assignments_for_local_execution(new_assignments):
+            dispatch_slots = max(0, worker_limit - len(active_workers))
+            dispatch_queue_depth = max(queue_depth, len(pending_assignments))
+            for bundle in select_assignment_bundles_for_dispatch(
+                pending_assignments,
+                available_slots=dispatch_slots,
+            ):
                 if not bundle:
                     continue
                 worker = threading.Thread(
                     target=run_assignment_bundle_worker,
                     args=(control, runtime, bundle),
                     kwargs={
-                        "queue_depth": max(1, queue_depth),
+                        "queue_depth": max(1, dispatch_queue_depth),
                         "completion_queue": completion_queue,
                     },
                     name=f"assignment-bundle-{getattr(bundle[0], 'assignment_id', 'unknown')}",
@@ -1167,15 +1474,15 @@ def run_worker_loop(control: EdgeControlClient, runtime: VLLMRuntime, attest_on_
                 for assignment in bundle:
                     active_workers[assignment.assignment_id] = worker
                 worker.start()
-                pulled_assignment = True
                 LOGGER.info(
                     "claimed assignment bundle size=%s ids=%s",
                     len(bundle),
                     ",".join(str(getattr(assignment, "assignment_id", "unknown")) for assignment in bundle),
                 )
-            if not active_workers and not pulled_assignment:
-                if queue_depth > 0:
-                    autopilot.observe_idle(queue_depth=queue_depth, active_assignments=0)
+                dispatch_slots = max(0, dispatch_slots - len(bundle))
+            if not active_workers and not pending_assignments and not pulled_assignment:
+                if max(queue_depth, len(pending_assignments)) > 0:
+                    autopilot.observe_idle(queue_depth=max(queue_depth, len(pending_assignments)), active_assignments=0)
                 time.sleep(control.settings.poll_interval_seconds)
                 continue
             time.sleep(0.25 if active_workers else control.settings.poll_interval_seconds)

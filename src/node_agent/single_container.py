@@ -14,6 +14,11 @@ from typing import Sequence
 
 import httpx
 
+DEFAULT_GATED_STARTUP_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
+DEFAULT_PUBLIC_BOOTSTRAP_MODEL = "BAAI/bge-large-en-v1.5"
+MIN_VRAM_FOR_GATED_STARTUP_GB = 24.0
+GATED_HF_REPOSITORY_PREFIXES = ("meta-llama/",)
+
 
 def env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
@@ -28,6 +33,16 @@ def env_bool(name: str, default: bool) -> bool:
 def env_int(name: str, default: int) -> int:
     raw = os.getenv(name)
     if raw is None or not str(raw).strip():
+        return default
+
+
+def env_float_from_mapping(env: Mapping[str, str], name: str, default: float | None = None) -> float | None:
+    raw = env.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        return float(str(raw).strip())
+    except ValueError:
         return default
     try:
         return int(str(raw).strip())
@@ -59,7 +74,7 @@ class SingleContainerConfig:
             return values.get(name, default)
 
         return cls(
-            vllm_model=nonempty_value(values, "VLLM_MODEL", "meta-llama/Llama-3.1-8B-Instruct"),
+            vllm_model=nonempty_value(values, "VLLM_MODEL", DEFAULT_GATED_STARTUP_MODEL),
             vllm_host=nonempty_value(values, "VLLM_HOST", "0.0.0.0"),
             vllm_port=env_int_from_mapping(values, "VLLM_PORT", 8000),
             max_context_tokens=env_int_from_mapping(values, "MAX_CONTEXT_TOKENS", 32768),
@@ -148,12 +163,62 @@ def force_when_blank_or(values: MutableMapping[str, str], name: str, default: st
         values[name] = default
 
 
+def hugging_face_token_configured(values: Mapping[str, str]) -> bool:
+    return any(str(values.get(key, "")).strip() for key in ("HUGGING_FACE_HUB_TOKEN", "HF_TOKEN"))
+
+
+def requires_gated_hugging_face_access(model: str | None) -> bool:
+    normalized = str(model or "").strip().lower()
+    return any(normalized.startswith(prefix) for prefix in GATED_HF_REPOSITORY_PREFIXES)
+
+
+def should_use_public_bootstrap(values: Mapping[str, str], current_model: str) -> tuple[bool, list[str]]:
+    reasons: list[str] = []
+    if requires_gated_hugging_face_access(current_model) and not hugging_face_token_configured(values):
+        reasons.append(
+            f"no Hugging Face token is configured for the gated startup model {current_model}"
+        )
+    gpu_memory_gb = env_float_from_mapping(values, "GPU_MEMORY_GB")
+    if gpu_memory_gb is not None and gpu_memory_gb < MIN_VRAM_FOR_GATED_STARTUP_GB:
+        reasons.append(
+            f"this machine reports only {gpu_memory_gb:.1f} GB VRAM, so the public embeddings bootstrap is safer"
+        )
+    return bool(reasons), reasons
+
+
+def apply_public_bootstrap_fallback(values: MutableMapping[str, str]) -> str | None:
+    current_model = nonempty_value(values, "VLLM_MODEL", DEFAULT_GATED_STARTUP_MODEL)
+    if current_model == DEFAULT_PUBLIC_BOOTSTRAP_MODEL:
+        return None
+
+    should_fallback, reasons = should_use_public_bootstrap(values, current_model)
+    if not should_fallback:
+        return None
+
+    current_supported_models = str(values.get("SUPPORTED_MODELS", "")).strip()
+    if not str(values.get("OWNER_TARGET_MODEL", "")).strip():
+        values["OWNER_TARGET_MODEL"] = current_model
+    if not str(values.get("OWNER_TARGET_SUPPORTED_MODELS", "")).strip():
+        values["OWNER_TARGET_SUPPORTED_MODELS"] = (
+            current_supported_models or f"{current_model},{DEFAULT_PUBLIC_BOOTSTRAP_MODEL}"
+        )
+
+    values["VLLM_MODEL"] = DEFAULT_PUBLIC_BOOTSTRAP_MODEL
+    values["SUPPORTED_MODELS"] = DEFAULT_PUBLIC_BOOTSTRAP_MODEL
+    reason_text = " and ".join(reasons)
+    owner_target = str(values.get("OWNER_TARGET_MODEL") or current_model).strip() or current_model
+    return (
+        f"Using the public bootstrap model {DEFAULT_PUBLIC_BOOTSTRAP_MODEL} because {reason_text}. "
+        f"{owner_target} stays saved as the larger owner target."
+    )
+
+
 def apply_single_container_runtime_defaults(
     values: MutableMapping[str, str],
     *,
     local_inference_url: str | None = None,
-) -> None:
-    values["VLLM_MODEL"] = nonempty_value(values, "VLLM_MODEL", "meta-llama/Llama-3.1-8B-Instruct")
+) -> str | None:
+    values["VLLM_MODEL"] = nonempty_value(values, "VLLM_MODEL", DEFAULT_GATED_STARTUP_MODEL)
     values["VLLM_HOST"] = nonempty_value(values, "VLLM_HOST", "0.0.0.0")
     values["VLLM_PORT"] = str(env_int_from_mapping(values, "VLLM_PORT", 8000))
 
@@ -170,6 +235,7 @@ def apply_single_container_runtime_defaults(
     force_when_blank_or(values, "BURST_PROVIDER", "vast_ai", set())
     force_when_blank_or(values, "BURST_LEASE_PHASE", "accept_burst_work", set())
     force_when_blank_or(values, "BURST_COST_CEILING_USD", "0.25", set())
+    fallback_note = apply_public_bootstrap_fallback(values)
 
     start_vllm = env_bool_from_mapping(values, "START_VLLM", True)
     inference_url = local_inference_url or f"http://127.0.0.1:{values['VLLM_PORT']}"
@@ -178,6 +244,7 @@ def apply_single_container_runtime_defaults(
         current = str(values.get(key, "")).strip()
         if value_is_blank(values, key) or (start_vllm and current in compose_service_urls):
             values[key] = inference_url
+    return fallback_note
 
 
 def wait_for_inference_runtime_ready(config: SingleContainerConfig, process: subprocess.Popen[str] | None) -> None:
@@ -245,14 +312,18 @@ class EmbeddedRuntimeSupervisor:
         self.node_process: subprocess.Popen[str] | None = None
         self.last_exit_codes: dict[str, int] = {}
 
-    def env_values(self) -> dict[str, str]:
+    def prepared_env_values(self) -> tuple[dict[str, str], str | None]:
         values = dict(self.env_provider())
-        apply_single_container_runtime_defaults(values)
+        fallback_note = apply_single_container_runtime_defaults(values)
         values.setdefault("CREDENTIALS_PATH", str(self.credentials_dir / "node-credentials.json"))
         values.setdefault("ATTESTATION_STATE_PATH", str(self.credentials_dir / "attestation-state.json"))
         values.setdefault("RECOVERY_NOTE_PATH", str(self.credentials_dir / "recovery-note.txt"))
         values.setdefault("AUTOPILOT_STATE_PATH", str(self.scratch_dir / "autopilot-state.json"))
         values.setdefault("HF_HOME", str(self.cache_dir))
+        return values, fallback_note
+
+    def env_values(self) -> dict[str, str]:
+        values, _fallback_note = self.prepared_env_values()
         return values
 
     def config(self, env_values: Mapping[str, str] | None = None) -> SingleContainerConfig:
@@ -326,10 +397,12 @@ class EmbeddedRuntimeSupervisor:
         start_vllm: bool,
         start_node: bool,
     ) -> None:
-        env_values = self.env_values()
+        env_values, fallback_note = self.prepared_env_values()
         config = self.config(env_values)
         process_env = self.process_env(env_values)
         self.ensure_dirs()
+        if fallback_note:
+            self.log(fallback_note)
 
         with self.lock:
             if recreate:
@@ -350,10 +423,12 @@ class EmbeddedRuntimeSupervisor:
                 self.node_process = subprocess.Popen(command, text=True, env=process_env)
 
     def restart_vllm(self) -> None:
-        env_values = self.env_values()
+        env_values, fallback_note = self.prepared_env_values()
         config = self.config(env_values)
         process_env = self.process_env(env_values)
         self.ensure_dirs()
+        if fallback_note:
+            self.log(fallback_note)
 
         with self.lock:
             terminate_process(self.vllm_process)
@@ -397,13 +472,19 @@ class EmbeddedRuntimeSupervisor:
 
 
 def main() -> int:
+    initial_config = SingleContainerConfig.from_env()
+    fallback_note = apply_single_container_runtime_defaults(
+        os.environ,
+        local_inference_url=initial_config.local_inference_url,
+    )
     config = SingleContainerConfig.from_env()
-    apply_single_container_runtime_defaults(os.environ, local_inference_url=config.local_inference_url)
     os.environ.setdefault("CREDENTIALS_PATH", "/var/lib/autonomousc/credentials/node-credentials.json")
     os.environ.setdefault("ATTESTATION_STATE_PATH", "/var/lib/autonomousc/credentials/attestation-state.json")
     os.environ.setdefault("RECOVERY_NOTE_PATH", "/var/lib/autonomousc/credentials/recovery-note.txt")
     os.environ.setdefault("AUTOPILOT_STATE_PATH", "/var/lib/autonomousc/scratch/autopilot-state.json")
     os.environ.setdefault("HF_HOME", "/root/.cache/huggingface")
+    if fallback_note:
+        print(fallback_note, flush=True)
 
     vllm_process: subprocess.Popen[str] | None = None
     node_process: subprocess.Popen[str] | None = None

@@ -90,6 +90,12 @@ def resolved_embeddings_microbatch_assignment_limit(
 def max_worker_assignments_from_capabilities(capabilities: dict[str, Any]) -> int:
     base_limit = _safe_positive_int(capabilities.get("max_concurrent_assignments")) or 1
     embedding_limit = _safe_nonnegative_int(capabilities.get("max_concurrent_assignments_embeddings"))
+    return max(1, base_limit, embedding_limit)
+
+
+def max_local_queue_assignments_from_capabilities(capabilities: dict[str, Any]) -> int:
+    base_limit = _safe_positive_int(capabilities.get("max_concurrent_assignments")) or 1
+    embedding_limit = _safe_nonnegative_int(capabilities.get("max_concurrent_assignments_embeddings"))
     microbatch_limit = _safe_nonnegative_int(capabilities.get("max_microbatch_assignments_embeddings"))
     pull_bundle_limit = _safe_nonnegative_int(capabilities.get("max_pull_bundle_assignments"))
     return max(1, base_limit, embedding_limit, microbatch_limit, pull_bundle_limit)
