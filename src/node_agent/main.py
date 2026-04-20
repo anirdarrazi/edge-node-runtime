@@ -499,7 +499,10 @@ class NodeThroughputLogger:
 def heartbeat_payload_signature(payload: dict[str, object] | None) -> str | None:
     if payload is None:
         return None
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    signature_payload = dict(payload)
+    for volatile_key in ("gpu_temp_c", "power_watts", "estimated_heat_output_watts"):
+        signature_payload.pop(volatile_key, None)
+    return json.dumps(signature_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
 def maybe_send_heartbeat(
@@ -1501,6 +1504,10 @@ def run_worker_loop(control: EdgeControlClient, runtime: VLLMRuntime, attest_on_
                     "Node credentials were rejected by the control plane. "
                     "Open the setup UI and run Quick Start to reclaim this node."
                 ) from error
+            if control.is_transient_network_error(error):
+                LOGGER.warning("control plane connectivity degraded temporarily: %s", error)
+                time.sleep(control.settings.poll_interval_seconds)
+                continue
             LOGGER.exception("node agent loop failed")
             time.sleep(control.settings.poll_interval_seconds)
 

@@ -251,6 +251,9 @@ class EdgeControlClient:
     def is_auth_error(self, error: Exception) -> bool:
         return self.transport.is_auth_error(error)
 
+    def is_transient_network_error(self, error: Exception) -> bool:
+        return self.transport.is_transient_network_error(error)
+
     def _persist_from_response(self, payload: dict[str, Any]) -> tuple[str, str]:
         return self.persist_credentials(str(payload["node_id"]), str(payload["node_key"]))
 

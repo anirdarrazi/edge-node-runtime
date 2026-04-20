@@ -819,6 +819,56 @@ def test_maybe_send_heartbeat_throttles_idle_updates_and_flushes_slot_changes():
     assert control.heartbeat_calls[-1][1]["include_runtime"] is False
 
 
+def test_maybe_send_heartbeat_ignores_volatile_gpu_telemetry_for_metadata_flush():
+    class HeartbeatRecordingControl(FakeControl):
+        def __init__(self) -> None:
+            super().__init__(has_credentials=True)
+            self.heartbeat_calls = []
+
+        def heartbeat(self, *args, **kwargs):
+            self.heartbeat_calls.append((args, kwargs))
+            return None
+
+    control = HeartbeatRecordingControl()
+    state = main_module.HeartbeatState()
+    runtime = {"current_model": "BAAI/bge-large-en-v1.5"}
+    capabilities = {
+        "supported_models": ["BAAI/bge-large-en-v1.5"],
+        "operations": ["embeddings"],
+        "gpu_temp_c": 41.0,
+        "power_watts": 18.0,
+        "estimated_heat_output_watts": 18.0,
+    }
+
+    state = main_module.maybe_send_heartbeat(
+        control,
+        state,
+        status="active",
+        queue_depth=0,
+        active_assignments=0,
+        capabilities=capabilities,
+        runtime=runtime,
+        now_monotonic=100.0,
+    )
+    state = main_module.maybe_send_heartbeat(
+        control,
+        state,
+        status="active",
+        queue_depth=0,
+        active_assignments=0,
+        capabilities={
+            **capabilities,
+            "gpu_temp_c": 45.0,
+            "power_watts": 27.0,
+            "estimated_heat_output_watts": 27.0,
+        },
+        runtime=runtime,
+        now_monotonic=105.0,
+    )
+
+    assert len(control.heartbeat_calls) == 1
+
+
 def test_validate_assignment_rejects_restricted_work_without_hardware_attestation():
     control = FakeControl(has_credentials=True)
     control.settings.attestation_provider = "simulated"

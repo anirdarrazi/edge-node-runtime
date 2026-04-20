@@ -9,6 +9,7 @@ import pytest
 
 from node_agent.config import NodeAgentSettings
 from node_agent.control_plane import EdgeControlClient, decrypt_artifact
+from node_agent.control_plane_transport import EdgeControlTransport
 from node_agent.gguf_artifacts import find_gguf_artifact
 from node_agent.model_artifacts import find_model_artifact
 
@@ -81,6 +82,19 @@ class PullManyClient:
                 "queue_depth": 7,
             }
         )
+
+
+class RetryClient:
+    def __init__(self):
+        self.calls = []
+        self.remaining_failures = 1
+
+    def request(self, method, path, **kwargs):
+        self.calls.append((method, path, kwargs))
+        if self.remaining_failures > 0:
+            self.remaining_failures -= 1
+            raise httpx.ConnectError("temporary failure in name resolution")
+        return DummyResponse({"ok": True})
 
 
 def build_settings(credentials_path: Path, operator_token: str | None):
@@ -722,6 +736,43 @@ def test_is_auth_error_only_matches_control_plane_requests(tmp_path: Path):
 
     assert client.is_auth_error(control_error) is True
     assert client.is_auth_error(runtime_error) is False
+
+
+def test_transport_retries_transient_connect_errors(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    transport = EdgeControlTransport(build_settings(tmp_path / "credentials" / "node.json", operator_token="operator_token"))
+    retry_client = RetryClient()
+    transport.client = retry_client
+    monkeypatch.setattr("node_agent.control_plane_transport.time.sleep", lambda _seconds: None)
+
+    payload = transport.post_json("/nodes/heartbeat", {"node_id": "node_123"})
+
+    assert payload == {"ok": True}
+    assert len(retry_client.calls) == 2
+    assert retry_client.calls[0][0] == "POST"
+    assert retry_client.calls[0][1] == "/nodes/heartbeat"
+
+
+def test_transport_classifies_transient_network_errors():
+    transport = EdgeControlTransport(
+        NodeAgentSettings(edge_control_url="http://localhost:8787", vllm_base_url="http://localhost:8000")
+    )
+    request = httpx.Request("POST", "http://localhost:8787/nodes/heartbeat")
+    transient_response = httpx.Response(503, request=request)
+    auth_response = httpx.Response(401, request=request)
+
+    assert transport.is_transient_network_error(httpx.ConnectError("temporary failure in name resolution")) is True
+    assert (
+        transport.is_transient_network_error(
+            httpx.HTTPStatusError("busy", request=request, response=transient_response)
+        )
+        is True
+    )
+    assert (
+        transport.is_transient_network_error(
+            httpx.HTTPStatusError("unauthorized", request=request, response=auth_response)
+        )
+        is False
+    )
 
 
 def test_complete_assignment_uploads_result_artifact_before_completion(
