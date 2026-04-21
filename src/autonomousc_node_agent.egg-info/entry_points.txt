@@ -1,7 +1,10 @@
 [console_scripts]
 node-agent = node_agent.main:main
 node-agent-bootstrap = node_agent.main:bootstrap_entrypoint
+node-agent-fault-drill = node_agent.fault_drills:main
 node-agent-installer = node_agent.installer:main
 node-agent-launcher = node_agent.launcher:main
 node-agent-service = node_agent.service:main
 node-agent-single-container = node_agent.single_container:main
+node-agent-staging-smoke = node_agent.staging_smoke:main
+node-agent-vast-smoke = node_agent.vast_smoke:main

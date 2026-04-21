@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import signal
@@ -10,16 +11,26 @@ import time
 from collections import deque
 from collections.abc import Callable, Mapping, MutableMapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 import httpx
+
+from .fault_injection import DEFAULT_FAULT_INJECTION_STATE_NAME, FaultInjectionController
 
 DEFAULT_GATED_STARTUP_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 DEFAULT_PUBLIC_BOOTSTRAP_MODEL = "BAAI/bge-large-en-v1.5"
 MIN_VRAM_FOR_GATED_STARTUP_GB = 24.0
 GATED_HF_REPOSITORY_PREFIXES = ("meta-llama/",)
+DEFAULT_RUN_MODE = "full"
+SERVE_ONLY_RUN_MODE = "serve_only"
+DEFAULT_STARTUP_STATUS_FILENAME = "startup-status.json"
+DEFAULT_STARTUP_STATUS_HOST = "0.0.0.0"
+DEFAULT_STARTUP_STATUS_PORT = 8011
+DEFAULT_STARTUP_STATUS_ENDPOINT_PATH = "/startup-status"
 KNOWN_SAFE_MAX_MODEL_LEN: dict[str, int] = {
     DEFAULT_PUBLIC_BOOTSTRAP_MODEL: 512,
 }
@@ -59,6 +70,57 @@ def split_command(value: str | None) -> list[str]:
     return shlex.split(value or "")
 
 
+def normalize_run_mode(value: str | None) -> str:
+    normalized = str(value or "").strip().lower().replace("-", "_")
+    if normalized == SERVE_ONLY_RUN_MODE:
+        return SERVE_ONLY_RUN_MODE
+    return DEFAULT_RUN_MODE
+
+
+def fault_injection_state_path_from_mapping(env: Mapping[str, str] | None = None) -> Path:
+    values = env or os.environ
+    configured = str(values.get("FAULT_INJECTION_STATE_PATH") or "").strip()
+    if configured:
+        return Path(configured)
+    autopilot_path = str(values.get("AUTOPILOT_STATE_PATH") or "").strip()
+    if autopilot_path:
+        return Path(autopilot_path).with_name(DEFAULT_FAULT_INJECTION_STATE_NAME)
+    credentials_path = str(values.get("CREDENTIALS_PATH") or "").strip()
+    if credentials_path:
+        return Path(credentials_path).parent / DEFAULT_FAULT_INJECTION_STATE_NAME
+    return Path(".") / DEFAULT_FAULT_INJECTION_STATE_NAME
+
+
+def startup_status_path_from_mapping(env: Mapping[str, str] | None = None) -> Path:
+    values = env or os.environ
+    configured = str(values.get("STARTUP_STATUS_PATH") or "").strip()
+    if configured:
+        return Path(configured)
+    autopilot_path = str(values.get("AUTOPILOT_STATE_PATH") or "").strip()
+    if autopilot_path:
+        return Path(autopilot_path).with_name(DEFAULT_STARTUP_STATUS_FILENAME)
+    credentials_path = str(values.get("CREDENTIALS_PATH") or "").strip()
+    if credentials_path:
+        return Path(credentials_path).parent / DEFAULT_STARTUP_STATUS_FILENAME
+    return Path(".") / DEFAULT_STARTUP_STATUS_FILENAME
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def normalized_endpoint_path(value: str | None) -> str:
+    stripped = str(value or "").strip()
+    if not stripped:
+        return DEFAULT_STARTUP_STATUS_ENDPOINT_PATH
+    return stripped if stripped.startswith("/") else f"/{stripped}"
+
+
+def nonnegative_int_from_mapping(env: Mapping[str, str], name: str, default: int) -> int:
+    value = env_int_from_mapping(env, name, default)
+    return value if value >= 0 else default
+
+
 def known_safe_max_model_len(model: str | None) -> int | None:
     normalized = str(model or "").strip()
     value = KNOWN_SAFE_MAX_MODEL_LEN.get(normalized)
@@ -84,7 +146,13 @@ class SingleContainerConfig:
     vllm_server_command: tuple[str, ...] = (sys.executable, "-m", "vllm.entrypoints.openai.api_server")
     vllm_extra_args: tuple[str, ...] = ()
     node_agent_command: tuple[str, ...] = ("node-agent", "start")
+    run_mode: str = DEFAULT_RUN_MODE
     start_vllm: bool = True
+    start_node_agent: bool = True
+    startup_status_path: Path = Path(DEFAULT_STARTUP_STATUS_FILENAME)
+    startup_status_host: str = DEFAULT_STARTUP_STATUS_HOST
+    startup_status_port: int = DEFAULT_STARTUP_STATUS_PORT
+    startup_status_endpoint_path: str = DEFAULT_STARTUP_STATUS_ENDPOINT_PATH
 
     @classmethod
     def from_mapping(cls, env: Mapping[str, str] | None = None) -> "SingleContainerConfig":
@@ -94,6 +162,10 @@ class SingleContainerConfig:
             return values.get(name, default)
 
         vllm_model = nonempty_value(values, "VLLM_MODEL", DEFAULT_GATED_STARTUP_MODEL)
+        run_mode = normalize_run_mode(values.get("RUN_MODE"))
+        start_node_agent = env_bool_from_mapping(values, "START_NODE_AGENT", True)
+        if run_mode == SERVE_ONLY_RUN_MODE:
+            start_node_agent = False
 
         return cls(
             vllm_model=vllm_model,
@@ -110,7 +182,15 @@ class SingleContainerConfig:
             ),
             vllm_extra_args=tuple(split_command(read("VLLM_EXTRA_ARGS"))),
             node_agent_command=tuple(split_command(read("NODE_AGENT_COMMAND")) or ["node-agent", "start"]),
+            run_mode=run_mode,
             start_vllm=env_bool_from_mapping(values, "START_VLLM", True),
+            start_node_agent=start_node_agent,
+            startup_status_path=startup_status_path_from_mapping(values),
+            startup_status_host=nonempty_value(values, "STARTUP_STATUS_HOST", DEFAULT_STARTUP_STATUS_HOST),
+            startup_status_port=nonnegative_int_from_mapping(values, "STARTUP_STATUS_PORT", DEFAULT_STARTUP_STATUS_PORT),
+            startup_status_endpoint_path=normalized_endpoint_path(
+                values.get("STARTUP_STATUS_ENDPOINT_PATH", DEFAULT_STARTUP_STATUS_ENDPOINT_PATH)
+            ),
         )
 
     @classmethod
@@ -124,6 +204,12 @@ class SingleContainerConfig:
     @property
     def local_vllm_url(self) -> str:
         return self.local_inference_url
+
+    @property
+    def local_startup_status_url(self) -> str | None:
+        if self.startup_status_port <= 0:
+            return None
+        return f"http://127.0.0.1:{self.startup_status_port}{self.startup_status_endpoint_path}"
 
 
 def build_vllm_command(config: SingleContainerConfig) -> list[str]:
@@ -269,6 +355,12 @@ def apply_single_container_runtime_defaults(
     force_when_blank_or(values, "BURST_PROVIDER", "vast_ai", set())
     force_when_blank_or(values, "BURST_LEASE_PHASE", "accept_burst_work", set())
     force_when_blank_or(values, "BURST_COST_CEILING_USD", "0.25", set())
+    run_mode = normalize_run_mode(values.get("RUN_MODE"))
+    values["RUN_MODE"] = run_mode
+    if run_mode == SERVE_ONLY_RUN_MODE:
+        values["START_NODE_AGENT"] = "false"
+    elif value_is_blank(values, "START_NODE_AGENT"):
+        values["START_NODE_AGENT"] = "true"
     fallback_note = apply_public_bootstrap_fallback(values)
     values["MAX_CONTEXT_TOKENS"] = str(
         normalized_max_context_tokens(
@@ -319,6 +411,169 @@ def validate_gated_model_access(values: Mapping[str, str], model: str) -> None:
     )
 
 
+def startup_warm_source_payload(values: Mapping[str, str], *, current_model: str) -> dict[str, Any]:
+    warm_source = str(values.get("STARTUP_WARM_SOURCE") or "").strip()
+    warm_source_label = str(values.get("STARTUP_WARM_SOURCE_LABEL") or "").strip()
+    warm_source_detail = str(values.get("STARTUP_WARM_SOURCE_DETAIL") or "").strip()
+    warm_source_scope = str(values.get("STARTUP_WARM_SOURCE_SCOPE") or "").strip()
+    warm_source_order = str(values.get("STARTUP_WARM_SOURCE_ORDER") or "").strip()
+    warm_source_selected_at = str(values.get("STARTUP_WARM_SOURCE_SELECTED_AT") or "").strip()
+
+    if not warm_source:
+        if not env_bool_from_mapping(values, "START_VLLM", True):
+            warm_source = "external_runtime"
+            warm_source_label = warm_source_label or "External runtime"
+            warm_source_detail = warm_source_detail or "This container expects an already running inference runtime."
+            warm_source_scope = warm_source_scope or "external"
+        elif current_model == DEFAULT_PUBLIC_BOOTSTRAP_MODEL:
+            warm_source = "bootstrap_fallback"
+            warm_source_label = warm_source_label or "Bootstrap fallback"
+            warm_source_detail = warm_source_detail or (
+                "The container fell back to the public bootstrap model because it was the safest startup choice."
+            )
+            warm_source_scope = warm_source_scope or "planned"
+        else:
+            warm_source = "unknown"
+            warm_source_label = warm_source_label or "Unknown"
+            warm_source_scope = warm_source_scope or "unknown"
+
+    payload: dict[str, Any] = {
+        "warm_source": warm_source,
+        "warm_source_label": warm_source_label or None,
+        "warm_source_detail": warm_source_detail or None,
+        "warm_source_scope": warm_source_scope or None,
+        "warm_source_selected_at": warm_source_selected_at or None,
+    }
+    if warm_source_order:
+        payload["warm_source_order"] = [item.strip() for item in warm_source_order.split(",") if item.strip()]
+    return payload
+
+
+class StartupStatusPublisher:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        host: str = DEFAULT_STARTUP_STATUS_HOST,
+        port: int = DEFAULT_STARTUP_STATUS_PORT,
+        endpoint_path: str = DEFAULT_STARTUP_STATUS_ENDPOINT_PATH,
+        log: Callable[[str], None] | None = None,
+    ) -> None:
+        self.path = path
+        self.host = host
+        self.port = max(0, int(port))
+        self.endpoint_path = normalized_endpoint_path(endpoint_path)
+        self.log = log or (lambda _message: None)
+        self.lock = threading.Lock()
+        self.payload: dict[str, Any] = {}
+        self.server: ThreadingHTTPServer | None = None
+        self.server_thread: threading.Thread | None = None
+        self.server_error: str | None = None
+
+    @property
+    def local_url(self) -> str | None:
+        if self.port <= 0:
+            return None
+        return f"http://127.0.0.1:{self.port}{self.endpoint_path}"
+
+    def snapshot(self) -> dict[str, Any]:
+        with self.lock:
+            payload = dict(self.payload)
+            payload["status_path"] = str(self.path)
+            payload["status_url"] = self.local_url
+            if self.server_error:
+                payload["status_url_error"] = self.server_error
+            return payload
+
+    def publish(
+        self,
+        *,
+        status: str,
+        current_model: str,
+        failure_reason: str | None = None,
+        warm_source: Mapping[str, Any] | None = None,
+        extra: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "status": status,
+            "current_model": current_model,
+            "failure_reason": failure_reason or None,
+            "updated_at": utc_now_iso(),
+        }
+        if warm_source:
+            payload.update({key: value for key, value in dict(warm_source).items() if value not in (None, "", [])})
+        if extra:
+            payload.update({key: value for key, value in dict(extra).items() if value is not None})
+        payload["status_path"] = str(self.path)
+        payload["status_url"] = self.local_url
+        if self.server_error:
+            payload["status_url_error"] = self.server_error
+        with self.lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temp_path = self.path.with_name(f"{self.path.name}.tmp")
+            temp_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            temp_path.replace(self.path)
+            self.payload = payload
+        self.ensure_server()
+        return self.snapshot()
+
+    def ensure_server(self) -> None:
+        if self.port <= 0:
+            return
+        with self.lock:
+            if self.server is not None:
+                return
+            publisher = self
+
+            class _StartupStatusHandler(BaseHTTPRequestHandler):
+                def do_GET(self) -> None:  # noqa: N802
+                    if self.path != publisher.endpoint_path:
+                        self.send_error(HTTPStatus.NOT_FOUND)
+                        return
+                    body = json.dumps(publisher.snapshot(), sort_keys=True).encode("utf-8")
+                    self.send_response(HTTPStatus.OK)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+
+                def log_message(self, format: str, *args: object) -> None:  # noqa: A003
+                    return
+
+            class _ThreadedStartupStatusServer(ThreadingHTTPServer):
+                daemon_threads = True
+
+            try:
+                self.server = _ThreadedStartupStatusServer((self.host, self.port), _StartupStatusHandler)
+            except OSError as error:
+                self.server_error = f"Could not bind startup-status endpoint on {self.host}:{self.port}: {error}"
+                self.log(self.server_error)
+                return
+
+            def _serve() -> None:
+                assert self.server is not None
+                try:
+                    self.server.serve_forever(poll_interval=0.5)
+                except Exception as error:  # pragma: no cover - defensive
+                    self.server_error = f"Startup-status endpoint stopped unexpectedly: {error}"
+                    self.log(self.server_error)
+
+            self.server_thread = threading.Thread(target=_serve, name="startup-status-server", daemon=True)
+            self.server_thread.start()
+
+    def close(self) -> None:
+        with self.lock:
+            server = self.server
+            thread = self.server_thread
+            self.server = None
+            self.server_thread = None
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if thread is not None:
+            thread.join(timeout=2.0)
+
+
 class ProcessOutputRelay:
     def __init__(self, *, max_lines: int = 40) -> None:
         self.max_lines = max_lines
@@ -354,11 +609,18 @@ def wait_for_inference_runtime_ready(
     process: subprocess.Popen[str] | None,
     *,
     output_tail: Callable[[], str] | None = None,
+    fault_state_path: Path | None = None,
 ) -> None:
+    faults = FaultInjectionController(fault_state_path or fault_injection_state_path_from_mapping())
     deadline = time.monotonic() + max(1, config.vllm_startup_timeout_seconds)
     url = f"{config.local_inference_url}/v1/models"
     last_error = "The local inference runtime is still starting."
     while time.monotonic() < deadline:
+        if faults.consume("warm_gpu_oom"):
+            raise RuntimeError(
+                f"CUDA out of memory while warming {config.vllm_model}. "
+                "The live fault drill forced a GPU OOM before the runtime became ready."
+            )
         if process is not None and process.poll() is not None:
             recent_output = output_tail().strip() if output_tail is not None else ""
             if recent_output:
@@ -405,6 +667,15 @@ def wait_for_any_process(processes: Sequence[subprocess.Popen[str]]) -> subproce
         time.sleep(1)
 
 
+def expected_runtime_services(config: SingleContainerConfig) -> tuple[str, ...]:
+    services: list[str] = []
+    if config.start_vllm:
+        services.append("vllm")
+    if config.start_node_agent:
+        services.append("node-agent")
+    return tuple(services)
+
+
 class EmbeddedRuntimeSupervisor:
     def __init__(
         self,
@@ -425,6 +696,8 @@ class EmbeddedRuntimeSupervisor:
         self.node_process: subprocess.Popen[str] | None = None
         self.last_exit_codes: dict[str, int] = {}
         self.vllm_output_relay: ProcessOutputRelay | None = None
+        self.startup_status_publisher: StartupStatusPublisher | None = None
+        self.startup_status_signature: tuple[str, str, int, str] | None = None
 
     def prepared_env_values(self) -> tuple[dict[str, str], str | None]:
         values = dict(self.env_provider())
@@ -433,6 +706,12 @@ class EmbeddedRuntimeSupervisor:
         values.setdefault("ATTESTATION_STATE_PATH", str(self.credentials_dir / "attestation-state.json"))
         values.setdefault("RECOVERY_NOTE_PATH", str(self.credentials_dir / "recovery-note.txt"))
         values.setdefault("AUTOPILOT_STATE_PATH", str(self.scratch_dir / "autopilot-state.json"))
+        values.setdefault("HEAT_GOVERNOR_STATE_PATH", str(self.scratch_dir / "heat-governor-state.json"))
+        values.setdefault("FAULT_INJECTION_STATE_PATH", str(self.scratch_dir / DEFAULT_FAULT_INJECTION_STATE_NAME))
+        values.setdefault("STARTUP_STATUS_PATH", str(self.scratch_dir / DEFAULT_STARTUP_STATUS_FILENAME))
+        values.setdefault("STARTUP_STATUS_HOST", DEFAULT_STARTUP_STATUS_HOST)
+        values.setdefault("STARTUP_STATUS_PORT", str(DEFAULT_STARTUP_STATUS_PORT))
+        values.setdefault("STARTUP_STATUS_ENDPOINT_PATH", DEFAULT_STARTUP_STATUS_ENDPOINT_PATH)
         values.setdefault("HF_HOME", str(self.cache_dir))
         return values, fallback_note
 
@@ -452,6 +731,51 @@ class EmbeddedRuntimeSupervisor:
     def process_running(process: subprocess.Popen[str] | None) -> bool:
         return process is not None and process.poll() is None
 
+    def startup_status_publisher_for_env(self, env_values: Mapping[str, str]) -> StartupStatusPublisher:
+        config = self.config(env_values)
+        signature = (
+            str(config.startup_status_path),
+            config.startup_status_host,
+            int(config.startup_status_port),
+            config.startup_status_endpoint_path,
+        )
+        if self.startup_status_publisher is None or self.startup_status_signature != signature:
+            if self.startup_status_publisher is not None:
+                self.startup_status_publisher.close()
+            self.startup_status_publisher = StartupStatusPublisher(
+                config.startup_status_path,
+                host=config.startup_status_host,
+                port=config.startup_status_port,
+                endpoint_path=config.startup_status_endpoint_path,
+                log=self.log,
+            )
+            self.startup_status_signature = signature
+        return self.startup_status_publisher
+
+    def publish_startup_status(
+        self,
+        env_values: Mapping[str, str],
+        *,
+        status: str,
+        config: SingleContainerConfig | None = None,
+        failure_reason: str | None = None,
+        extra: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        resolved_config = config or self.config(env_values)
+        publisher = self.startup_status_publisher_for_env(env_values)
+        return publisher.publish(
+            status=status,
+            current_model=resolved_config.vllm_model,
+            failure_reason=failure_reason,
+            warm_source=startup_warm_source_payload(env_values, current_model=resolved_config.vllm_model),
+            extra={
+                "run_mode": resolved_config.run_mode,
+                "start_vllm": resolved_config.start_vllm,
+                "start_node_agent": resolved_config.start_node_agent,
+                **(dict(extra) if extra is not None else {}),
+            },
+        )
+
     def sync_processes(self) -> None:
         for name, process in (("vllm", self.vllm_process), ("node-agent", self.node_process)):
             if process is None:
@@ -466,6 +790,9 @@ class EmbeddedRuntimeSupervisor:
                 self.node_process = None
 
     def snapshot(self) -> dict[str, object]:
+        env_values, _fallback_note = self.prepared_env_values()
+        config = self.config(env_values)
+        startup_status = self.startup_status_publisher_for_env(env_values).snapshot()
         with self.lock:
             self.sync_processes()
             running_services = []
@@ -475,18 +802,23 @@ class EmbeddedRuntimeSupervisor:
                 running_services.append("node-agent")
             return {
                 "running_services": running_services,
+                "expected_services": list(expected_runtime_services(config)),
+                "run_mode": config.run_mode,
                 "service_statuses": {
                     "vllm": {
+                        "enabled": config.start_vllm,
                         "running": self.process_running(self.vllm_process),
                         "pid": self.vllm_process.pid if self.process_running(self.vllm_process) else None,
                         "last_exit_code": self.last_exit_codes.get("vllm"),
                     },
                     "node-agent": {
+                        "enabled": config.start_node_agent,
                         "running": self.process_running(self.node_process),
                         "pid": self.node_process.pid if self.process_running(self.node_process) else None,
                         "last_exit_code": self.last_exit_codes.get("node-agent"),
                     },
                 },
+                "startup_status": startup_status,
             }
 
     def ensure_dirs(self) -> None:
@@ -527,28 +859,42 @@ class EmbeddedRuntimeSupervisor:
         if fallback_note:
             self.log(fallback_note)
         validate_gated_model_access(process_env, config.vllm_model)
+        effective_start_vllm = start_vllm and config.start_vllm
+        effective_start_node = start_node and config.start_node_agent
+        self.publish_startup_status(env_values, status="warming", config=config)
 
-        with self.lock:
-            if recreate:
-                self.stop_locked()
-            self.sync_processes()
-            if start_vllm and not self.process_running(self.vllm_process):
-                self._start_vllm_locked(config=config, process_env=process_env)
-            vllm_process = self.vllm_process
+        try:
+            with self.lock:
+                if recreate:
+                    self.stop_locked()
+                self.sync_processes()
+                if effective_start_vllm and not self.process_running(self.vllm_process):
+                    self._start_vllm_locked(config=config, process_env=process_env)
+                vllm_process = self.vllm_process
 
-        if start_vllm:
-            wait_for_inference_runtime_ready(
-                config,
-                vllm_process,
-                output_tail=self.vllm_output_relay.tail_text if self.vllm_output_relay is not None else None,
+            if effective_start_vllm:
+                wait_for_inference_runtime_ready(
+                    config,
+                    vllm_process,
+                    output_tail=self.vllm_output_relay.tail_text if self.vllm_output_relay is not None else None,
+                    fault_state_path=fault_injection_state_path_from_mapping(process_env),
+                )
+
+            with self.lock:
+                self.sync_processes()
+                if effective_start_node and not self.process_running(self.node_process):
+                    command = list(config.node_agent_command)
+                    self.log(f"Starting node agent in this container: {' '.join(shlex.quote(part) for part in command)}")
+                    self.node_process = subprocess.Popen(command, text=True, env=process_env)
+            self.publish_startup_status(env_values, status="ready", config=config)
+        except Exception as error:
+            self.publish_startup_status(
+                env_values,
+                status="failed",
+                config=config,
+                failure_reason=str(error),
             )
-
-        with self.lock:
-            self.sync_processes()
-            if start_node and not self.process_running(self.node_process):
-                command = list(config.node_agent_command)
-                self.log(f"Starting node agent in this container: {' '.join(shlex.quote(part) for part in command)}")
-                self.node_process = subprocess.Popen(command, text=True, env=process_env)
+            raise
 
     def restart_vllm(self) -> None:
         env_values, fallback_note = self.prepared_env_values()
@@ -558,17 +904,63 @@ class EmbeddedRuntimeSupervisor:
         if fallback_note:
             self.log(fallback_note)
         validate_gated_model_access(process_env, config.vllm_model)
+        self.publish_startup_status(env_values, status="warming", config=config)
+
+        try:
+            with self.lock:
+                terminate_process(self.vllm_process)
+                self.sync_processes()
+                vllm_process = self._start_vllm_locked(config=config, process_env=process_env)
+
+            wait_for_inference_runtime_ready(
+                config,
+                vllm_process,
+                output_tail=self.vllm_output_relay.tail_text if self.vllm_output_relay is not None else None,
+                fault_state_path=fault_injection_state_path_from_mapping(process_env),
+            )
+            self.publish_startup_status(env_values, status="ready", config=config)
+        except Exception as error:
+            self.publish_startup_status(
+                env_values,
+                status="failed",
+                config=config,
+                failure_reason=str(error),
+            )
+            raise
+
+    def restart_node_agent(self) -> None:
+        env_values, fallback_note = self.prepared_env_values()
+        config = self.config(env_values)
+        process_env = self.process_env(env_values)
+        self.ensure_dirs()
+        if fallback_note:
+            self.log(fallback_note)
+        if not config.start_node_agent:
+            raise RuntimeError("Serve-only mode disabled the in-container node agent, so it cannot be restarted.")
 
         with self.lock:
-            terminate_process(self.vllm_process)
+            terminate_process(self.node_process)
             self.sync_processes()
-            vllm_process = self._start_vllm_locked(config=config, process_env=process_env)
+            command = list(config.node_agent_command)
+            self.log(f"Starting node agent in this container: {' '.join(shlex.quote(part) for part in command)}")
+            self.node_process = subprocess.Popen(command, text=True, env=process_env)
+        self.publish_startup_status(env_values, status="ready", config=config)
 
-        wait_for_inference_runtime_ready(
-            config,
-            vllm_process,
-            output_tail=self.vllm_output_relay.tail_text if self.vllm_output_relay is not None else None,
-        )
+    def crash_vllm(self) -> None:
+        with self.lock:
+            self.sync_processes()
+            if self.process_running(self.vllm_process):
+                self.log("Injecting a live fault by terminating the in-container model server.")
+                self.vllm_process.kill()
+                self.sync_processes()
+
+    def crash_node_agent(self) -> None:
+        with self.lock:
+            self.sync_processes()
+            if self.process_running(self.node_process):
+                self.log("Injecting a live fault by terminating the in-container node agent.")
+                self.node_process.kill()
+                self.sync_processes()
 
     def stop_locked(self) -> None:
         terminate_process(self.node_process)
@@ -580,16 +972,23 @@ class EmbeddedRuntimeSupervisor:
     def stop(self) -> None:
         with self.lock:
             self.stop_locked()
+        if self.startup_status_publisher is not None:
+            self.startup_status_publisher.close()
+            self.startup_status_publisher = None
+            self.startup_status_signature = None
 
     def wait_for_runtime_health(self, timeout_seconds: float = 90.0) -> None:
         deadline = time.monotonic() + max(1.0, timeout_seconds)
         config = self.config()
+        required_services = set(expected_runtime_services(config))
+        if not required_services:
+            raise RuntimeError("Single-container runtime health check has no enabled services to monitor.")
         last_failure = "Runtime services are still starting."
         while time.monotonic() < deadline:
             snapshot = self.snapshot()
             running_services = set(snapshot.get("running_services", []))
-            if not {"vllm", "node-agent"}.issubset(running_services):
-                missing = ", ".join(sorted({"vllm", "node-agent"} - running_services))
+            if not required_services.issubset(running_services):
+                missing = ", ".join(sorted(required_services - running_services))
                 last_failure = f"Runtime services are not healthy yet. Missing: {missing or 'unknown'}."
                 time.sleep(2)
                 continue
@@ -605,24 +1004,55 @@ class EmbeddedRuntimeSupervisor:
 
 
 def main() -> int:
+    os.environ.setdefault("CREDENTIALS_PATH", "/var/lib/autonomousc/credentials/node-credentials.json")
+    os.environ.setdefault("ATTESTATION_STATE_PATH", "/var/lib/autonomousc/credentials/attestation-state.json")
+    os.environ.setdefault("RECOVERY_NOTE_PATH", "/var/lib/autonomousc/credentials/recovery-note.txt")
+    os.environ.setdefault("AUTOPILOT_STATE_PATH", "/var/lib/autonomousc/scratch/autopilot-state.json")
+    os.environ.setdefault("HEAT_GOVERNOR_STATE_PATH", "/var/lib/autonomousc/scratch/heat-governor-state.json")
+    os.environ.setdefault("FAULT_INJECTION_STATE_PATH", "/var/lib/autonomousc/scratch/fault-injection-state.json")
+    os.environ.setdefault("STARTUP_STATUS_PATH", "/var/lib/autonomousc/scratch/startup-status.json")
+    os.environ.setdefault("STARTUP_STATUS_HOST", DEFAULT_STARTUP_STATUS_HOST)
+    os.environ.setdefault("STARTUP_STATUS_PORT", str(DEFAULT_STARTUP_STATUS_PORT))
+    os.environ.setdefault("STARTUP_STATUS_ENDPOINT_PATH", DEFAULT_STARTUP_STATUS_ENDPOINT_PATH)
+    os.environ.setdefault("HF_HOME", "/root/.cache/huggingface")
     initial_config = SingleContainerConfig.from_env()
     fallback_note = apply_single_container_runtime_defaults(
         os.environ,
         local_inference_url=initial_config.local_inference_url,
     )
     config = SingleContainerConfig.from_env()
-    os.environ.setdefault("CREDENTIALS_PATH", "/var/lib/autonomousc/credentials/node-credentials.json")
-    os.environ.setdefault("ATTESTATION_STATE_PATH", "/var/lib/autonomousc/credentials/attestation-state.json")
-    os.environ.setdefault("RECOVERY_NOTE_PATH", "/var/lib/autonomousc/credentials/recovery-note.txt")
-    os.environ.setdefault("AUTOPILOT_STATE_PATH", "/var/lib/autonomousc/scratch/autopilot-state.json")
-    os.environ.setdefault("HF_HOME", "/root/.cache/huggingface")
     if fallback_note:
         print(fallback_note, flush=True)
     validate_gated_model_access(os.environ, config.vllm_model)
+    if not config.start_vllm and not config.start_node_agent:
+        raise RuntimeError(
+            "Single-container runtime has nothing to run. Enable START_VLLM or START_NODE_AGENT."
+        )
 
     vllm_process: subprocess.Popen[str] | None = None
     node_process: subprocess.Popen[str] | None = None
     vllm_output_relay: ProcessOutputRelay | None = None
+    startup_status = StartupStatusPublisher(
+        config.startup_status_path,
+        host=config.startup_status_host,
+        port=config.startup_status_port,
+        endpoint_path=config.startup_status_endpoint_path,
+        log=lambda message: print(message, flush=True),
+    )
+
+    def publish_startup_status(status: str, *, failure_reason: str | None = None, extra: Mapping[str, Any] | None = None) -> None:
+        startup_status.publish(
+            status=status,
+            current_model=config.vllm_model,
+            failure_reason=failure_reason,
+            warm_source=startup_warm_source_payload(os.environ, current_model=config.vllm_model),
+            extra={
+                "run_mode": config.run_mode,
+                "start_vllm": config.start_vllm,
+                "start_node_agent": config.start_node_agent,
+                **(dict(extra) if extra is not None else {}),
+            },
+        )
 
     def handle_signal(signum: int, _frame: object) -> None:
         print(f"Single-container runtime received signal {signum}; shutting down.", flush=True)
@@ -636,6 +1066,7 @@ def main() -> int:
             signal.signal(sig, handle_signal)
 
     try:
+        publish_startup_status("warming")
         if config.start_vllm:
             vllm_command = build_vllm_command(config)
             print(
@@ -662,17 +1093,39 @@ def main() -> int:
                 flush=True,
             )
 
-        node_command = list(config.node_agent_command)
-        print(f"Starting node agent in this container: {' '.join(shlex.quote(part) for part in node_command)}", flush=True)
-        node_process = subprocess.Popen(node_command, text=True)
+        if config.start_node_agent:
+            node_command = list(config.node_agent_command)
+            print(f"Starting node agent in this container: {' '.join(shlex.quote(part) for part in node_command)}", flush=True)
+            node_process = subprocess.Popen(node_command, text=True)
+        else:
+            print(
+                "Serve-only mode is enabled; skipping in-container node agent startup.",
+                flush=True,
+            )
+
+        publish_startup_status("ready")
 
         running = [process for process in (vllm_process, node_process) if process is not None]
+        if not running:
+            error = RuntimeError("Single-container runtime did not start any processes.")
+            publish_startup_status("failed", failure_reason=str(error))
+            raise error
         exited = wait_for_any_process(running)
+        exited_service = "vllm" if exited is vllm_process else "node-agent" if exited is node_process else "runtime"
+        publish_startup_status(
+            "failed",
+            failure_reason=f"{exited_service} exited with status {exited.returncode}.",
+            extra={"failed_service": exited_service},
+        )
         print(f"Process exited with status {exited.returncode}; stopping the single-container runtime.", flush=True)
         return int(exited.returncode or 0)
+    except Exception as error:
+        publish_startup_status("failed", failure_reason=str(error))
+        raise
     finally:
         terminate_process(node_process)
         terminate_process(vllm_process)
+        startup_status.close()
 
 
 if __name__ == "__main__":  # pragma: no cover

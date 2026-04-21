@@ -22,6 +22,9 @@ node-agent-installer = "node_agent.installer:main"
 node-agent-service = "node_agent.service:main"
 node-agent-launcher = "node_agent.launcher:main"
 node-agent-single-container = "node_agent.single_container:main"
+node-agent-fault-drill = "node_agent.fault_drills:main"
+node-agent-vast-smoke = "node_agent.vast_smoke:main"
+node-agent-staging-smoke = "node_agent.staging_smoke:main"
 
 [tool.setuptools.package-dir]
 "" = "src"
@@ -32,7 +35,9 @@ where = ["src"]
 [tool.setuptools.package-data]
 node_agent = [
   "*.html",
-  "runtime_bundle/*",
+  "*.json",
+  "*.pub",
+  "runtime_bundle/**/*",
   "runtime_bundle/.env.example"
 ]
 

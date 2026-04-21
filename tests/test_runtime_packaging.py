@@ -73,3 +73,8 @@ def test_built_wheel_includes_hidden_runtime_env_example(tmp_path: Path) -> None
 
     with zipfile.ZipFile(wheels[0]) as wheel:
         assert "node_agent/runtime_bundle/.env.example" in wheel.namelist()
+        assert "node_agent/appliance-package-manifest.json" in wheel.namelist()
+        assert "node_agent/appliance-package-manifest.pub" in wheel.namelist()
+        assert "node_agent/runtime_bundle/appliance-runtime-manifest.json" in wheel.namelist()
+        assert "node_agent/runtime_bundle/appliance-runtime-manifest.pub" in wheel.namelist()
+        assert "node_agent/runtime_bundle/release-manifest.json" in wheel.namelist()

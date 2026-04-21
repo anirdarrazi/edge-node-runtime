@@ -8,8 +8,10 @@ import httpx
 import pytest
 
 from node_agent.config import NodeAgentSettings
-from node_agent.control_plane import EdgeControlClient, decrypt_artifact
+from node_agent.config import AssignmentEnvelope
+from node_agent.control_plane import ArtifactFlowError, EdgeControlClient, decrypt_artifact, encrypt_artifact
 from node_agent.control_plane_transport import EdgeControlTransport
+from node_agent.fault_injection import FaultInjectionController
 from node_agent.gguf_artifacts import find_gguf_artifact
 from node_agent.model_artifacts import find_model_artifact
 
@@ -102,6 +104,7 @@ def build_settings(credentials_path: Path, operator_token: str | None):
         edge_control_url="http://localhost:8787",
         vllm_base_url="http://localhost:8000",
         credentials_path=str(credentials_path),
+        control_plane_state_path=str(credentials_path.parent / "control-plane-state.json"),
         operator_token=operator_token,
     )
 
@@ -284,7 +287,8 @@ def test_heartbeat_reports_current_model(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert payload["capabilities"]["max_concurrent_assignments"] == settings.max_concurrent_assignments
     assert payload["capabilities"]["max_concurrent_assignments_embeddings"] == 4
     assert payload["capabilities"]["max_microbatch_assignments_embeddings"] == settings.pull_bundle_size
-    assert payload["capabilities"]["max_pull_bundle_assignments"] == settings.pull_bundle_size
+    assert payload["capabilities"]["max_local_queue_assignments"] == 32
+    assert payload["capabilities"]["max_pull_bundle_assignments"] == 32
     evidence = payload["runtime"]["runtime_evidence"]
     assert evidence["digest"].startswith("sha256:")
     assert evidence["signature"].startswith("sha256:")
@@ -621,6 +625,54 @@ class FlakyArtifactClient:
         return response
 
 
+class StreamingArtifactResponse:
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        chunks: list[bytes],
+        fail_after_chunks: int | None = None,
+        url: str = "https://edge.autonomousc.test/artifacts/pexec_123/input",
+    ):
+        self.status_code = status_code
+        self._chunks = chunks
+        self._fail_after_chunks = fail_after_chunks
+        self.request = httpx.Request("GET", url)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise httpx.HTTPStatusError(
+                "artifact fetch failed",
+                request=self.request,
+                response=httpx.Response(self.status_code, request=self.request),
+            )
+
+    def iter_bytes(self):
+        for index, chunk in enumerate(self._chunks):
+            if self._fail_after_chunks is not None and index >= self._fail_after_chunks:
+                raise httpx.ReadError("connection reset while downloading", request=self.request)
+            yield chunk
+
+
+class ResumeArtifactClient:
+    def __init__(self, responses: list[StreamingArtifactResponse]):
+        self.responses = responses
+        self.stream_calls: list[dict[str, object]] = []
+        self.calls = 0
+
+    def stream(self, method: str, path: str, headers: dict[str, str] | None = None):
+        self.stream_calls.append({"method": method, "path": path, "headers": headers or {}})
+        response = self.responses[min(self.calls, len(self.responses) - 1)]
+        self.calls += 1
+        return response
+
+
 def test_fetch_artifact_verifies_ciphertext_hash(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     client = EdgeControlClient(build_settings(tmp_path / "credentials" / "node.json", operator_token=None))
     ciphertext = b"ciphertext"
@@ -671,6 +723,35 @@ def test_fetch_artifact_retries_transient_404_before_hash_check(monkeypatch: pyt
     assert artifact_client.calls == 3
 
 
+def test_fetch_artifact_classifies_dns_failure_as_retryable_artifact_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    client = EdgeControlClient(build_settings(tmp_path / "credentials" / "node.json", operator_token=None))
+    calls = 0
+
+    def fake_get_content(_url: str):
+        nonlocal calls
+        calls += 1
+        raise httpx.ConnectError("temporary failure in name resolution")
+
+    monkeypatch.setattr(client.transport, "get_content", fake_get_content)
+    monkeypatch.setattr("node_agent.control_plane.time.sleep", lambda _seconds: None)
+
+    with pytest.raises(ArtifactFlowError) as error_info:
+        client.fetch_artifact(
+            SimpleNamespace(
+                input_artifact_url="https://edge.autonomousc.test/artifacts/pexec_123/input",
+                input_artifact_sha256="0" * 64,
+                input_artifact_encryption={"key_b64": "a2V5", "iv_b64": "aXY="},
+            )
+        )
+
+    assert error_info.value.code == "input_artifact_network_error"
+    assert error_info.value.retryable is True
+    assert calls == 4
+
+
 def test_fetch_artifact_rejects_hash_mismatch_before_decrypt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     client = EdgeControlClient(build_settings(tmp_path / "credentials" / "node.json", operator_token=None))
     client.client = ArtifactClient(b"ciphertext")
@@ -683,7 +764,7 @@ def test_fetch_artifact_rejects_hash_mismatch_before_decrypt(monkeypatch: pytest
 
     monkeypatch.setattr("node_agent.control_plane.decrypt_artifact", fake_decrypt)
 
-    with pytest.raises(ValueError, match="integrity check failed"):
+    with pytest.raises(ArtifactFlowError, match="integrity check failed"):
         client.fetch_artifact(
             SimpleNamespace(
                 input_artifact_url="https://edge.autonomousc.test/artifacts/pexec_123/input",
@@ -693,6 +774,91 @@ def test_fetch_artifact_rejects_hash_mismatch_before_decrypt(monkeypatch: pytest
         )
 
     assert decrypt_called is False
+
+
+def test_fetch_artifact_resumes_partial_download_after_network_reset(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    settings = build_settings(tmp_path / "credentials" / "node.json", operator_token=None)
+    settings.autopilot_state_path = str(tmp_path / "scratch" / "autopilot-state.json")
+    client = EdgeControlClient(settings)
+
+    payload = {"items": [{"batch_item_id": "item-1", "input": {"text": "hello"}}]}
+    encrypted = encrypt_artifact(payload)
+    ciphertext = encrypted["ciphertext"]
+    split_point = max(1, len(ciphertext) // 3)
+    client.client = ResumeArtifactClient(
+        [
+            StreamingArtifactResponse(
+                status_code=200,
+                chunks=[ciphertext[:split_point], ciphertext[split_point:]],
+                fail_after_chunks=1,
+            ),
+            StreamingArtifactResponse(
+                status_code=206,
+                chunks=[ciphertext[split_point:]],
+            ),
+        ]
+    )
+    monkeypatch.setattr("node_agent.control_plane.time.sleep", lambda _seconds: None)
+
+    assignment = AssignmentEnvelope.model_validate(
+        {
+            **assignment_payload(),
+            "input_artifact_sha256": encrypted["ciphertext_sha256"],
+            "input_artifact_encryption": encrypted["encryption"],
+        }
+    )
+
+    assert client.fetch_artifact(assignment) == payload
+    assert client.client.calls == 2
+    assert client.client.stream_calls[0]["headers"] == {}
+    assert client.client.stream_calls[1]["headers"] == {"Range": f"bytes={split_point}-"}
+    assert list((tmp_path / "scratch" / "artifact-resume").glob("*.part")) == []
+
+
+def test_fetch_artifact_resumes_after_fault_injected_partial_download(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    settings = build_settings(tmp_path / "credentials" / "node.json", operator_token=None)
+    settings.autopilot_state_path = str(tmp_path / "scratch" / "autopilot-state.json")
+    settings.fault_injection_state_path = str(tmp_path / "scratch" / "fault-injection-state.json")
+    FaultInjectionController(settings.fault_injection_state_path).activate(
+        "partial_artifact_download",
+        remaining_triggers=1,
+    )
+    client = EdgeControlClient(settings)
+
+    payload = {"items": [{"batch_item_id": "item-1", "input": {"text": "hello"}}]}
+    encrypted = encrypt_artifact(payload)
+    ciphertext = encrypted["ciphertext"]
+    split_point = max(1, len(ciphertext) // 2)
+    client.client = ResumeArtifactClient(
+        [
+            StreamingArtifactResponse(
+                status_code=200,
+                chunks=[ciphertext[:split_point], ciphertext[split_point:]],
+            ),
+            StreamingArtifactResponse(
+                status_code=206,
+                chunks=[ciphertext[split_point:]],
+            ),
+        ]
+    )
+    monkeypatch.setattr("node_agent.control_plane.time.sleep", lambda _seconds: None)
+
+    assignment = AssignmentEnvelope.model_validate(
+        {
+            **assignment_payload(),
+            "input_artifact_sha256": encrypted["ciphertext_sha256"],
+            "input_artifact_encryption": encrypted["encryption"],
+        }
+    )
+
+    assert client.fetch_artifact(assignment) == payload
+    assert client.client.calls == 2
+    assert client.client.stream_calls[0]["headers"] == {}
+    assert client.client.stream_calls[1]["headers"] == {"Range": f"bytes={split_point}-"}
 
 
 def test_enroll_persists_credentials_with_owner_only_permissions(tmp_path: Path):
@@ -752,6 +918,76 @@ def test_transport_retries_transient_connect_errors(monkeypatch: pytest.MonkeyPa
     assert retry_client.calls[0][1] == "/nodes/heartbeat"
 
 
+def test_transport_fault_injection_marks_dns_flap_as_degraded(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    class SuccessClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, dict[str, object]]] = []
+
+        def request(self, method: str, path: str, **kwargs):
+            self.calls.append((method, path, kwargs))
+            request = httpx.Request(method, path)
+            return httpx.Response(200, request=request, json={"ok": True})
+
+    settings = build_settings(tmp_path / "credentials" / "node.json", operator_token="operator_token")
+    settings.fault_injection_state_path = str(tmp_path / "scratch" / "fault-injection-state.json")
+    FaultInjectionController(settings.fault_injection_state_path).activate("dns_flap", remaining_triggers=1)
+    transport = EdgeControlTransport(settings)
+    success_client = SuccessClient()
+    transport.client = success_client
+    monkeypatch.setattr("node_agent.control_plane_transport.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr("node_agent.control_plane_transport.random.uniform", lambda _start, _end: 0.0)
+
+    payload = transport.post_json("/nodes/heartbeat", {"node_id": "node_123"})
+    snapshot = transport.snapshot()
+
+    assert payload == {"ok": True}
+    assert len(success_client.calls) == 1
+    assert snapshot["status"] == "degraded"
+    assert snapshot["degraded_reason"] == "intermittent_connectivity"
+    assert snapshot["dns_failures"] == 1
+
+
+def test_transport_falls_back_to_secondary_host_and_marks_degraded_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    class FallbackClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+
+        def request(self, method: str, path: str, **kwargs):
+            self.calls.append((method, path))
+            if path == "/nodes/heartbeat":
+                raise httpx.ConnectError("temporary failure in name resolution")
+            request = httpx.Request(method, path)
+            return httpx.Response(200, request=request, json={"ok": True})
+
+    settings = build_settings(tmp_path / "credentials" / "node.json", operator_token="operator_token")
+    settings.edge_control_url = "https://edge-primary.autonomousc.com"
+    settings.edge_control_fallback_urls = "https://edge-fallback.autonomousc.com"
+    transport = EdgeControlTransport(settings)
+    fallback_client = FallbackClient()
+    transport.client = fallback_client
+    monkeypatch.setattr("node_agent.control_plane_transport.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr("node_agent.control_plane_transport.random.uniform", lambda _start, _end: 0.0)
+
+    payload = transport.post_json("/nodes/heartbeat", {"node_id": "node_123"})
+    snapshot = transport.snapshot()
+
+    assert payload == {"ok": True}
+    assert fallback_client.calls == [
+        ("POST", "/nodes/heartbeat"),
+        ("POST", "https://edge-fallback.autonomousc.com/nodes/heartbeat"),
+    ]
+    assert snapshot["status"] == "degraded"
+    assert snapshot["fallback_active"] is True
+    assert snapshot["active_base_url"] == "https://edge-fallback.autonomousc.com"
+    assert snapshot["degraded_reason"] == "fallback_host"
+
+
 def test_transport_classifies_transient_network_errors():
     transport = EdgeControlTransport(
         NodeAgentSettings(edge_control_url="http://localhost:8787", vllm_base_url="http://localhost:8000")
@@ -773,6 +1009,63 @@ def test_transport_classifies_transient_network_errors():
         )
         is False
     )
+
+
+def test_control_client_classifies_retryable_artifact_flow_errors(tmp_path: Path):
+    client = EdgeControlClient(build_settings(tmp_path / "credentials" / "node.json", operator_token="operator_token"))
+
+    assert (
+        client.is_transient_network_error(
+            ArtifactFlowError(
+                "input_artifact_network_error",
+                "temporary failure in name resolution",
+                retryable=True,
+            )
+        )
+        is True
+    )
+    assert (
+        client.is_transient_network_error(
+            ArtifactFlowError(
+                "input_artifact_integrity_failed",
+                "input artifact integrity check failed",
+                retryable=False,
+            )
+        )
+        is False
+    )
+
+
+def test_fetch_artifact_falls_back_to_mirror_url_after_primary_network_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    client = EdgeControlClient(build_settings(tmp_path / "credentials" / "node.json", operator_token=None))
+    payload = {"items": [{"batch_item_id": "item-1", "input": {"text": "hello"}}]}
+    encrypted = encrypt_artifact(payload)
+    calls: list[str] = []
+    primary_url = "https://edge.autonomousc.test/artifacts/pexec_123/input"
+    mirror_url = "https://cache-eu.autonomousc.test/artifacts/pexec_123/input"
+
+    def fake_get_content(url: str) -> bytes:
+        calls.append(url)
+        if url == primary_url:
+            raise httpx.ConnectError("temporary failure in name resolution")
+        return encrypted["ciphertext"]
+
+    monkeypatch.setattr(client.transport, "get_content", fake_get_content)
+    assignment = AssignmentEnvelope.model_validate(
+        {
+            **assignment_payload(),
+            "input_artifact_url": primary_url,
+            "input_artifact_mirror_urls": [mirror_url],
+            "input_artifact_sha256": encrypted["ciphertext_sha256"],
+            "input_artifact_encryption": encrypted["encryption"],
+        }
+    )
+
+    assert client.fetch_artifact(assignment) == payload
+    assert calls == [primary_url, mirror_url]
 
 
 def test_complete_assignment_uploads_result_artifact_before_completion(
@@ -1099,7 +1392,133 @@ def test_complete_assignment_falls_back_to_worker_uploaded_artifact_when_direct_
     ]
 
 
-def test_complete_assignment_raises_when_direct_upload_put_fails(
+def test_fetch_artifact_refreshes_input_url_after_expiry_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    credentials_path = tmp_path / "credentials" / "node.json"
+    settings = build_settings(credentials_path, operator_token="operator_token")
+    settings.node_id = "node_123"
+    settings.node_key = "key_123456789012345678901234"
+    client = EdgeControlClient(settings)
+
+    payload = {"items": [{"batch_item_id": "item-1", "input": {"text": "hello"}}]}
+    encrypted = encrypt_artifact(payload)
+    assignment = AssignmentEnvelope.model_validate(
+        {
+            **assignment_payload(),
+            "input_artifact_expires_at": "2099-01-01T00:00:00Z",
+            "input_artifact_sha256": encrypted["ciphertext_sha256"],
+            "input_artifact_encryption": encrypted["encryption"],
+        }
+    )
+
+    artifact_urls: list[str] = []
+
+    def fake_get_content(url: str) -> bytes:
+        artifact_urls.append(url)
+        if url == "http://localhost/input":
+            request = httpx.Request("GET", url)
+            response = httpx.Response(401, request=request)
+            raise httpx.HTTPStatusError("expired", request=request, response=response)
+        return encrypted["ciphertext"]
+
+    def fake_post_json(path: str, payload: dict[str, object]) -> dict[str, object]:
+        assert path == f"/nodes/assignments/{assignment.assignment_id}/input-artifact-url"
+        return {
+            "input_artifact_url": "http://localhost/input-refreshed",
+            "input_artifact_expires_at": "2099-01-01T00:00:00Z",
+        }
+
+    monkeypatch.setattr(client.transport, "get_content", fake_get_content)
+    monkeypatch.setattr(client.transport, "post_json", fake_post_json)
+
+    assert client.fetch_artifact(assignment) == payload
+    assert artifact_urls == ["http://localhost/input", "http://localhost/input-refreshed"]
+    assert assignment.input_artifact_url == "http://localhost/input-refreshed"
+
+
+def test_complete_assignment_refreshes_upload_plan_after_direct_upload_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    credentials_path = tmp_path / "credentials" / "node.json"
+    settings = build_settings(credentials_path, operator_token="operator_token")
+    settings.node_id = "node_123"
+    settings.node_key = "key_123456789012345678901234"
+    client = EdgeControlClient(settings)
+
+    upload_plan_requests = 0
+    uploaded_urls: list[str] = []
+    completions: list[tuple[str, dict[str, object]]] = []
+
+    def fake_post_json(path: str, payload: dict[str, object]):
+        nonlocal upload_plan_requests
+        if path.endswith("/result-artifact/upload-url"):
+            upload_plan_requests += 1
+            suffix = "first" if upload_plan_requests == 1 else "refreshed"
+            return {
+                "result_artifact_key": f"provider-executions/pexec_123/result-{suffix}.json.enc",
+                "upload_url": f"https://example-bucket.r2.cloudflarestorage.com/provider-executions/pexec_123/result-{suffix}.json.enc",
+                "upload_headers": {
+                    "content-type": "application/octet-stream",
+                    "x-amz-meta-ciphertext-sha256": str(payload["ciphertext_sha256"]),
+                    "x-amz-meta-plaintext-sha256": str(payload["plaintext_sha256"]),
+                },
+                "upload_method": "PUT",
+                "expires_at": "2099-01-01T00:00:00Z",
+            }
+        if path.endswith("/complete"):
+            completions.append((path, payload))
+            return {}
+        raise AssertionError(f"unexpected post_json call: {path}")
+
+    def fake_put_content(path: str, _payload: bytes, _headers: dict[str, str]):
+        uploaded_urls.append(path)
+        if "result-first" in path:
+            request = httpx.Request("PUT", path)
+            response = httpx.Response(403, request=request)
+            raise httpx.HTTPStatusError("expired upload URL", request=request, response=response)
+        return {}
+
+    monkeypatch.setattr(client.transport, "post_json", fake_post_json)
+    monkeypatch.setattr(client.transport, "put_content", fake_put_content)
+
+    client.complete_assignment(
+        "assign_123",
+        [
+            {
+                "batch_item_id": "item-1",
+                "customer_item_id": "customer-item-1",
+                "provider": "autonomousc_edge",
+                "provider_model": "BAAI/bge-large-en-v1.5",
+                "status": "completed",
+                "usage": {"input_tokens": 3, "total_tokens": 3},
+                "cost": {
+                    "provider_cost": {"amount": "0.0001", "currency": "usd"},
+                    "customer_charge": {"amount": "0.0002", "currency": "usd"},
+                    "platform_margin": {"amount": "0.0001", "currency": "usd"},
+                },
+                "output": {"embedding": [0.1, 0.2, 0.3]},
+                "completed_at": "2026-04-17T10:00:00Z",
+            }
+        ],
+        {
+            "assignment_nonce": "nonce_123",
+            "declared_model": "BAAI/bge-large-en-v1.5",
+            "provider_usage_summary": {"input_texts": 1},
+        },
+    )
+
+    assert upload_plan_requests == 2
+    assert uploaded_urls == [
+        "https://example-bucket.r2.cloudflarestorage.com/provider-executions/pexec_123/result-first.json.enc",
+        "https://example-bucket.r2.cloudflarestorage.com/provider-executions/pexec_123/result-refreshed.json.enc",
+    ]
+    assert completions[0][1]["result_artifact"]["result_artifact_key"] == (
+        "provider-executions/pexec_123/result-refreshed.json.enc"
+    )
+
+
+def test_complete_assignment_raises_artifact_flow_error_when_direct_upload_keeps_failing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
     credentials_path = tmp_path / "credentials" / "node.json"
@@ -1134,7 +1553,7 @@ def test_complete_assignment_raises_when_direct_upload_put_fails(
     monkeypatch.setattr(client.transport, "post_json", fake_post_json)
     monkeypatch.setattr(client.transport, "put_content", fake_put_content)
 
-    with pytest.raises(httpx.HTTPStatusError, match="upload failed"):
+    with pytest.raises(ArtifactFlowError, match="Result artifact upload failed with HTTP 404."):
         client.complete_assignment(
             "assign_123",
             [
@@ -1160,3 +1579,74 @@ def test_complete_assignment_raises_when_direct_upload_put_fails(
                 "provider_usage_summary": {"input_texts": 1},
             },
         )
+
+
+def test_complete_assignment_classifies_result_upload_dns_failure_as_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    credentials_path = tmp_path / "credentials" / "node.json"
+    settings = build_settings(credentials_path, operator_token="operator_token")
+    settings.node_id = "node_123"
+    settings.node_key = "key_123456789012345678901234"
+    client = EdgeControlClient(settings)
+    upload_plan_requests = 0
+    upload_attempts = 0
+
+    def fake_post_json(path: str, payload: dict[str, object]):
+        nonlocal upload_plan_requests
+        if path.endswith("/result-artifact/upload-url"):
+            upload_plan_requests += 1
+            return {
+                "result_artifact_key": f"provider-executions/pexec_123/result-{upload_plan_requests}.json.enc",
+                "upload_url": f"https://example-bucket.r2.cloudflarestorage.com/result-{upload_plan_requests}.json.enc",
+                "upload_headers": {
+                    "content-type": "application/octet-stream",
+                    "x-amz-meta-ciphertext-sha256": str(payload["ciphertext_sha256"]),
+                    "x-amz-meta-plaintext-sha256": str(payload["plaintext_sha256"]),
+                },
+                "upload_method": "PUT",
+                "expires_at": "2026-04-17T10:10:00Z",
+            }
+        raise AssertionError(f"unexpected post_json call: {path}")
+
+    def fake_put_content(_path: str, _payload: bytes, _headers: dict[str, str]):
+        nonlocal upload_attempts
+        upload_attempts += 1
+        raise httpx.ConnectError("temporary failure in name resolution")
+
+    monkeypatch.setattr(client.transport, "post_json", fake_post_json)
+    monkeypatch.setattr(client.transport, "put_content", fake_put_content)
+    monkeypatch.setattr("node_agent.control_plane.time.sleep", lambda _seconds: None)
+
+    with pytest.raises(ArtifactFlowError) as error_info:
+        client.complete_assignment(
+            "assign_123",
+            [
+                {
+                    "batch_item_id": "item-1",
+                    "customer_item_id": "customer-item-1",
+                    "provider": "autonomousc_edge",
+                    "provider_model": "BAAI/bge-large-en-v1.5",
+                    "status": "completed",
+                    "usage": {"input_tokens": 3, "total_tokens": 3},
+                    "cost": {
+                        "provider_cost": {"amount": "0.0001", "currency": "usd"},
+                        "customer_charge": {"amount": "0.0002", "currency": "usd"},
+                        "platform_margin": {"amount": "0.0001", "currency": "usd"},
+                    },
+                    "output": {"embedding": [0.1, 0.2, 0.3]},
+                    "completed_at": "2026-04-17T10:00:00Z",
+                }
+            ],
+            {
+                "assignment_nonce": "nonce_123",
+                "declared_model": "BAAI/bge-large-en-v1.5",
+                "provider_usage_summary": {"input_texts": 1},
+            },
+        )
+
+    assert error_info.value.code == "result_artifact_upload_network_error"
+    assert error_info.value.retryable is True
+    assert upload_plan_requests == 3
+    assert upload_attempts == 3

@@ -71,6 +71,8 @@ SUPPORTED_API_EMBEDDINGS = "embeddings"
 EMBEDDING_POOLING_CLS = "cls"
 DEFAULT_RESPONSE_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-large-en-v1.5"
+DEFAULT_PUBLIC_SMOKE_TEST_MODEL = DEFAULT_EMBEDDING_MODEL
+DEFAULT_PUBLIC_SMOKE_TEST_API_PATH = "/v1/embeddings"
 DEFAULT_LLAMA_CPP_IMAGE = "ghcr.io/ggml-org/llama.cpp:server-cuda"
 
 
@@ -82,6 +84,24 @@ class LlamaCppModelSource:
     alias: str
     embedding_enabled: bool = False
     pooling: str | None = None
+
+
+@dataclass(frozen=True)
+class VastLaunchProfile:
+    runtype: str
+    min_disk_gb: int
+    preferred_smoke_test_model: str
+    smoke_test_api_path: str
+    safe_price_ceiling_usd: float
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "runtype": self.runtype,
+            "min_disk_gb": self.min_disk_gb,
+            "preferred_smoke_test_model": self.preferred_smoke_test_model,
+            "smoke_test_api_path": self.smoke_test_api_path,
+            "safe_price_ceiling_usd": self.safe_price_ceiling_usd,
+        }
 
 
 @dataclass(frozen=True)
@@ -107,6 +127,7 @@ class RuntimeProfile:
     burst_cost_ceiling_usd: float | None
     default_model: str
     supported_models: tuple[str, ...]
+    vast_launch: VastLaunchProfile | None = None
 
     @property
     def reports_audited_manifests(self) -> bool:
@@ -140,6 +161,27 @@ class RuntimeProfile:
     def routing_lane_allowed_trust_requirements(self) -> tuple[str, ...]:
         return routing_lane_policy(self.routing_lane).allowed_trust_requirements
 
+    @property
+    def smoke_test_model(self) -> str:
+        if self.vast_launch is not None and self.vast_launch.preferred_smoke_test_model:
+            return self.vast_launch.preferred_smoke_test_model
+        if (
+            SUPPORTED_API_EMBEDDINGS in self.supported_apis
+            and DEFAULT_PUBLIC_SMOKE_TEST_MODEL in self.supported_models
+        ):
+            return DEFAULT_PUBLIC_SMOKE_TEST_MODEL
+        return self.default_model
+
+    @property
+    def smoke_test_api_path(self) -> str:
+        if self.vast_launch is not None and self.vast_launch.smoke_test_api_path:
+            return self.vast_launch.smoke_test_api_path
+        if self.smoke_test_model == DEFAULT_PUBLIC_SMOKE_TEST_MODEL and SUPPORTED_API_EMBEDDINGS in self.supported_apis:
+            return DEFAULT_PUBLIC_SMOKE_TEST_API_PATH
+        if SUPPORTED_API_RESPONSES in self.supported_apis:
+            return "/v1/responses"
+        return self.readiness_path
+
     def payload(self) -> dict[str, Any]:
         payload = {
             "runtime_profile": self.id,
@@ -166,9 +208,13 @@ class RuntimeProfile:
             "quantized_output_disclosure_required": self.quantized_output_disclosure_required,
             "trusted_eligibility": self.trusted_eligibility,
             "burst_lifecycle": list(self.burst_lifecycle),
+            "smoke_test_model": self.smoke_test_model,
+            "smoke_test_api_path": self.smoke_test_api_path,
         }
         if self.burst_cost_ceiling_usd is not None:
             payload["burst_cost_ceiling_usd"] = self.burst_cost_ceiling_usd
+        if self.vast_launch is not None:
+            payload["vast_launch"] = self.vast_launch.payload()
         return payload
 
 
@@ -212,7 +258,7 @@ RUNTIME_PROFILES: dict[str, RuntimeProfile] = {
         burst_lifecycle=(),
         burst_cost_ceiling_usd=None,
         default_model=DEFAULT_RESPONSE_MODEL,
-        supported_models=(DEFAULT_RESPONSE_MODEL, DEFAULT_EMBEDDING_MODEL),
+        supported_models=(DEFAULT_RESPONSE_MODEL,),
     ),
     VAST_VLLM_SAFETENSORS_PROFILE: RuntimeProfile(
         id=VAST_VLLM_SAFETENSORS_PROFILE,
@@ -236,6 +282,13 @@ RUNTIME_PROFILES: dict[str, RuntimeProfile] = {
         burst_cost_ceiling_usd=DEFAULT_VAST_BURST_COST_CEILING_USD,
         default_model=DEFAULT_RESPONSE_MODEL,
         supported_models=(DEFAULT_RESPONSE_MODEL, DEFAULT_EMBEDDING_MODEL),
+        vast_launch=VastLaunchProfile(
+            runtype="args",
+            min_disk_gb=80,
+            preferred_smoke_test_model=DEFAULT_EMBEDDING_MODEL,
+            smoke_test_api_path="/v1/embeddings",
+            safe_price_ceiling_usd=DEFAULT_VAST_BURST_COST_CEILING_USD,
+        ),
     ),
     PARTNER_VLLM_TRUSTED_PROFILE: RuntimeProfile(
         id=PARTNER_VLLM_TRUSTED_PROFILE,
@@ -525,6 +578,21 @@ def default_runtime_profile(runtime_backend: str) -> RuntimeProfile:
     )
 
 
+def default_vast_launch_profile() -> VastLaunchProfile:
+    profile = runtime_profile_by_id(VAST_VLLM_SAFETENSORS_PROFILE)
+    if profile is None or profile.vast_launch is None:  # pragma: no cover - guarded by static profile definitions
+        raise RuntimeError("Vast.ai runtime profile is missing launch metadata.")
+    return profile.vast_launch
+
+
+def default_public_smoke_test_model() -> str:
+    return DEFAULT_PUBLIC_SMOKE_TEST_MODEL
+
+
+def default_public_smoke_test_api_path() -> str:
+    return DEFAULT_PUBLIC_SMOKE_TEST_API_PATH
+
+
 def default_inference_base_url(_engine_or_profile: str) -> str:
     # The compose service still uses the "vllm" name for compatibility, but it also exposes
     # a neutral "inference-runtime" alias so internal URLs do not imply a specific engine.
@@ -577,6 +645,8 @@ __all__ = [
     "DEFAULT_VAST_BURST_COST_CEILING_USD",
     "DEFAULT_EMBEDDING_MODEL",
     "DEFAULT_LLAMA_CPP_IMAGE",
+    "DEFAULT_PUBLIC_SMOKE_TEST_API_PATH",
+    "DEFAULT_PUBLIC_SMOKE_TEST_MODEL",
     "DEFAULT_RESPONSE_MODEL",
     "EMBEDDING_POOLING_CLS",
     "GENERIC_DEPLOYMENT_TARGET",
@@ -599,6 +669,7 @@ __all__ = [
     "RUNTIME_PROFILES",
     "RoutingLanePolicy",
     "RuntimeProfile",
+    "VastLaunchProfile",
     "SUPPORTED_API_EMBEDDINGS",
     "SUPPORTED_API_RESPONSES",
     "TRUST_POLICY_COMMUNITY_BEST_EFFORT",
@@ -612,6 +683,9 @@ __all__ = [
     "VAST_VLLM_SAFETENSORS_PROFILE",
     "VLLM_INFERENCE_ENGINE",
     "default_inference_base_url",
+    "default_public_smoke_test_api_path",
+    "default_public_smoke_test_model",
+    "default_vast_launch_profile",
     "default_runtime_profile",
     "deployment_target_for_runtime_backend",
     "deployment_target_label",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -13,34 +14,58 @@ import time
 import webbrowser
 import zipfile
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import quote, unquote, urlparse
 
 import httpx
 
+from .appliance_manifest import (
+    inspect_package_signature,
+    inspect_runtime_bundle_signature,
+    normalize_release_channel,
+    release_channel_label,
+    release_channel_matches_preference,
+)
 from .autostart import AutoStartManager
 from .config import NodeAgentSettings
-from .control_plane import EdgeControlClient
+from .control_plane import EdgeControlClient, encrypt_artifact
+from .control_plane_transport import EdgeControlTransport
 from .desktop_launcher import DesktopLauncherManager
+from .fault_injection import DEFAULT_FAULT_INJECTION_STATE_NAME, FaultInjectionController
+from .heat_governor import (
+    build_heat_governor_plan,
+    load_heat_governor_state,
+    normalize_heat_governor_mode,
+    normalize_local_clock,
+    normalize_owner_objective,
+    write_heat_governor_state,
+)
 from .installer import (
     CommandRunner,
     GuidedInstaller,
     artifact_total_size_bytes,
+    coerce_bool,
+    constrain_supported_models_for_runtime_profile,
+    detect_disk,
     directory_size_bytes,
     format_bytes,
     llama_cpp_env_for_model,
     nvidia_support_preset,
+    optional_env_value,
     parse_env_file,
     profile_concurrency,
     profile_thermal_headroom,
     recommended_setup_profile,
     recommended_supported_models,
+    resolve_model_cache_budget,
     resolve_accessible_startup_selection,
     run_command,
+    stringify_bool,
     startup_model_artifact,
 )
 from .inference_engine import AUTO_RUNTIME_PROFILE, resolve_runtime_profile
@@ -80,12 +105,57 @@ RUNTIME_SERVICES = ("vllm", "node-agent", "vector")
 SELF_HEAL_INTERVAL_SECONDS = 45
 REMOTE_DASHBOARD_CACHE_TTL_SECONDS = 30
 MODEL_CACHE_COLD_SECONDS = 7 * 24 * 60 * 60
+MODEL_CACHE_RECENT_SECONDS = 6 * 60 * 60
+MODEL_CACHE_HOT_MODEL_LIMIT = 2
 VLLM_WARM_RETRY_ATTEMPTS = 2
+IDLE_QUEUE_WATCHDOG_SECONDS = 120
+IDLE_QUEUE_GPU_UTILIZATION_THRESHOLD_PCT = 10.0
+RUNTIME_WEDGE_WATCHDOG_SECONDS = 180
+WATCHDOG_RESTART_COOLDOWN_SECONDS = 180
+MODEL_WARM_FAILURE_THRESHOLD = 3
+MODEL_WARM_RETRY_COOLDOWN_SECONDS = 30 * 60
+LOCAL_DOCTOR_INTERVAL_SECONDS = 4 * 60 * 60
+LOCAL_DOCTOR_LOOP_SECONDS = 5 * 60
+OWNER_TIMELINE_LIMIT = 20
+OWNER_TIMELINE_DISPLAY_LIMIT = 6
+RUNTIME_TUPLE_ENV_KEYS = (
+    "SETUP_PROFILE",
+    "RUNTIME_PROFILE",
+    "DEPLOYMENT_TARGET",
+    "INFERENCE_ENGINE",
+    "RUNTIME_IMAGE",
+    "INFERENCE_BASE_URL",
+    "VLLM_BASE_URL",
+    "MAX_CONTEXT_TOKENS",
+    "MAX_BATCH_TOKENS",
+    "MAX_CONCURRENT_ASSIGNMENTS",
+    "THERMAL_HEADROOM",
+    "TARGET_GPU_UTILIZATION_PCT",
+    "MIN_GPU_MEMORY_HEADROOM_PCT",
+    "SUPPORTED_MODELS",
+    "VLLM_MODEL",
+    "OWNER_TARGET_MODEL",
+    "OWNER_TARGET_SUPPORTED_MODELS",
+    "LLAMA_CPP_HF_REPO",
+    "LLAMA_CPP_HF_FILE",
+    "LLAMA_CPP_ALIAS",
+    "LLAMA_CPP_EMBEDDING",
+    "LLAMA_CPP_POOLING",
+)
 
 SENSITIVE_ENV_MARKERS = ("TOKEN", "SECRET", "KEY", "PASSWORD", "COOKIE", "CERT")
 DOCKER_DESKTOP_INSTALL_URL = "https://www.docker.com/products/docker-desktop/"
 DOCKER_GPU_SUPPORT_URL = "https://docs.docker.com/desktop/features/gpu/"
 NVIDIA_DRIVER_DOWNLOAD_URL = "https://www.nvidia.com/Download/index.aspx"
+SUPPORTED_FAULT_DRILLS = (
+    "docker_restart_mid_run",
+    "dns_flap",
+    "disk_almost_full",
+    "partial_download_resume",
+    "power_loss_cache_write",
+    "warm_gpu_oom",
+)
+DEFAULT_UPDATE_CHANNEL = "stable"
 
 
 def now_iso() -> str:
@@ -150,6 +220,15 @@ def format_usd(amount: Any) -> str:
     return f"${numeric:,.4f}"
 
 
+def format_watts(value: Any) -> str:
+    numeric = coerce_float(value)
+    if numeric is None:
+        return "unknown"
+    if abs(numeric - round(numeric)) < 0.05:
+        return f"{int(round(numeric))} W"
+    return f"{numeric:.1f} W"
+
+
 def coerce_nonnegative_int(value: Any) -> int:
     try:
         return max(0, int(float(str(value).strip())))
@@ -162,6 +241,25 @@ def coerce_float(value: Any) -> float | None:
         return float(str(value).strip())
     except (TypeError, ValueError):
         return None
+
+
+def csv_items(value: Any) -> list[str]:
+    if not isinstance(value, str):
+        return []
+    values = value.replace("\r", "\n").replace(";", "\n").replace(",", "\n").splitlines()
+    items: list[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        candidate = raw.strip()
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        items.append(candidate)
+    return items
+
+
+def update_channel_copy(value: str | None) -> str:
+    return release_channel_label(normalize_release_channel(value))
 
 
 def service_html() -> str:
@@ -179,10 +277,87 @@ def session_bootstrap_html() -> bytes:
     ).encode("utf-8")
 
 
+class _DrillHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        *,
+        body: bytes,
+        content_type: str,
+        status_code: int = 200,
+        enable_range: bool = False,
+    ) -> None:
+        super().__init__(server_address, _DrillHTTPHandler)
+        self.body = body
+        self.content_type = content_type
+        self.status_code = status_code
+        self.enable_range = enable_range
+        self.requests: list[dict[str, Any]] = []
+
+
+class _DrillHTTPHandler(BaseHTTPRequestHandler):
+    server: _DrillHTTPServer
+
+    def _send_body(self) -> None:
+        body = self.server.body
+        range_header = self.headers.get("Range")
+        start = 0
+        end = len(body) - 1
+        status_code = self.server.status_code
+        content_range: str | None = None
+        if self.server.enable_range and range_header:
+            raw = range_header.removeprefix("bytes=")
+            start_raw, _sep, end_raw = raw.partition("-")
+            start = max(0, int(start_raw or 0))
+            end = len(body) - 1 if not end_raw else min(len(body) - 1, int(end_raw))
+            if start > len(body) - 1:
+                self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE.value)
+                self.send_header("Content-Range", f"bytes */{len(body)}")
+                self.end_headers()
+                return
+            status_code = HTTPStatus.PARTIAL_CONTENT.value
+            content_range = f"bytes {start}-{end}/{len(body)}"
+        payload = body[start : end + 1]
+        self.server.requests.append(
+            {
+                "method": self.command,
+                "path": self.path,
+                "range": range_header,
+                "status_code": status_code,
+                "content_length": len(payload),
+            }
+        )
+        self.send_response(status_code)
+        self.send_header("content-type", self.server.content_type)
+        self.send_header("content-length", str(len(payload)))
+        self.send_header("accept-ranges", "bytes")
+        if content_range is not None:
+            self.send_header("Content-Range", content_range)
+        self.end_headers()
+        chunk_size = 64 * 1024
+        for offset in range(0, len(payload), chunk_size):
+            self.wfile.write(payload[offset : offset + chunk_size])
+            self.wfile.flush()
+
+    def do_GET(self) -> None:  # pragma: no cover - exercised through live drill helpers
+        self._send_body()
+
+    def do_POST(self) -> None:  # pragma: no cover - exercised through live drill helpers
+        _ = self.rfile.read(int(self.headers.get("content-length", "0") or 0))
+        self._send_body()
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+
 @dataclass
 class UpdateState:
     auto_update_enabled: bool = False
     interval_hours: int = 24
+    preferred_channel: str = DEFAULT_UPDATE_CHANNEL
     last_checked_at: str | None = None
     last_result: str = "No update checks have run yet."
     last_error: str | None = None
@@ -203,6 +378,30 @@ class DiagnosticsState:
 
 
 @dataclass
+class LocalDoctorState:
+    last_checked_at: str | None = None
+    status: str = "standing_by"
+    headline: str = "Local Doctor is standing by"
+    detail: str = (
+        "Run Local Doctor to re-check Docker, GPU access, network reachability, model cache, warm readiness, "
+        "and one tiny local inference."
+    )
+    last_error: str | None = None
+    recommended_fix: dict[str, Any] = field(default_factory=dict)
+    checks: list[dict[str, Any]] = field(default_factory=list)
+    warm_readiness: dict[str, Any] = field(default_factory=dict)
+    inference_probe: dict[str, Any] = field(default_factory=dict)
+    attached_bundle_name: str | None = None
+    attached_bundle_created_at: str | None = None
+    last_trigger: str | None = None
+    last_check_mode: str = "manual"
+    last_background_check_at: str | None = None
+    last_background_status: str | None = None
+    last_transition_alert: dict[str, Any] = field(default_factory=dict)
+    last_fix_attempt: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class SelfHealState:
     enabled: bool = True
     interval_seconds: int = SELF_HEAL_INTERVAL_SECONDS
@@ -216,6 +415,15 @@ class SelfHealState:
     last_healthy_at: str | None = None
     fix_available: bool = True
     last_known_good_release_env: dict[str, str] | None = None
+    last_known_good_runtime_env: dict[str, str] | None = None
+    last_known_good_bootstrap_runtime_env: dict[str, str] | None = None
+    model_warm_failures: dict[str, int] = field(default_factory=dict)
+    model_warm_retry_after: dict[str, str] = field(default_factory=dict)
+    model_warm_last_error: dict[str, str] = field(default_factory=dict)
+    idle_queue_detected_at: str | None = None
+    runtime_wedge_detected_at: str | None = None
+    last_targeted_inference_restart_at: str | None = None
+    last_targeted_node_restart_at: str | None = None
 
 
 @dataclass
@@ -239,6 +447,11 @@ class ModelCacheState:
     last_evicted_bytes: int = 0
     last_evicted_at: str | None = None
     cache_bytes: int = 0
+    cache_budget_bytes: int = 0
+    reserve_free_bytes: int = 0
+    cache_budget_source: str = "derived"
+    hot_models: list[str] = field(default_factory=list)
+    pinned_models: list[str] = field(default_factory=list)
     last_used_by_model: dict[str, str] = field(default_factory=dict)
 
 
@@ -257,6 +470,9 @@ class NodeRuntimeService:
         self.diagnostics_dir = self.data_dir / "diagnostics"
         self.scratch_dir = self.data_dir / "scratch"
         self.autopilot_state_path = self.scratch_dir / "autopilot-state.json"
+        self.heat_governor_state_path = self.scratch_dir / "heat-governor-state.json"
+        self.control_plane_state_path = self.scratch_dir / "control-plane-state.json"
+        self.fault_injection_state_path = self.scratch_dir / DEFAULT_FAULT_INJECTION_STATE_NAME
         self.pid_path = self.service_dir / "service.pid"
         self.meta_path = self.service_dir / "service-meta.json"
         self.state_path = self.service_dir / "service-state.json"
@@ -272,32 +488,39 @@ class NodeRuntimeService:
             self.runtime_dir,
             command_runner=command_runner,
         )
-        self.runtime_controller = (
-            EmbeddedRuntimeSupervisor(
-                self.runtime_env_values,
-                cache_dir=self.data_dir / "model-cache",
-                credentials_dir=self.data_dir / "credentials",
-                scratch_dir=self.scratch_dir,
-                log=self.log,
-            )
-            if self.runtime_backend == SINGLE_CONTAINER_RUNTIME_BACKEND
-            else None
-        )
+        self.runtime_controller = None
         self.guided_installer = GuidedInstaller(
             runtime_dir=self.runtime_dir,
             command_runner=command_runner,
             autostart_manager=self.autostart_manager,
             desktop_launcher_manager=self.desktop_launcher_manager,
             runtime_status_provider=self.runtime_backend_status,
-            runtime_controller=self.runtime_controller,
+            runtime_controller=None,
         )
+        self.runtime_backend = self.guided_installer.current_runtime_backend()
+        self.required_runtime_services = runtime_backend_required_services(self.runtime_backend)
+        if self.runtime_backend == SINGLE_CONTAINER_RUNTIME_BACKEND:
+            self.runtime_controller = EmbeddedRuntimeSupervisor(
+                self.runtime_env_values,
+                cache_dir=self.data_dir / "model-cache",
+                credentials_dir=self.data_dir / "credentials",
+                scratch_dir=self.scratch_dir,
+                log=self.log,
+            )
+        self.guided_installer.runtime_controller = self.runtime_controller
         self.lock = threading.Lock()
         self.shutdown_event = threading.Event()
         self.repair_lock = threading.Lock()
+        self.local_doctor_lock = threading.Lock()
+        self.local_doctor_request_lock = threading.Lock()
+        self.local_doctor_wakeup = threading.Event()
+        self.local_doctor_pending_triggers: list[str] = []
         self.logs: list[str] = []
         self.update_state = UpdateState()
         self.diagnostics_state = DiagnosticsState()
+        self.local_doctor_state = LocalDoctorState()
         self.self_heal_state = SelfHealState()
+        self.owner_timeline: list[dict[str, Any]] = []
         self.remote_dashboard_state = RemoteDashboardCacheState()
         self.model_cache_state = ModelCacheState()
         self.started_at = now_iso()
@@ -335,15 +558,22 @@ class NodeRuntimeService:
         except json.JSONDecodeError:
             return
         self.update_state = UpdateState(**payload.get("updates", {}))
+        self.update_state.preferred_channel = normalize_release_channel(self.update_state.preferred_channel)
         self.diagnostics_state = DiagnosticsState(**payload.get("diagnostics", {}))
+        self.local_doctor_state = LocalDoctorState(**payload.get("local_doctor", {}))
         self.self_heal_state = SelfHealState(**payload.get("self_healing", {}))
+        raw_owner_timeline = payload.get("owner_timeline")
+        if isinstance(raw_owner_timeline, list):
+            self.owner_timeline = [dict(item) for item in raw_owner_timeline if isinstance(item, dict)]
         self.model_cache_state = ModelCacheState(**payload.get("model_cache", {}))
 
     def save_state(self) -> None:
         payload = {
             "updates": asdict(self.update_state),
             "diagnostics": asdict(self.diagnostics_state),
+            "local_doctor": asdict(self.local_doctor_state),
             "self_healing": asdict(self.self_heal_state),
+            "owner_timeline": self.owner_timeline,
             "model_cache": asdict(self.model_cache_state),
         }
         self.state_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -356,6 +586,8 @@ class NodeRuntimeService:
             self.logs = self.logs[-120:]
 
     def update_self_heal_state(self, **updates: Any) -> None:
+        previous_action = self.self_heal_state.last_action
+        previous_repaired_at = self.self_heal_state.last_repaired_at
         changed = False
         for key, value in updates.items():
             if getattr(self.self_heal_state, key) != value:
@@ -363,9 +595,557 @@ class NodeRuntimeService:
                 changed = True
         if changed:
             self.save_state()
+            current_action = self.self_heal_state.last_action
+            current_repaired_at = self.self_heal_state.last_repaired_at or self.self_heal_state.last_checked_at
+            if current_action != previous_action or current_repaired_at != previous_repaired_at:
+                event = self.owner_timeline_event_from_self_heal(
+                    action=current_action,
+                    issue=self.self_heal_state.last_issue,
+                    result=self.self_heal_state.last_result,
+                    observed_at=current_repaired_at,
+                )
+                if event is not None:
+                    self.record_owner_timeline_event(
+                        code=str(event.get("code") or "self_heal"),
+                        title=str(event.get("title") or "Owner update"),
+                        detail=str(event.get("detail") or ""),
+                        tone=str(event.get("tone") or "warning"),
+                        source=str(event.get("source") or "self_healing"),
+                        observed_at=str(event.get("observed_at") or current_repaired_at or now_iso()),
+                    )
+
+    def update_local_doctor_state(self, **updates: Any) -> None:
+        previous_bundle_name = self.local_doctor_state.attached_bundle_name
+        previous_bundle_at = self.local_doctor_state.attached_bundle_created_at
+        changed = False
+        for key, value in updates.items():
+            if getattr(self.local_doctor_state, key) != value:
+                setattr(self.local_doctor_state, key, value)
+                changed = True
+        if changed:
+            self.save_state()
+            if (
+                self.local_doctor_state.attached_bundle_name
+                and (
+                    self.local_doctor_state.attached_bundle_name != previous_bundle_name
+                    or self.local_doctor_state.attached_bundle_created_at != previous_bundle_at
+                )
+            ):
+                self.record_owner_timeline_event(
+                    code="local_doctor_attached_bundle",
+                    title="Local Doctor attached bundle",
+                    detail=(
+                        f"Attached diagnostics bundle {self.local_doctor_state.attached_bundle_name} so support evidence is ready."
+                    ),
+                    tone="warning",
+                    source="local_doctor",
+                    observed_at=self.local_doctor_state.attached_bundle_created_at or self.local_doctor_state.last_checked_at,
+                )
+
+    @staticmethod
+    def owner_timeline_item(
+        *,
+        code: str,
+        title: str,
+        detail: str,
+        tone: str = "warning",
+        source: str = "service",
+        observed_at: str | None = None,
+    ) -> dict[str, Any]:
+        normalized_tone = tone if tone in {"success", "warning", "danger"} else "warning"
+        item: dict[str, Any] = {
+            "code": str(code or "event").strip(),
+            "title": str(title or "Owner update").strip(),
+            "detail": str(detail or "").strip(),
+            "tone": normalized_tone,
+            "source": str(source or "service").strip(),
+            "observed_at": str(observed_at or now_iso()),
+        }
+        relative = format_relative_time(item["observed_at"])
+        if relative != "Waiting":
+            item["observed_label"] = relative
+        return item
+
+    @staticmethod
+    def owner_timeline_sort_key(item: dict[str, Any]) -> tuple[float, str]:
+        timestamp = parse_iso_timestamp(str(item.get("observed_at") or ""))
+        return (
+            timestamp.timestamp() if timestamp is not None else 0.0,
+            str(item.get("code") or ""),
+        )
+
+    def record_owner_timeline_event(
+        self,
+        *,
+        code: str,
+        title: str,
+        detail: str,
+        tone: str = "warning",
+        source: str = "service",
+        observed_at: str | None = None,
+    ) -> None:
+        item = self.owner_timeline_item(
+            code=code,
+            title=title,
+            detail=detail,
+            tone=tone,
+            source=source,
+            observed_at=observed_at,
+        )
+        dedupe_key = (
+            str(item.get("code") or ""),
+            str(item.get("observed_at") or ""),
+            str(item.get("detail") or ""),
+        )
+        retained = [
+            existing
+            for existing in self.owner_timeline
+            if (
+                str(existing.get("code") or ""),
+                str(existing.get("observed_at") or ""),
+                str(existing.get("detail") or ""),
+            )
+            != dedupe_key
+        ]
+        retained.append(item)
+        retained.sort(key=self.owner_timeline_sort_key, reverse=True)
+        self.owner_timeline = retained[:OWNER_TIMELINE_LIMIT]
+        self.save_state()
+
+    def owner_timeline_event_from_self_heal(
+        self,
+        *,
+        action: str | None,
+        issue: str | None,
+        result: str | None,
+        observed_at: str | None,
+    ) -> dict[str, Any] | None:
+        normalized_action = str(action or "").strip()
+        if not normalized_action or normalized_action in {"monitor", "waiting_for_quick_start"}:
+            return None
+        issue_text = str(issue or "").strip()
+        result_text = str(result or "").strip() or "The node handled a recovery action locally."
+        combined = f"{issue_text} {result_text}".lower()
+        if normalized_action == "rollback_owner_target_model":
+            return self.owner_timeline_item(
+                code="target_model_bootstrap_rollback",
+                title="Target model rolled back to bootstrap",
+                detail=result_text,
+                tone="warning",
+                source="self_healing",
+                observed_at=observed_at,
+            )
+        if normalized_action == "rollback_bad_update":
+            return self.owner_timeline_item(
+                code="update_rolled_back",
+                title="Update rolled back automatically",
+                detail=result_text,
+                tone="warning",
+                source="self_healing",
+                observed_at=observed_at,
+            )
+        if normalized_action in {"restart_runtime", "restart_vllm", "restart_node_agent"}:
+            if "docker" in combined or "container" in combined:
+                return self.owner_timeline_item(
+                    code="docker_restart_recovered",
+                    title="Node recovered automatically after Docker restart",
+                    detail=(f"{issue_text} {result_text}").strip(),
+                    tone="success",
+                    source="self_healing",
+                    observed_at=observed_at,
+                )
+            return self.owner_timeline_item(
+                code="node_recovered",
+                title="Node recovered automatically",
+                detail=result_text,
+                tone="success",
+                source="self_healing",
+                observed_at=observed_at,
+            )
+        return None
+
+    def owner_timeline_payload(self) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = [dict(item) for item in self.owner_timeline if isinstance(item, dict)]
+        synthesized = [
+            self.owner_timeline_event_from_self_heal(
+                action=self.self_heal_state.last_action,
+                issue=self.self_heal_state.last_issue,
+                result=self.self_heal_state.last_result,
+                observed_at=self.self_heal_state.last_repaired_at or self.self_heal_state.last_checked_at,
+            )
+        ]
+        if self.local_doctor_state.attached_bundle_name:
+            synthesized.append(
+                self.owner_timeline_item(
+                    code="local_doctor_attached_bundle",
+                    title="Local Doctor attached bundle",
+                    detail=(
+                        f"Attached diagnostics bundle {self.local_doctor_state.attached_bundle_name} so support evidence is ready."
+                    ),
+                    tone="warning",
+                    source="local_doctor",
+                    observed_at=self.local_doctor_state.attached_bundle_created_at or self.local_doctor_state.last_checked_at,
+                )
+            )
+        update_result = str(self.update_state.last_result or "").strip()
+        if update_result and "applied successfully" in update_result.lower():
+            synthesized.append(
+                self.owner_timeline_item(
+                    code="update_applied",
+                    title="Update applied successfully",
+                    detail=update_result,
+                    tone="success",
+                    source="updates",
+                    observed_at=self.update_state.last_checked_at,
+                )
+            )
+        deduped: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for item in [*events, *[entry for entry in synthesized if isinstance(entry, dict)]]:
+            normalized = self.owner_timeline_item(
+                code=str(item.get("code") or "event"),
+                title=str(item.get("title") or "Owner update"),
+                detail=str(item.get("detail") or ""),
+                tone=str(item.get("tone") or "warning"),
+                source=str(item.get("source") or "service"),
+                observed_at=str(item.get("observed_at") or now_iso()),
+            )
+            dedupe_key = (
+                str(normalized.get("code") or ""),
+                str(normalized.get("observed_at") or ""),
+                str(normalized.get("detail") or ""),
+            )
+            deduped[dedupe_key] = normalized
+        merged = list(deduped.values())
+        merged.sort(key=self.owner_timeline_sort_key, reverse=True)
+        return merged[:OWNER_TIMELINE_DISPLAY_LIMIT]
 
     def runtime_env_values(self) -> dict[str, str]:
         return self.guided_installer.effective_runtime_env()
+
+    def local_doctor_payload(self) -> dict[str, Any]:
+        payload = asdict(self.local_doctor_state)
+        if not payload.get("headline"):
+            payload["headline"] = "Local Doctor is standing by"
+        if not payload.get("detail"):
+            payload["detail"] = (
+                "Run Local Doctor to re-check Docker, GPU access, network reachability, model cache, warm readiness, "
+                "and one tiny local inference."
+            )
+        return payload
+
+    @staticmethod
+    def local_doctor_status_rank(status: str | None) -> int:
+        normalized = str(status or "").strip().lower()
+        if normalized in {"fail", "error", "attention", "blocked"}:
+            return 2
+        if normalized in {"warn", "warning", "waiting", "active", "unavailable"}:
+            return 1
+        return 0
+
+    @staticmethod
+    def local_doctor_status_tone(status: str | None) -> str:
+        normalized = str(status or "").strip().lower()
+        if normalized in {"pass", "healthy", "ok"}:
+            return "success"
+        if normalized in {"warn", "warning", "waiting", "active", "unavailable"}:
+            return "warning"
+        return "danger"
+
+    @staticmethod
+    def local_doctor_status_bucket(status: str | None) -> str:
+        normalized = str(status or "").strip().lower()
+        if normalized in {"healthy", "pass", "ok"}:
+            return "healthy"
+        if normalized in {"warning", "warn", "attention", "fail", "error", "blocked"}:
+            return "issue"
+        return "neutral"
+
+    @staticmethod
+    def local_doctor_trigger_label(trigger: str | None) -> str:
+        normalized = str(trigger or "").strip().lower()
+        if normalized in {"manual", "manual_recheck", "manual_precheck"}:
+            return "a manual check"
+        if normalized == "auto_fix_verify":
+            return "the automatic fix"
+        if normalized == "service_start":
+            return "service start"
+        if normalized == "idle_interval":
+            return "an idle-time re-check"
+        if normalized == "update":
+            return "an update"
+        if normalized.startswith("self_heal:"):
+            action = normalized.partition(":")[2]
+            return {
+                "autopilot_tuning": "self-healing retuning the node",
+                "restart_runtime": "self-healing restarting the runtime",
+                "restart_vllm": "self-healing restarting the inference runtime",
+                "restart_node_agent": "self-healing restarting the node agent",
+                "rollback_bad_update": "self-healing rolling back an update",
+                "rollback_owner_target_model": "self-healing restoring the bootstrap model",
+                "repair_startup": "self-healing repairing startup",
+                "repair_local_state": "self-healing restoring local state",
+            }.get(action, "self-healing")
+        return normalized.replace("_", " ") if normalized else "the latest check"
+
+    def local_doctor_background_due(self) -> bool:
+        last_checked = parse_iso_timestamp(self.local_doctor_state.last_background_check_at)
+        if last_checked is None:
+            return True
+        return (datetime.now(timezone.utc) - last_checked).total_seconds() >= LOCAL_DOCTOR_INTERVAL_SECONDS
+
+    def local_doctor_can_run_in_background(self) -> bool:
+        if self.repair_lock.locked():
+            return False
+        installer_snapshot = self.guided_installer.status_payload()
+        installer_state = installer_snapshot.get("state") if isinstance(installer_snapshot.get("state"), dict) else {}
+        if bool(installer_state.get("busy")):
+            return False
+        autopilot = self.load_autopilot_payload()
+        signals = autopilot.get("signals") if isinstance(autopilot.get("signals"), dict) else {}
+        if coerce_nonnegative_int(signals.get("queue_depth")) > 0:
+            return False
+        if coerce_nonnegative_int(signals.get("active_assignments")) > 0:
+            return False
+        return True
+
+    def queue_background_doctor(self, trigger: str) -> None:
+        normalized = str(trigger or "").strip().lower().replace(" ", "_")
+        if not normalized or self.shutdown_event.is_set():
+            return
+        with self.local_doctor_request_lock:
+            if normalized not in self.local_doctor_pending_triggers:
+                self.local_doctor_pending_triggers.append(normalized)
+        self.local_doctor_wakeup.set()
+
+    def pop_background_doctor_trigger(self) -> str | None:
+        with self.local_doctor_request_lock:
+            if not self.local_doctor_pending_triggers:
+                return None
+            return self.local_doctor_pending_triggers.pop(0)
+
+    def local_doctor_background_trigger_for_self_heal(self, previous_action: str | None) -> str | None:
+        current_action = str(self.self_heal_state.last_action or "").strip()
+        if not current_action or current_action == str(previous_action or "").strip():
+            return None
+        if current_action in {
+            "monitor",
+            "waiting_for_quick_start",
+            "waiting_for_owner",
+            "waiting_for_approval",
+            "waiting_for_docker",
+            "waiting_for_disk_space",
+            "waiting_for_gpu",
+            "waiting_for_startup_support",
+            "self_heal_loop",
+            "repair_runtime",
+        }:
+            return None
+        return f"self_heal:{current_action}"
+
+    def local_doctor_transition_alert(
+        self,
+        *,
+        previous_bucket: str | None,
+        current_bucket: str,
+        status: str,
+        headline: str,
+        detail: str,
+        trigger: str,
+        observed_at: str,
+    ) -> dict[str, Any]:
+        if previous_bucket == current_bucket:
+            return {}
+        if previous_bucket == "healthy" and current_bucket == "issue":
+            return {
+                "code": "local_doctor_attention",
+                "title": "Local Doctor found something new to fix",
+                "detail": f"{headline}. {detail}",
+                "tone": "warning" if status == "warning" else "danger",
+                "source": "local_doctor",
+                "observed_at": observed_at,
+            }
+        if previous_bucket == "issue" and current_bucket == "healthy":
+            trigger_label = self.local_doctor_trigger_label(trigger)
+            return {
+                "code": "local_doctor_recovered",
+                "title": "Local Doctor verified the node recovered",
+                "detail": f"{headline}. The latest automatic re-check passed after {trigger_label}.",
+                "tone": "success",
+                "source": "local_doctor",
+                "observed_at": observed_at,
+            }
+        return {}
+
+    @staticmethod
+    def local_doctor_fix_is_actionable(label: str | None, detail: str | None) -> bool:
+        normalized = f"{label or ''} {detail or ''}".strip().lower()
+        return not (
+            "no fix needed" in normalized
+            or "no immediate fix needed" in normalized
+            or "no immediate fix is needed" in normalized
+            or "keep serving on the bootstrap model for now" in normalized
+        )
+
+    @staticmethod
+    def local_doctor_issue_fix(
+        *,
+        code: str,
+        label: str,
+        detail: str,
+        source: str,
+        automated: bool = False,
+    ) -> dict[str, Any]:
+        return {
+            "code": code,
+            "label": label,
+            "detail": detail,
+            "source": source,
+            "automated": automated,
+        }
+
+    @staticmethod
+    def local_doctor_setup_check_map(preflight: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        checks = preflight.get("setup_checks") if isinstance(preflight.get("setup_checks"), list) else []
+        result: dict[str, dict[str, Any]] = {}
+        for check in checks:
+            if not isinstance(check, dict):
+                continue
+            key = str(check.get("key") or "").strip()
+            if key:
+                result[key] = check
+        return result
+
+    def local_doctor_group_check(
+        self,
+        *,
+        setup_checks: dict[str, dict[str, Any]],
+        key: str,
+        label: str,
+        member_keys: tuple[str, ...],
+        success_summary: str,
+        success_detail: str,
+    ) -> dict[str, Any]:
+        selected = [setup_checks[member_key] for member_key in member_keys if member_key in setup_checks]
+        if not selected:
+            return {
+                "key": key,
+                "label": label,
+                "status": "warn",
+                "summary": f"{label} has not been checked yet.",
+                "detail": "Run Local Doctor again after local setup data finishes loading.",
+                "fix": "Wait for local setup data to load, then run Local Doctor again.",
+                "tone": "warning",
+                "source_checks": [],
+            }
+
+        non_pass = [
+            check
+            for check in selected
+            if self.local_doctor_status_rank(check.get("status")) > 0
+        ]
+        chosen = non_pass[0] if non_pass else selected[0]
+        status = str(chosen.get("status") or "pass")
+        summary = str(chosen.get("summary") or success_summary)
+        detail = str(chosen.get("detail") or success_detail)
+        fix = str(chosen.get("fix") or "No fix needed.")
+        if not non_pass:
+            status = "pass"
+            summary = success_summary
+            detail = success_detail
+            fix = "No fix needed."
+        return {
+            "key": key,
+            "label": label,
+            "status": status,
+            "summary": summary,
+            "detail": detail,
+            "fix": fix,
+            "blocking": any(bool(check.get("blocking")) for check in selected),
+            "tone": self.local_doctor_status_tone(status),
+            "source_checks": [str(check.get("key") or "") for check in selected],
+        }
+
+    def fault_controller(self) -> FaultInjectionController:
+        return FaultInjectionController(self.fault_injection_state_path)
+
+    def build_fault_drill_settings(self, *, edge_control_url: str | None = None) -> NodeAgentSettings:
+        env_values = self.guided_installer.effective_runtime_env()
+        if not env_values:
+            env_values = self.guided_installer.build_env({"setup_mode": "quickstart"})
+        next_env = dict(env_values)
+        next_env["CONTROL_PLANE_STATE_PATH"] = str(self.control_plane_state_path)
+        next_env["FAULT_INJECTION_STATE_PATH"] = str(self.fault_injection_state_path)
+        if edge_control_url:
+            next_env["EDGE_CONTROL_URL"] = edge_control_url
+        settings = self.guided_installer.build_installer_settings(next_env)
+        settings.control_plane_state_path = str(self.control_plane_state_path)
+        settings.fault_injection_state_path = str(self.fault_injection_state_path)
+        if edge_control_url:
+            settings.edge_control_url = edge_control_url
+        return settings
+
+    @contextmanager
+    def local_drill_server(
+        self,
+        *,
+        body: bytes,
+        content_type: str,
+        status_code: int = 200,
+        enable_range: bool = False,
+    ):
+        server = _DrillHTTPServer(
+            ("127.0.0.1", 0),
+            body=body,
+            content_type=content_type,
+            status_code=status_code,
+            enable_range=enable_range,
+        )
+        thread = threading.Thread(target=server.serve_forever, name="fault-drill-http", daemon=True)
+        thread.start()
+        host, port = server.server_address[:2]
+        try:
+            yield server, f"http://{host}:{port}"
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2.0)
+
+    def fault_drill_payload(self) -> dict[str, Any]:
+        snapshot = self.fault_controller().snapshot()
+        return {
+            "state_path": str(self.fault_injection_state_path),
+            "supported_scenarios": list(SUPPORTED_FAULT_DRILLS),
+            "active_faults": snapshot.get("active_faults", []),
+            "last_drill": snapshot.get("last_drill", {}),
+        }
+
+    def apply_fault_overrides_to_installer_snapshot(self, installer_snapshot: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(installer_snapshot, dict):
+            return installer_snapshot
+        disk_pressure = self.fault_controller().peek("disk_pressure")
+        if not disk_pressure:
+            return installer_snapshot
+        snapshot = json.loads(json.dumps(installer_snapshot))
+        preflight = snapshot.get("preflight") if isinstance(snapshot.get("preflight"), dict) else {}
+        disk = dict(preflight.get("disk") or {})
+        free_bytes = max(
+            0,
+            int(
+                (disk_pressure.get("metadata") or {}).get("free_bytes")
+                or 1 * (1024**3)
+            ),
+        )
+        disk.update(
+            {
+                "free_bytes": free_bytes,
+                "free_gb": round(free_bytes / float(1024**3), 1),
+                "ok": False,
+                "injected_fault": "disk_pressure",
+            }
+        )
+        preflight["disk"] = disk
+        snapshot["preflight"] = preflight
+        return snapshot
 
     def runtime_backend_status(self) -> dict[str, Any]:
         if self.runtime_controller is None:
@@ -390,8 +1170,43 @@ class NodeRuntimeService:
     def signed_release_manifest(self) -> ReleaseManifest:
         manifest = load_release_manifest()
         self.update_state.release_version = manifest.version
-        self.update_state.release_channel = manifest.channel
+        self.update_state.release_channel = normalize_release_channel(manifest.channel)
         return manifest
+
+    def appliance_release_payload(self) -> dict[str, Any]:
+        package_signature = inspect_package_signature()
+        runtime_signature_root = self.runtime_dir if (self.runtime_dir / "appliance-runtime-manifest.json").exists() else None
+        runtime_bundle_signature = inspect_runtime_bundle_signature(runtime_signature_root)
+        release_version = self.update_state.release_version
+        release_channel = self.update_state.release_channel
+        if not release_version:
+            try:
+                manifest = load_release_manifest()
+                release_version = manifest.version
+                release_channel = manifest.channel
+            except ReleaseManifestError:
+                release_version = package_signature.get("version")
+                release_channel = package_signature.get("channel")
+        preferred_channel = normalize_release_channel(self.update_state.preferred_channel)
+        release_verified = bool(package_signature.get("verified")) and bool(runtime_bundle_signature.get("verified"))
+        if release_verified:
+            detail = (
+                f"Signed appliance release {release_version or 'pending'} is verified locally. "
+                f"Update track: {update_channel_copy(preferred_channel)}."
+            )
+        else:
+            detail = str(package_signature.get("detail") or runtime_bundle_signature.get("detail") or "Signed appliance verification needs attention.")
+        return {
+            "verified": release_verified,
+            "detail": detail,
+            "version": release_version,
+            "channel": normalize_release_channel(release_channel),
+            "channel_label": update_channel_copy(release_channel),
+            "preferred_channel": preferred_channel,
+            "preferred_channel_label": update_channel_copy(preferred_channel),
+            "package_signature": package_signature,
+            "runtime_bundle_signature": runtime_bundle_signature,
+        }
 
     def current_release_env(self, manifest: ReleaseManifest) -> dict[str, str]:
         values = parse_env_file(self.release_env_path)
@@ -429,6 +1244,26 @@ class NodeRuntimeService:
             values = parse_env_file(self.release_env_path)
             return values or None
 
+    def runtime_tuple_snapshot(self, env_values: dict[str, str] | None = None) -> dict[str, str] | None:
+        values = env_values or self.runtime_env_values()
+        if not values:
+            return None
+        snapshot: dict[str, str] = {}
+        for key in RUNTIME_TUPLE_ENV_KEYS:
+            raw_value = values.get(key)
+            if raw_value is None:
+                continue
+            value = str(raw_value).strip()
+            if value:
+                snapshot[key] = value
+        model = snapshot.get("VLLM_MODEL")
+        if model:
+            for key, value in llama_cpp_env_for_model(model).items():
+                normalized = str(value).strip()
+                if normalized:
+                    snapshot[key] = normalized
+        return snapshot or None
+
     def remember_known_good_release(self) -> None:
         snapshot = self.current_release_snapshot()
         if not snapshot:
@@ -437,6 +1272,149 @@ class NodeRuntimeService:
             last_known_good_release_env=snapshot,
             last_healthy_at=now_iso(),
         )
+
+    def remember_known_good_runtime_tuple(self) -> None:
+        snapshot = self.runtime_tuple_snapshot()
+        if not snapshot:
+            return
+        updates: dict[str, Any] = {
+            "last_known_good_runtime_env": snapshot,
+            "last_healthy_at": now_iso(),
+        }
+        current_model = str(snapshot.get("VLLM_MODEL") or "").strip()
+        owner_target_model = str(snapshot.get("OWNER_TARGET_MODEL") or "").strip()
+        if current_model and (not owner_target_model or current_model != owner_target_model):
+            updates["last_known_good_bootstrap_runtime_env"] = snapshot
+        self.update_self_heal_state(**updates)
+
+    def remember_known_good_runtime_state(self) -> None:
+        self.remember_known_good_release()
+        self.remember_known_good_runtime_tuple()
+
+    def apply_runtime_tuple_snapshot(self, snapshot: dict[str, str]) -> bool:
+        if not snapshot:
+            return False
+        env_values = self.guided_installer.effective_runtime_env()
+        if not env_values:
+            env_values = self.guided_installer.build_env({"setup_mode": "quickstart"})
+        next_env = dict(env_values)
+        changed = False
+        for key in RUNTIME_TUPLE_ENV_KEYS:
+            if key not in snapshot:
+                continue
+            value = str(snapshot[key]).strip()
+            if next_env.get(key) != value:
+                next_env[key] = value
+                changed = True
+        model = str(snapshot.get("VLLM_MODEL") or next_env.get("VLLM_MODEL") or "").strip()
+        if model:
+            for key, value in llama_cpp_env_for_model(model).items():
+                normalized = str(value).strip()
+                if next_env.get(key) != normalized:
+                    next_env[key] = normalized
+                    changed = True
+        if not changed:
+            return False
+        self.guided_installer.write_runtime_settings(next_env)
+        self.guided_installer.write_runtime_env(next_env)
+        return True
+
+    def restore_known_good_runtime_tuple(self, failure_reason: str, *, prefer_bootstrap: bool = False) -> bool:
+        target = (
+            self.self_heal_state.last_known_good_bootstrap_runtime_env
+            if prefer_bootstrap
+            else self.self_heal_state.last_known_good_runtime_env
+        )
+        if prefer_bootstrap and not target:
+            target = self.self_heal_state.last_known_good_runtime_env
+        if not target:
+            return False
+        current = self.runtime_tuple_snapshot()
+        if current == target:
+            return False
+        rollback_id = request_id()
+        target_model = str(target.get("VLLM_MODEL") or "the last known healthy startup model")
+        self.log(
+            f"[request {rollback_id}] Restoring the last known healthy runtime tuple "
+            f"({target_model}) after: {failure_reason}"
+        )
+        return self.apply_runtime_tuple_snapshot(target)
+
+    def clear_model_warm_failure(self, model: str | None) -> None:
+        normalized_model = (model or "").strip()
+        if not normalized_model:
+            return
+        failures = dict(self.self_heal_state.model_warm_failures)
+        retry_after = dict(self.self_heal_state.model_warm_retry_after)
+        last_error = dict(self.self_heal_state.model_warm_last_error)
+        changed = False
+        for mapping in (failures, retry_after, last_error):
+            if normalized_model in mapping:
+                mapping.pop(normalized_model, None)
+                changed = True
+        if changed:
+            self.update_self_heal_state(
+                model_warm_failures=failures,
+                model_warm_retry_after=retry_after,
+                model_warm_last_error=last_error,
+            )
+
+    def model_warm_retry_hold(self, model: str | None) -> str | None:
+        normalized_model = (model or "").strip()
+        if not normalized_model:
+            return None
+        retry_after = parse_iso_timestamp(self.self_heal_state.model_warm_retry_after.get(normalized_model))
+        if retry_after is None:
+            return None
+        if retry_after <= datetime.now(timezone.utc):
+            self.clear_model_warm_failure(normalized_model)
+            return None
+        return (
+            f"{normalized_model} recently failed to warm repeatedly, so self-healing is keeping the last known-good "
+            f"bootstrap model active until {retry_after.isoformat()}."
+        )
+
+    def record_model_warm_failure(self, model: str | None, error: Exception | str) -> tuple[int, str | None]:
+        normalized_model = (model or "").strip()
+        if not normalized_model:
+            return 0, None
+        failures = dict(self.self_heal_state.model_warm_failures)
+        retry_after = dict(self.self_heal_state.model_warm_retry_after)
+        last_error = dict(self.self_heal_state.model_warm_last_error)
+        count = max(0, int(failures.get(normalized_model, 0) or 0)) + 1
+        failures[normalized_model] = count
+        last_error[normalized_model] = str(error) or "Model warm-up failed."
+        cooldown_until: str | None = None
+        if count >= MODEL_WARM_FAILURE_THRESHOLD:
+            cooldown_until = (datetime.now(timezone.utc) + timedelta(seconds=MODEL_WARM_RETRY_COOLDOWN_SECONDS)).isoformat()
+            retry_after[normalized_model] = cooldown_until
+        self.update_self_heal_state(
+            model_warm_failures=failures,
+            model_warm_retry_after=retry_after,
+            model_warm_last_error=last_error,
+        )
+        return count, cooldown_until
+
+    def watchdog_timer_elapsed(self, field_name: str, *, active: bool, now: datetime | None = None) -> float | None:
+        current_time = now or datetime.now(timezone.utc)
+        started_raw = getattr(self.self_heal_state, field_name)
+        started_at = parse_iso_timestamp(started_raw if isinstance(started_raw, str) else None)
+        if active:
+            if started_at is None:
+                self.update_self_heal_state(**{field_name: current_time.isoformat()})
+                return 0.0
+            return max(0.0, (current_time - started_at).total_seconds())
+        if started_raw is not None:
+            self.update_self_heal_state(**{field_name: None})
+        return None
+
+    def watchdog_restart_ready(self, field_name: str, *, now: datetime | None = None) -> bool:
+        current_time = now or datetime.now(timezone.utc)
+        last_restart_raw = getattr(self.self_heal_state, field_name)
+        last_restart = parse_iso_timestamp(last_restart_raw if isinstance(last_restart_raw, str) else None)
+        if last_restart is None:
+            return True
+        return (current_time - last_restart).total_seconds() >= WATCHDOG_RESTART_COOLDOWN_SECONDS
 
     def rollback_to_known_good_release(self, failure_reason: str) -> bool:
         target = self.self_heal_state.last_known_good_release_env
@@ -474,7 +1452,7 @@ class NodeRuntimeService:
             last_repaired_at=now_iso(),
             fix_available=False,
         )
-        self.remember_known_good_release()
+        self.remember_known_good_runtime_state()
         self.save_state()
         return True
 
@@ -613,6 +1591,135 @@ class NodeRuntimeService:
             "runtime_backend": preflight.get("runtime_backend", self.runtime_backend),
             "runtime_backend_label": preflight.get("runtime_backend_label", runtime_backend_label(self.runtime_backend)),
         }
+
+    def load_autopilot_payload(self) -> dict[str, Any]:
+        if not self.autopilot_state_path.exists():
+            return {}
+        try:
+            payload = json.loads(self.autopilot_state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def heat_governor_payload(self, autopilot_payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        env_values = self.guided_installer.effective_runtime_env()
+        if not env_values:
+            env_values = self.guided_installer.build_env({"setup_mode": "quickstart"})
+        env_values["HEAT_GOVERNOR_STATE_PATH"] = self.guided_installer.runtime_heat_governor_state_env_path(
+            self.runtime_backend
+        )
+        settings = self.guided_installer.build_installer_settings(env_values)
+        settings.heat_governor_state_path = str(self.heat_governor_state_path)
+        state = load_heat_governor_state(self.heat_governor_state_path)
+        autopilot_payload = autopilot_payload or self.load_autopilot_payload()
+        recommendation = autopilot_payload.get("recommendation")
+        signals = autopilot_payload.get("signals") if isinstance(autopilot_payload.get("signals"), dict) else {}
+        live_plan = (
+            recommendation.get("heat_governor")
+            if isinstance(recommendation, dict) and isinstance(recommendation.get("heat_governor"), dict)
+            else None
+        )
+        fallback_plan = build_heat_governor_plan(
+            settings,
+            state=state,
+            gpu_temp_c=coerce_float(signals.get("gpu_temp_c")),
+            gpu_utilization_pct=coerce_float(signals.get("gpu_utilization_pct")),
+            queue_depth=coerce_nonnegative_int(signals.get("queue_depth")),
+            active_assignments=coerce_nonnegative_int(signals.get("active_assignments")),
+        ).payload()
+        plan = dict(fallback_plan)
+        if live_plan:
+            plan.update(live_plan)
+        policy_parts = [str(plan.get("owner_objective_label") or "Balanced")]
+        quiet_start = str(plan.get("quiet_hours_start_local") or "").strip()
+        quiet_end = str(plan.get("quiet_hours_end_local") or "").strip()
+        if quiet_start and quiet_end:
+            policy_parts.append(f"quiet hours {quiet_start}-{quiet_end}")
+        power_cap = coerce_nonnegative_int(plan.get("max_power_cap_watts"))
+        if power_cap > 0:
+            policy_parts.append(f"power cap {power_cap} W")
+        energy_price = coerce_float(state.get("energy_price_kwh", env_values.get("ENERGY_PRICE_KWH")))
+        if energy_price is not None:
+            policy_parts.append(f"${energy_price:.2f}/kWh power")
+        return {
+            "mode": normalize_heat_governor_mode(state.get("mode", env_values.get("HEAT_GOVERNOR_MODE"))),
+            "state_path": str(self.heat_governor_state_path),
+            "plan": plan,
+            "alerts": plan.get("owner_alerts", []) if isinstance(plan.get("owner_alerts"), list) else [],
+            "room_temp_c": state.get("room_temp_c", env_values.get("ROOM_TEMP_C") or None),
+            "target_temp_c": state.get("target_temp_c", env_values.get("TARGET_TEMP_C") or None),
+            "outside_temp_c": state.get("outside_temp_c", env_values.get("OUTSIDE_TEMP_C") or None),
+            "owner_objective": normalize_owner_objective(
+                state.get("owner_objective", env_values.get("OWNER_OBJECTIVE") or getattr(settings, "owner_objective", "balanced"))
+            ),
+            "quiet_hours_start_local": state.get(
+                "quiet_hours_start_local",
+                env_values.get("QUIET_HOURS_START_LOCAL") or None,
+            ),
+            "quiet_hours_end_local": state.get(
+                "quiet_hours_end_local",
+                env_values.get("QUIET_HOURS_END_LOCAL") or None,
+            ),
+            "gpu_temp_limit_c": state.get("gpu_temp_limit_c", env_values.get("GPU_TEMP_LIMIT_C") or settings.gpu_temp_limit_c),
+            "gpu_power_limit_enabled": coerce_bool(
+                state.get("gpu_power_limit_enabled", env_values.get("GPU_POWER_LIMIT_ENABLED")),
+                settings.gpu_power_limit_enabled,
+            ),
+            "max_power_cap_watts": state.get(
+                "max_power_cap_watts",
+                env_values.get("MAX_POWER_CAP_WATTS") or None,
+            ),
+            "energy_price_kwh": state.get("energy_price_kwh", env_values.get("ENERGY_PRICE_KWH") or None),
+            "policy_summary": ", ".join(policy_parts),
+            "updated_at": state.get("updated_at"),
+            "last_observed_at": signals.get("last_observed_at") if isinstance(signals, dict) else None,
+        }
+
+    def configure_heat_governor(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.ensure_dirs()
+        self.guided_installer.ensure_data_dirs()
+        mode = normalize_heat_governor_mode(payload.get("mode"))
+        updates: dict[str, Any] = {"mode": mode}
+        for key in ("room_temp_c", "target_temp_c", "outside_temp_c", "gpu_temp_limit_c"):
+            if key in payload:
+                updates[key] = coerce_float(payload.get(key))
+        if "owner_objective" in payload:
+            updates["owner_objective"] = normalize_owner_objective(payload.get("owner_objective"))
+        for key in ("quiet_hours_start_local", "quiet_hours_end_local"):
+            if key in payload:
+                updates[key] = normalize_local_clock(payload.get(key))
+        if "gpu_power_limit_enabled" in payload:
+            updates["gpu_power_limit_enabled"] = bool(payload.get("gpu_power_limit_enabled"))
+        if "max_power_cap_watts" in payload:
+            max_power_cap = coerce_float(payload.get("max_power_cap_watts"))
+            updates["max_power_cap_watts"] = None if max_power_cap is None or max_power_cap <= 0 else int(round(max_power_cap))
+        if "energy_price_kwh" in payload:
+            updates["energy_price_kwh"] = coerce_float(payload.get("energy_price_kwh"))
+        state = write_heat_governor_state(self.heat_governor_state_path, updates)
+
+        env_values = self.guided_installer.effective_runtime_env()
+        if not env_values:
+            env_values = self.guided_installer.build_env({"setup_mode": "quickstart"})
+        env_values["HEAT_GOVERNOR_STATE_PATH"] = self.guided_installer.runtime_heat_governor_state_env_path(
+            self.runtime_backend
+        )
+        env_values["HEAT_GOVERNOR_MODE"] = mode
+        env_values["ROOM_TEMP_C"] = optional_env_value(state.get("room_temp_c"))
+        env_values["TARGET_TEMP_C"] = optional_env_value(state.get("target_temp_c"))
+        env_values["OUTSIDE_TEMP_C"] = optional_env_value(state.get("outside_temp_c"))
+        env_values["OWNER_OBJECTIVE"] = str(state.get("owner_objective") or "balanced")
+        env_values["QUIET_HOURS_START_LOCAL"] = str(state.get("quiet_hours_start_local") or "")
+        env_values["QUIET_HOURS_END_LOCAL"] = str(state.get("quiet_hours_end_local") or "")
+        env_values["GPU_TEMP_LIMIT_C"] = optional_env_value(state.get("gpu_temp_limit_c"))
+        env_values["GPU_POWER_LIMIT_ENABLED"] = stringify_bool(
+            bool(state.get("gpu_power_limit_enabled", True))
+        )
+        env_values["MAX_POWER_CAP_WATTS"] = optional_env_value(state.get("max_power_cap_watts"))
+        env_values["ENERGY_PRICE_KWH"] = optional_env_value(state.get("energy_price_kwh"))
+        self.guided_installer.write_runtime_settings(env_values)
+        self.guided_installer.write_runtime_env(env_values)
+        self.log(f"Heat governor set to {mode}.")
+        return self.status_payload()
 
     def startup_health_payload(
         self,
@@ -930,6 +2037,7 @@ class NodeRuntimeService:
 
     def runtime_health_snapshot(self, *, installer_snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
         installer_snapshot = installer_snapshot or self.guided_installer.status_payload()
+        installer_snapshot = self.apply_fault_overrides_to_installer_snapshot(installer_snapshot)
         preflight = installer_snapshot["preflight"]
         installer_state = installer_snapshot["state"]
         runtime = self.runtime_status(preflight=preflight, installer_state=installer_state)
@@ -1147,6 +2255,691 @@ class NodeRuntimeService:
             ),
         }
 
+    def local_doctor_warm_readiness(
+        self,
+        *,
+        installer_snapshot: dict[str, Any],
+        health: dict[str, Any],
+    ) -> dict[str, Any]:
+        env_values = self.runtime_env_values()
+        if not env_values:
+            env_values = self.guided_installer.build_env({"setup_mode": "quickstart"})
+        runtime = health.get("runtime") if isinstance(health.get("runtime"), dict) else {}
+        installer_state = (
+            installer_snapshot.get("state")
+            if isinstance(installer_snapshot.get("state"), dict)
+            else {}
+        )
+        stage_context = (
+            installer_state.get("stage_context")
+            if isinstance(installer_state.get("stage_context"), dict)
+            else {}
+        )
+        current_model = str(
+            runtime.get("current_model")
+            or env_values.get("VLLM_MODEL")
+            or ""
+        ).strip()
+        owner_target_model = str(env_values.get("OWNER_TARGET_MODEL") or "").strip()
+        diagnostics = self.guided_installer.startup_model_warmup_diagnostics(
+            env_values,
+            model=current_model or None,
+        )
+        runtime_label = str(diagnostics.get("runtime_label") or runtime.get("inference_engine_label") or "local inference runtime")
+        current_stage = str(installer_state.get("stage") or "").strip()
+        warm_failure_detail = str(stage_context.get("warm_failure_detail") or "").strip()
+        warm_failure_kind = str(stage_context.get("warm_failure_kind") or "").strip()
+        warm_excerpt = str(stage_context.get("warm_runtime_log_excerpt") or "").strip()
+        current_failure = self.self_heal_state.model_warm_last_error.get(owner_target_model or current_model or "")
+        hold_message = self.model_warm_retry_hold(owner_target_model or current_model or None)
+
+        if diagnostics.get("error"):
+            detail = str(diagnostics.get("error"))
+            return {
+                "status": "fail",
+                "summary": "This machine cannot warm the configured startup model with the current local runtime tuple.",
+                "detail": detail,
+                "tone": "danger",
+                "recommended_fix": self.local_doctor_issue_fix(
+                    code=str(diagnostics.get("error_kind") or "warmup_preflight"),
+                    label="Adjust the startup model",
+                    detail=detail,
+                    source="warmup_preflight",
+                ),
+            }
+        if warm_failure_kind and warm_failure_detail:
+            detail = warm_failure_detail
+            if warm_excerpt:
+                detail = f"{detail} Recent runtime logs: {warm_excerpt}"
+            return {
+                "status": "fail",
+                "summary": "The most recent model warm-up failed on this machine.",
+                "detail": detail,
+                "tone": "danger",
+                "recommended_fix": self.local_doctor_issue_fix(
+                    code=warm_failure_kind,
+                    label="Retry the warm-up on a safer tuple",
+                    detail=detail,
+                    source="warmup_runtime_logs",
+                ),
+            }
+        if current_stage in {"downloading_model", "warming_model"} and bool(installer_state.get("busy")):
+            return {
+                "status": "warn",
+                "summary": "Quick Start is still preparing the startup model.",
+                "detail": str(installer_state.get("message") or f"{current_model or 'The startup model'} is still warming."),
+                "tone": "warning",
+                "recommended_fix": self.local_doctor_issue_fix(
+                    code="wait_for_warmup",
+                    label="Wait for the current warm-up",
+                    detail="Quick Start is already filling cache or warming the model. Let it finish, then run Local Doctor again if the runtime still looks stuck.",
+                    source="installer_stage",
+                ),
+            }
+        if hold_message:
+            detail = hold_message
+            if current_failure:
+                detail = f"{detail} Latest error: {current_failure}"
+            return {
+                "status": "warn",
+                "summary": "The larger owner target model is paused while the bootstrap model keeps serving.",
+                "detail": detail,
+                "tone": "warning",
+                "recommended_fix": self.local_doctor_issue_fix(
+                    code="owner_target_retry_hold",
+                    label="Keep serving on the bootstrap model for now",
+                    detail=detail,
+                    source="owner_target_warm_hold",
+                ),
+            }
+        if owner_target_model and current_model and owner_target_model != current_model:
+            return {
+                "status": "warn",
+                "summary": "The bootstrap model is serving while the owner target model warms in the background.",
+                "detail": (
+                    f"{current_model} is ready now. {owner_target_model} will switch in after its background warm-up finishes."
+                ),
+                "tone": "warning",
+                "recommended_fix": self.local_doctor_issue_fix(
+                    code="bootstrap_target_warming",
+                    label="No immediate fix needed",
+                    detail="The node is already serving safely on the bootstrap model while it prepares the larger owner target in the background.",
+                    source="background_warmup",
+                ),
+            }
+        if bool(runtime.get("inference_ready")):
+            return {
+                "status": "pass",
+                "summary": f"{current_model or 'The startup model'} is warm and ready for local inference.",
+                "detail": f"{runtime_label} answered readiness checks successfully on this machine.",
+                "tone": "success",
+                "recommended_fix": self.local_doctor_issue_fix(
+                    code="none",
+                    label="No fix needed",
+                    detail="The startup model is warm and ready locally.",
+                    source="warm_readiness",
+                ),
+            }
+        return {
+            "status": "fail",
+            "summary": "The local runtime is not warm enough to serve inference yet.",
+            "detail": str(
+                health.get("issue_detail")
+                or runtime.get("message")
+                or "The local inference runtime is not responding yet."
+            ),
+            "tone": "danger",
+            "recommended_fix": self.local_doctor_issue_fix(
+                code="repair_runtime",
+                label="Run prerequisite-healing",
+                detail="The runtime did not pass the warm-readiness check. Use Fix machine once, then run Local Doctor again.",
+                source="warm_readiness",
+                automated=True,
+            ),
+        }
+
+    def probe_local_inference(self, runtime: dict[str, Any]) -> dict[str, Any]:
+        current_model = str(runtime.get("current_model") or self.runtime_env_values().get("VLLM_MODEL") or "").strip()
+        supported_apis = [
+            str(api).strip()
+            for api in runtime.get("supported_apis", [])
+            if str(api).strip()
+        ]
+        if runtime.get("stage") != "running" or not bool(runtime.get("inference_ready")):
+            return {
+                "status": "fail",
+                "summary": "A tiny local inference could not run because the runtime is not ready yet.",
+                "detail": str(runtime.get("message") or "Start the runtime and wait for the model to finish warming."),
+                "tone": "danger",
+                "attempted": False,
+                "recommended_fix": self.local_doctor_issue_fix(
+                    code="repair_runtime",
+                    label="Run prerequisite-healing",
+                    detail="The local runtime is not ready enough to accept a tiny test request yet.",
+                    source="inference_probe",
+                    automated=True,
+                ),
+            }
+
+        base_url = f"http://{service_access_host()}:8000"
+        timeout = 10.0
+        try:
+            if "responses" in supported_apis:
+                response = httpx.post(
+                    f"{base_url}/v1/chat/completions",
+                    json={
+                        "model": current_model,
+                        "messages": [{"role": "user", "content": "Reply with the single word OK."}],
+                        "max_tokens": 8,
+                        "temperature": 0,
+                    },
+                    timeout=timeout,
+                )
+                response.raise_for_status()
+                payload = response.json()
+                output_text = ""
+                choices = payload.get("choices")
+                if isinstance(choices, list) and choices:
+                    message = choices[0].get("message") if isinstance(choices[0], dict) else None
+                    if isinstance(message, dict):
+                        output_text = str(message.get("content") or "").strip()
+                detail = (
+                    f"The local responses path answered on {current_model or 'the startup model'}."
+                    + (f" Sample reply: {output_text}" if output_text else "")
+                )
+                return {
+                    "status": "pass",
+                    "summary": "A tiny local responses probe completed successfully.",
+                    "detail": detail,
+                    "tone": "success",
+                    "attempted": True,
+                    "api": "responses",
+                    "path": "/v1/chat/completions",
+                }
+            if "embeddings" in supported_apis:
+                response = httpx.post(
+                    f"{base_url}/v1/embeddings",
+                    json={
+                        "model": current_model,
+                        "input": "local doctor probe",
+                    },
+                    timeout=timeout,
+                )
+                response.raise_for_status()
+                payload = response.json()
+                embedding_count = len(payload.get("data", [])) if isinstance(payload.get("data"), list) else 0
+                return {
+                    "status": "pass",
+                    "summary": "A tiny local embeddings probe completed successfully.",
+                    "detail": (
+                        f"The local embeddings path answered on {current_model or 'the startup model'} "
+                        f"with {embedding_count} embedding result{'s' if embedding_count != 1 else ''}."
+                    ),
+                    "tone": "success",
+                    "attempted": True,
+                    "api": "embeddings",
+                    "path": "/v1/embeddings",
+                }
+        except (ValueError, httpx.HTTPError) as error:
+            return {
+                "status": "fail",
+                "summary": "The tiny local inference probe failed.",
+                "detail": f"The runtime passed readiness, but the test request did not complete cleanly: {error}",
+                "tone": "danger",
+                "attempted": True,
+                "recommended_fix": self.local_doctor_issue_fix(
+                    code="repair_runtime",
+                    label="Run prerequisite-healing",
+                    detail="The runtime answered readiness but did not pass a tiny local inference. Restart the local runtime once, then run Local Doctor again.",
+                    source="inference_probe",
+                    automated=True,
+                ),
+            }
+
+        return {
+            "status": "fail",
+            "summary": "The local runtime does not advertise a supported inference API for Local Doctor yet.",
+            "detail": "This machine did not expose either the responses or embeddings API required for the tiny local probe.",
+            "tone": "danger",
+            "attempted": False,
+            "recommended_fix": self.local_doctor_issue_fix(
+                code="unsupported_local_probe",
+                label="Check the runtime profile",
+                detail="Switch this machine to a supported runtime profile that exposes either responses or embeddings locally.",
+                source="inference_probe",
+            ),
+        }
+
+    def verify_runtime_canary(self, *, context: str) -> dict[str, Any]:
+        runtime = self.runtime_status()
+        probe = self.probe_local_inference(runtime)
+        if str(probe.get("status") or "").strip().lower() == "pass":
+            return probe
+        summary = str(probe.get("summary") or "The local inference canary failed.")
+        detail = str(probe.get("detail") or "").strip()
+        if detail:
+            raise RuntimeError(f"{context}: {summary} {detail}".strip())
+        raise RuntimeError(f"{context}: {summary}".strip())
+
+    def rollback_update_to_known_good_runtime_state(
+        self,
+        *,
+        failure_reason: str,
+        previous_release_content: str | None,
+        previous_runtime_tuple: dict[str, str] | None,
+    ) -> tuple[bool, str]:
+        target_release = self.self_heal_state.last_known_good_release_env
+        target_runtime_tuple = self.self_heal_state.last_known_good_runtime_env or previous_runtime_tuple
+        rollback_id = request_id()
+        release_detail = (
+            f"signed release {target_release.get(RELEASE_ENV_VERSION_KEY) or 'unknown'}"
+            if isinstance(target_release, dict) and target_release
+            else "the previous signed release"
+        )
+        tuple_detail = (
+            str(target_runtime_tuple.get("VLLM_MODEL") or "the last known healthy startup model")
+            if isinstance(target_runtime_tuple, dict) and target_runtime_tuple
+            else "the current local runtime plan"
+        )
+        self.log(
+            f"[request {rollback_id}] Rolling back update canary failure to {release_detail} "
+            f"and {tuple_detail} after: {failure_reason}"
+        )
+        try:
+            if target_runtime_tuple:
+                self.apply_runtime_tuple_snapshot(target_runtime_tuple)
+            if target_release:
+                self.write_release_env(target_release)
+            else:
+                self.restore_release_env(previous_release_content)
+            self.start_runtime_services(recreate=True)
+            self.wait_for_runtime_health()
+            self.verify_runtime_canary(context="Rollback canary")
+        except Exception as error:
+            self.log(
+                f"[request {rollback_id}] Automatic rollback after the failed update canary did not recover cleanly: {error}"
+            )
+            return False, str(error) or "Automatic rollback failed."
+
+        message = (
+            "The update canary failed, so the node rolled back automatically to the last known healthy "
+            "release/runtime tuple."
+        )
+        self.update_self_heal_state(
+            status="healthy",
+            last_result=message,
+            last_error=None,
+            last_issue=failure_reason,
+            last_action="rollback_bad_update",
+            last_repaired_at=now_iso(),
+            fix_available=False,
+        )
+        self.remember_known_good_runtime_state()
+        return True, message
+
+    def choose_local_doctor_fix(
+        self,
+        *,
+        health: dict[str, Any],
+        grouped_checks: list[dict[str, Any]],
+        warm_readiness: dict[str, Any],
+        inference_probe: dict[str, Any],
+    ) -> dict[str, Any]:
+        prerequisite_action = (
+            health.get("prerequisite_action")
+            if isinstance(health.get("prerequisite_action"), dict)
+            else None
+        )
+        if prerequisite_action:
+            return self.local_doctor_issue_fix(
+                code=str(prerequisite_action.get("code") or "repair_runtime"),
+                label=str(prerequisite_action.get("label") or health.get("issue_action_label") or "Fix machine"),
+                detail=str(prerequisite_action.get("detail") or health.get("issue_detail") or "Use Fix machine once."),
+                source="prerequisite_action",
+                automated=True,
+            )
+
+        if health.get("issue_code"):
+            label = str(health.get("issue_action_label") or "Run prerequisite-healing")
+            if label == "Fix it" and bool(health.get("automatic_fix_available")):
+                label = "Run prerequisite-healing"
+            return self.local_doctor_issue_fix(
+                code=str(health.get("issue_code") or "repair_runtime"),
+                label=label,
+                detail=str(health.get("issue_detail") or "The local runtime needs attention before it can serve reliably."),
+                source="runtime_health",
+                automated=bool(health.get("automatic_fix_available")),
+            )
+
+        for check in grouped_checks:
+            if self.local_doctor_status_rank(check.get("status")) > 0 and self.local_doctor_fix_is_actionable(
+                None,
+                str(check.get("fix") or check.get("detail") or ""),
+            ):
+                label = {
+                    "docker": "Fix Docker",
+                    "gpu": "Fix GPU runtime",
+                    "network": "Fix network reachability",
+                    "cache": "Make room for cache",
+                }.get(str(check.get("key") or ""), "Follow the recommended fix")
+                return self.local_doctor_issue_fix(
+                    code=str(check.get("key") or "setup_check"),
+                    label=label,
+                    detail=str(check.get("fix") or check.get("detail") or "Follow the setup guidance and run Local Doctor again."),
+                    source="setup_check",
+                )
+
+        for payload in (warm_readiness, inference_probe):
+            recommendation = (
+                payload.get("recommended_fix")
+                if isinstance(payload.get("recommended_fix"), dict)
+                else None
+            )
+            if recommendation and self.local_doctor_fix_is_actionable(
+                str(recommendation.get("label") or ""),
+                str(recommendation.get("detail") or ""),
+            ):
+                return recommendation
+
+        return self.local_doctor_issue_fix(
+            code="none",
+            label="No fix needed",
+            detail="Docker, GPU access, network reachability, warm readiness, and a tiny local inference all look healthy.",
+            source="local_doctor",
+        )
+
+    def _run_local_doctor_locked(
+        self,
+        *,
+        background: bool,
+        trigger: str,
+        attach_bundle_on_failure: bool,
+    ) -> dict[str, Any]:
+        env_values = self.runtime_env_values()
+        if not env_values:
+            env_values = self.guided_installer.build_env({"setup_mode": "quickstart"})
+        installer_snapshot = self.guided_installer.status_payload()
+        fresh_preflight = self.guided_installer.collect_preflight(
+            env_values=env_values,
+            force_refresh=True,
+        )
+        installer_snapshot["preflight"] = fresh_preflight
+        health = self.runtime_health_snapshot(installer_snapshot=installer_snapshot)
+        preflight = health.get("preflight") if isinstance(health.get("preflight"), dict) else fresh_preflight
+        setup_checks = self.local_doctor_setup_check_map(preflight)
+        grouped_checks = [
+            self.local_doctor_group_check(
+                setup_checks=setup_checks,
+                key="docker",
+                label="Docker",
+                member_keys=("docker",),
+                success_summary="Docker is ready for the local runtime.",
+                success_detail="Docker Desktop and its engine look healthy for this machine.",
+            ),
+            self.local_doctor_group_check(
+                setup_checks=setup_checks,
+                key="gpu",
+                label="GPU",
+                member_keys=("nvidia_driver", "cuda", "container_gpu"),
+                success_summary="The GPU stack is ready for local inference.",
+                success_detail="The NVIDIA driver, CUDA support, and container GPU access all look healthy.",
+            ),
+            self.local_doctor_group_check(
+                setup_checks=setup_checks,
+                key="network",
+                label="Network",
+                member_keys=("dns", "control_plane", "artifact_store"),
+                success_summary="DNS and control-plane reachability look healthy.",
+                success_detail="The machine resolved setup hostnames, reached the claim service, and can likely fetch signed artifacts.",
+            ),
+            self.local_doctor_group_check(
+                setup_checks=setup_checks,
+                key="cache",
+                label="Cache",
+                member_keys=("model_cache", "disk"),
+                success_summary="The local cache budget looks healthy for warm-ups.",
+                success_detail="Disk space and the local model cache budget look good for this machine.",
+            ),
+        ]
+        warm_readiness = self.local_doctor_warm_readiness(
+            installer_snapshot=installer_snapshot,
+            health=health,
+        )
+        inference_probe = self.probe_local_inference(
+            health.get("runtime") if isinstance(health.get("runtime"), dict) else {}
+        )
+
+        overall_rank = 0
+        for payload in grouped_checks + [warm_readiness, inference_probe]:
+            rank = self.local_doctor_status_rank(payload.get("status"))
+            recommendation = (
+                payload.get("recommended_fix")
+                if isinstance(payload.get("recommended_fix"), dict)
+                else {}
+            )
+            fix_label = str(recommendation.get("label") or payload.get("fix") or "")
+            fix_detail = str(recommendation.get("detail") or payload.get("detail") or "")
+            if rank == 1 and not self.local_doctor_fix_is_actionable(fix_label, fix_detail):
+                rank = 0
+            overall_rank = max(overall_rank, rank)
+
+        recommended_fix = self.choose_local_doctor_fix(
+            health=health,
+            grouped_checks=grouped_checks,
+            warm_readiness=warm_readiness,
+            inference_probe=inference_probe,
+        )
+
+        checked_at = now_iso()
+        headline = "Local Doctor found one thing to fix next"
+        detail = (
+            str(recommended_fix.get("detail") or "Follow the recommended fix, then run Local Doctor again.")
+            if overall_rank > 0
+            else "Docker, GPU access, network reachability, warm readiness, and a tiny local inference all look healthy."
+        )
+        status = "attention"
+        if overall_rank == 0:
+            status = "healthy"
+            headline = "Local Doctor passed"
+        elif overall_rank == 1:
+            status = "warning"
+            headline = "Local Doctor found a non-blocking warning"
+
+        state_updates: dict[str, Any] = {
+            "last_checked_at": checked_at,
+            "status": status,
+            "headline": headline,
+            "detail": detail,
+            "last_error": None if overall_rank < 2 else detail,
+            "checks": grouped_checks,
+            "warm_readiness": warm_readiness,
+            "inference_probe": inference_probe,
+            "recommended_fix": recommended_fix,
+            "attached_bundle_name": None,
+            "attached_bundle_created_at": None,
+            "last_check_mode": "background" if background else "manual",
+            "last_trigger": trigger,
+        }
+        if background:
+            current_bucket = self.local_doctor_status_bucket(status)
+            state_updates.update(
+                last_background_check_at=checked_at,
+                last_background_status=current_bucket,
+                last_transition_alert=self.local_doctor_transition_alert(
+                    previous_bucket=self.local_doctor_state.last_background_status,
+                    current_bucket=current_bucket,
+                    status=status,
+                    headline=headline,
+                    detail=detail,
+                    trigger=trigger,
+                    observed_at=checked_at,
+                ),
+            )
+        self.update_local_doctor_state(**state_updates)
+
+        if overall_rank >= 2 and attach_bundle_on_failure:
+            _bundle_path, bundle_name, generated_at = self.write_diagnostics_bundle()
+            self.diagnostics_state.last_result = (
+                f"Local Doctor attached {bundle_name} so support evidence stays ready on this machine."
+            )
+            self.save_state()
+            self.log(
+                "Local Doctor attached a diagnostics bundle automatically because the machine still needs attention."
+            )
+            self.update_local_doctor_state(
+                attached_bundle_name=bundle_name,
+                attached_bundle_created_at=generated_at,
+                detail=f"{detail} Attached diagnostics bundle: {bundle_name}.",
+                last_error=f"{detail} Attached diagnostics bundle: {bundle_name}.",
+            )
+
+        self.log(
+            f"Local Doctor completed with status: {status} "
+            f"({self.local_doctor_trigger_label(trigger)}, {'background' if background else 'manual'})."
+        )
+        return self.status_payload()
+
+    def run_local_doctor(
+        self,
+        *,
+        background: bool = False,
+        trigger: str = "manual",
+        attach_bundle_on_failure: bool = True,
+    ) -> dict[str, Any]:
+        if not self.local_doctor_lock.acquire(blocking=False):
+            if not background:
+                self.log("Local Doctor is already running for this machine.")
+            return self.status_payload()
+        try:
+            return self._run_local_doctor_locked(
+                background=background,
+                trigger=trigger,
+                attach_bundle_on_failure=attach_bundle_on_failure,
+            )
+        finally:
+            self.local_doctor_lock.release()
+
+    def apply_local_doctor_fix(self) -> dict[str, Any]:
+        if not self.local_doctor_lock.acquire(blocking=False):
+            self.log("Local Doctor fix is already running for this machine.")
+            return self.status_payload()
+        try:
+            if not self.local_doctor_state.last_checked_at:
+                self._run_local_doctor_locked(
+                    background=False,
+                    trigger="manual_precheck",
+                    attach_bundle_on_failure=True,
+                )
+
+            before_state = self.local_doctor_payload()
+            recommended_fix = (
+                before_state.get("recommended_fix")
+                if isinstance(before_state.get("recommended_fix"), dict)
+                else {}
+            )
+            fix_label = str(recommended_fix.get("label") or "Local Doctor")
+            before_status = str(before_state.get("status") or "standing_by")
+            before_headline = str(before_state.get("headline") or "Local Doctor is standing by")
+            before_detail = str(before_state.get("detail") or "")
+            before_bucket = self.local_doctor_status_bucket(before_status)
+
+            if not self.local_doctor_fix_is_actionable(
+                str(recommended_fix.get("label") or ""),
+                str(recommended_fix.get("detail") or ""),
+            ):
+                self.update_local_doctor_state(
+                    last_fix_attempt={
+                        "started_at": now_iso(),
+                        "completed_at": now_iso(),
+                        "applied_fix_code": str(recommended_fix.get("code") or "none"),
+                        "applied_fix_label": fix_label,
+                        "automated": False,
+                        "recovered": before_bucket == "healthy",
+                        "changed": False,
+                        "before_status": before_status,
+                        "before_headline": before_headline,
+                        "before_detail": before_detail,
+                        "after_status": before_status,
+                        "after_headline": before_headline,
+                        "after_detail": before_detail,
+                        "summary": "Local Doctor did not find anything to fix automatically.",
+                        "before_after": f"Before: {before_headline}. After: {before_headline}.",
+                    }
+                )
+                return self.status_payload()
+
+            if not bool(recommended_fix.get("automated")):
+                self.update_local_doctor_state(
+                    last_fix_attempt={
+                        "started_at": now_iso(),
+                        "completed_at": now_iso(),
+                        "applied_fix_code": str(recommended_fix.get("code") or "manual_fix"),
+                        "applied_fix_label": fix_label,
+                        "automated": False,
+                        "recovered": False,
+                        "changed": False,
+                        "before_status": before_status,
+                        "before_headline": before_headline,
+                        "before_detail": before_detail,
+                        "after_status": before_status,
+                        "after_headline": before_headline,
+                        "after_detail": before_detail,
+                        "summary": f"{fix_label} still needs owner action before the node can recover fully.",
+                        "before_after": f"Before: {before_headline}. After: {before_headline}.",
+                    }
+                )
+                return self.status_payload()
+
+            started_at = now_iso()
+            self.log(f"Local Doctor is applying the recommended fix: {fix_label}.")
+            self.repair_runtime(allow_quickstart_resume=False)
+            payload = self._run_local_doctor_locked(
+                background=False,
+                trigger="auto_fix_verify",
+                attach_bundle_on_failure=True,
+            )
+            after_state = payload.get("local_doctor") if isinstance(payload.get("local_doctor"), dict) else {}
+            after_status = str(after_state.get("status") or "standing_by")
+            after_headline = str(after_state.get("headline") or "Local Doctor finished the verification check")
+            after_detail = str(after_state.get("detail") or "")
+            after_bucket = self.local_doctor_status_bucket(after_status)
+            recovered = before_bucket == "issue" and after_bucket == "healthy"
+            changed = (
+                before_status != after_status
+                or before_headline != after_headline
+                or before_detail != after_detail
+            )
+            summary = (
+                f"Applied {fix_label} and Local Doctor passed on the automatic re-check."
+                if recovered
+                else f"Applied {fix_label} and re-checked the machine."
+            )
+            if not changed:
+                summary = f"Applied {fix_label}, but Local Doctor still sees the same issue."
+
+            self.update_local_doctor_state(
+                last_fix_attempt={
+                    "started_at": started_at,
+                    "completed_at": now_iso(),
+                    "applied_fix_code": str(recommended_fix.get("code") or "repair_runtime"),
+                    "applied_fix_label": fix_label,
+                    "automated": True,
+                    "recovered": recovered,
+                    "changed": changed,
+                    "before_status": before_status,
+                    "before_headline": before_headline,
+                    "before_detail": before_detail,
+                    "after_status": after_status,
+                    "after_headline": after_headline,
+                    "after_detail": after_detail,
+                    "summary": summary,
+                    "before_after": f"Before: {before_headline}. After: {after_headline}.",
+                }
+            )
+            return self.status_payload()
+        finally:
+            self.local_doctor_lock.release()
+
     def build_control_client(self) -> EdgeControlClient | Any | None:
         env_values = self.guided_installer.effective_runtime_env()
         if not env_values:
@@ -1231,6 +3024,89 @@ class NodeRuntimeService:
             "stale": False,
         }
 
+    def load_control_plane_connectivity_state(self) -> dict[str, Any]:
+        if not self.control_plane_state_path.exists():
+            return {}
+        try:
+            payload = json.loads(self.control_plane_state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def control_plane_connectivity_payload(self, *, remote: dict[str, Any] | None = None) -> dict[str, Any]:
+        remote = remote or self.remote_dashboard_snapshot()
+        remote_summary = remote.get("summary") if isinstance(remote.get("summary"), dict) else {}
+        remote_error = remote.get("last_error") if isinstance(remote.get("last_error"), str) else None
+        runtime_env = self.guided_installer.effective_runtime_env()
+        persisted_state = self.load_control_plane_connectivity_state()
+        status = str(persisted_state.get("status") or "").strip().lower()
+        if status not in {"healthy", "degraded", "offline"}:
+            if remote_error and remote_summary:
+                status = "degraded"
+            elif remote_error:
+                status = "offline"
+            else:
+                status = "healthy"
+        grace_deadline_at = (
+            str(persisted_state.get("grace_deadline_at")) if persisted_state.get("grace_deadline_at") else None
+        )
+        grace_deadline = parse_iso_timestamp(grace_deadline_at)
+        grace_active = bool(grace_deadline and datetime.now(timezone.utc) <= grace_deadline)
+        fallback_active = bool(
+            persisted_state.get("active_base_url")
+            and persisted_state.get("primary_base_url")
+            and persisted_state.get("active_base_url") != persisted_state.get("primary_base_url")
+        )
+        mirror_urls = csv_items(runtime_env.get("ARTIFACT_MIRROR_BASE_URLS"))
+        fallback_urls = csv_items(runtime_env.get("EDGE_CONTROL_FALLBACK_URLS"))
+        if status == "healthy":
+            value = "Healthy"
+            tone = "success"
+            detail = "The primary control-plane path is healthy and this node is syncing normally."
+        elif status == "degraded":
+            value = "Degraded mode"
+            tone = "warning"
+            detail = (
+                str(persisted_state.get("last_error") or remote_error or "").strip()
+                or "Control-plane reachability is intermittent, so the node is serving from its local reservoir and stretching retries."
+            )
+        elif grace_active:
+            value = "Offline grace"
+            tone = "warning"
+            detail = (
+                str(persisted_state.get("last_error") or remote_error or "").strip()
+                or "The control plane is temporarily unreachable, and this node is using its local grace window to keep serving staged work."
+            )
+        else:
+            value = "Offline"
+            tone = "danger"
+            detail = (
+                str(persisted_state.get("last_error") or remote_error or "").strip()
+                or "The control plane is unreachable and the local grace window has expired."
+            )
+        if fallback_active:
+            detail = (
+                f"{detail} Using {persisted_state.get('active_base_url')} as the temporary control-plane path."
+            )
+        elif fallback_urls and status != "healthy":
+            detail = f"{detail} Fallback control-plane hosts are configured for recovery."
+        if mirror_urls:
+            detail = f"{detail} Artifact mirrors are configured for warm paths."
+        return {
+            **persisted_state,
+            "status": status,
+            "value": value,
+            "detail": detail,
+            "tone": tone,
+            "grace_active": grace_active,
+            "grace_deadline_at": grace_deadline_at,
+            "fallback_active": fallback_active,
+            "fallback_urls": fallback_urls,
+            "artifact_mirror_urls": mirror_urls,
+            "remote_sync_error": remote_error,
+            "remote_sync_stale": bool(remote.get("stale")),
+        }
+
     def load_autopilot_state(self) -> dict[str, Any] | None:
         if not self.autopilot_state_path.exists():
             return None
@@ -1256,6 +3132,7 @@ class NodeRuntimeService:
                 "detail": "Autopilot starts tuning after this node completes real work.",
                 "signals": {},
                 "recommendation": None,
+                "recent_model_mix": {},
             }
         recommendation = state.get("recommendation") if isinstance(state.get("recommendation"), dict) else {}
         signals = state.get("signals") if isinstance(state.get("signals"), dict) else {}
@@ -1288,6 +3165,9 @@ class NodeRuntimeService:
             "detail": detail,
             "signals": signals,
             "recommendation": recommendation,
+            "recent_model_mix": (
+                state.get("recent_model_mix") if isinstance(state.get("recent_model_mix"), dict) else {}
+            ),
             "updated_at": state.get("updated_at"),
             "history": state.get("history") if isinstance(state.get("history"), list) else [],
         }
@@ -1359,6 +3239,160 @@ class NodeRuntimeService:
 
         return sorted(entries, key=lambda entry: entry[1], reverse=True)
 
+    def recent_assignment_mix(self, autopilot: dict[str, Any]) -> list[tuple[str, float]]:
+        mix_payload = autopilot.get("recent_model_mix") if isinstance(autopilot.get("recent_model_mix"), dict) else {}
+        entries: list[tuple[str, float]] = []
+        for model, raw_score in mix_payload.items():
+            if not isinstance(model, str) or not model.strip():
+                continue
+            try:
+                score = float(raw_score)
+            except (TypeError, ValueError):
+                continue
+            if score <= 0:
+                continue
+            entries.append((model.strip(), score))
+        return sorted(entries, key=lambda entry: entry[1], reverse=True)
+
+    def cache_budget_payload(
+        self,
+        *,
+        cache_bytes: int | None = None,
+        env_values: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        runtime_env = env_values or self.guided_installer.effective_runtime_env()
+        cache_total_bytes = (
+            max(0, int(cache_bytes))
+            if cache_bytes is not None
+            else directory_size_bytes(self.data_dir / "model-cache")
+        )
+        disk = detect_disk(self.runtime_dir)
+        return resolve_model_cache_budget(
+            total_bytes=disk.get("total_bytes"),
+            free_bytes=disk.get("free_bytes"),
+            cache_bytes=cache_total_bytes,
+            configured_budget_gb=(runtime_env or {}).get("MODEL_CACHE_BUDGET_GB"),
+            configured_reserve_free_gb=(runtime_env or {}).get("MODEL_CACHE_RESERVE_FREE_GB"),
+        )
+
+    def should_keep_hot_models_warm(
+        self,
+        *,
+        config: dict[str, Any],
+        remote_summary: dict[str, Any],
+        remote_node: dict[str, Any],
+        autopilot: dict[str, Any],
+    ) -> bool:
+        heat_mode = normalize_heat_governor_mode(config.get("heat_governor_mode"))
+        if heat_mode in {"0", "0%", "off"}:
+            return False
+
+        target_pct = coerce_nonnegative_int(config.get("target_gpu_utilization_pct"))
+        heat_demand = str(config.get("heat_demand") or "").strip().lower()
+        outside_temp_c = coerce_float(config.get("outside_temp_c"))
+        room_temp_c = coerce_float(config.get("room_temp_c"))
+        target_temp_c = coerce_float(config.get("target_temp_c"))
+        queue_depth = coerce_nonnegative_int(remote_node.get("queue_depth"))
+        active_assignments = coerce_nonnegative_int(remote_node.get("active_assignments"))
+        earnings = remote_summary.get("earnings") if isinstance(remote_summary.get("earnings"), dict) else {}
+
+        earnings_signal = False
+        for key in ("today_usd", "last_24h_usd", "current_hour_usd"):
+            value = earnings.get(key)
+            if isinstance(value, (int, float)) and float(value) > 0:
+                earnings_signal = True
+                break
+
+        recent_mix_active = bool(self.recent_assignment_mix(autopilot))
+        weather_supports_heat = (
+            (outside_temp_c is not None and outside_temp_c <= 15.0)
+            or (
+                room_temp_c is not None
+                and target_temp_c is not None
+                and room_temp_c < (target_temp_c - 0.3)
+            )
+        )
+        owner_wants_heat = target_pct >= 50 or heat_demand in {"medium", "high"}
+        return owner_wants_heat and (
+            weather_supports_heat
+            or earnings_signal
+            or queue_depth > 0
+            or active_assignments > 0
+            or recent_mix_active
+        )
+
+    def ranked_hot_models(
+        self,
+        *,
+        config: dict[str, Any],
+        remote_summary: dict[str, Any],
+        remote_node: dict[str, Any],
+        autopilot: dict[str, Any],
+    ) -> list[str]:
+        supported_models = self.supported_models_from_config(config)
+        scores: dict[str, float] = {}
+
+        def add(model: str | None, score: float) -> None:
+            if not isinstance(model, str):
+                return
+            candidate = model.strip()
+            if not candidate:
+                return
+            if supported_models and candidate not in supported_models:
+                return
+            scores[candidate] = scores.get(candidate, 0.0) + max(0.0, float(score))
+
+        for demand in (
+            remote_summary.get("model_demand"),
+            remote_node.get("model_demand"),
+            (remote_node.get("runtime") or {}).get("model_demand")
+            if isinstance(remote_node.get("runtime"), dict)
+            else None,
+        ):
+            for model, score in self.ranked_demand_models(demand):
+                add(model, score)
+
+        for model, score in self.recent_assignment_mix(autopilot):
+            add(model, score * 25.0)
+
+        owner_target_model = str(config.get("owner_target_model") or "").strip()
+        if owner_target_model and self.should_keep_hot_models_warm(
+            config=config,
+            remote_summary=remote_summary,
+            remote_node=remote_node,
+            autopilot=autopilot,
+        ):
+            add(owner_target_model, 60.0)
+
+        return [
+            model
+            for model, _score in sorted(scores.items(), key=lambda entry: entry[1], reverse=True)[:MODEL_CACHE_HOT_MODEL_LIMIT]
+        ]
+
+    def protected_model_set(
+        self,
+        *,
+        current_model: str | None,
+        likely_model: str | None,
+        config: dict[str, Any],
+        hot_models: list[str],
+        keep_hot_models_warm: bool,
+    ) -> set[str]:
+        protected_models = {model for model in (current_model, likely_model) if model}
+        for runtime_env in (
+            self.self_heal_state.last_known_good_bootstrap_runtime_env or {},
+            self.self_heal_state.last_known_good_runtime_env or {},
+        ):
+            bootstrap_model = str(runtime_env.get("VLLM_MODEL") or "").strip()
+            if bootstrap_model:
+                protected_models.add(bootstrap_model)
+        if keep_hot_models_warm:
+            protected_models.update(model for model in hot_models if model)
+            owner_target_model = str(config.get("owner_target_model") or "").strip()
+            if owner_target_model:
+                protected_models.add(owner_target_model)
+        return protected_models
+
     def select_likely_model(
         self,
         *,
@@ -1396,6 +3430,27 @@ class NodeRuntimeService:
         owner_target_model = supported(str(config.get("owner_target_model") or "").strip())
         current_runtime_model = str(runtime.get("current_model") or "").strip()
         current_config_model = str(config.get("vllm_model") or "").strip()
+        keep_hot_models_warm = self.should_keep_hot_models_warm(
+            config=config,
+            remote_summary=remote_summary,
+            remote_node=remote_node,
+            autopilot=autopilot,
+        )
+        if owner_target_model and keep_hot_models_warm and owner_target_model not in {current_runtime_model, current_config_model}:
+            hot_models = self.ranked_hot_models(
+                config=config,
+                remote_summary=remote_summary,
+                remote_node=remote_node,
+                autopilot=autopilot,
+            )
+            if owner_target_model in hot_models:
+                return owner_target_model, "owner_target_heat"
+
+        for model, _score in self.recent_assignment_mix(autopilot):
+            candidate = supported(model)
+            if candidate and candidate not in {current_runtime_model, current_config_model}:
+                return candidate, "recent_assignment_mix"
+
         if owner_target_model and owner_target_model not in {current_runtime_model, current_config_model}:
             return owner_target_model, "bootstrap_target"
 
@@ -1455,6 +3510,8 @@ class NodeRuntimeService:
     ) -> dict[str, Any]:
         cache_dir = self.data_dir / "model-cache"
         cache_bytes = directory_size_bytes(cache_dir)
+        runtime_env = self.guided_installer.effective_runtime_env()
+        budget = self.cache_budget_payload(cache_bytes=cache_bytes, env_values=runtime_env)
         likely_model, likely_source = self.select_likely_model(
             runtime=runtime,
             config=config,
@@ -1463,6 +3520,27 @@ class NodeRuntimeService:
             autopilot=autopilot,
         )
         current_model = str(runtime.get("current_model") or config.get("vllm_model") or "").strip() or None
+        keep_hot_models_warm = self.should_keep_hot_models_warm(
+            config=config,
+            remote_summary=remote_summary,
+            remote_node=remote_node,
+            autopilot=autopilot,
+        )
+        hot_models = self.ranked_hot_models(
+            config=config,
+            remote_summary=remote_summary,
+            remote_node=remote_node,
+            autopilot=autopilot,
+        )
+        pinned_models = sorted(
+            self.protected_model_set(
+                current_model=current_model,
+                likely_model=likely_model,
+                config=config,
+                hot_models=hot_models,
+                keep_hot_models_warm=keep_hot_models_warm,
+            )
+        )
         likely_cache_bytes = self.model_cache_bytes_for_model(likely_model)
         runtime_engine = str(
             runtime.get("inference_engine")
@@ -1485,8 +3563,13 @@ class NodeRuntimeService:
             reuse_percent = max(0, min(100, int((likely_cache_bytes / expected_bytes) * 100)))
 
         self.model_cache_state.cache_bytes = cache_bytes
+        self.model_cache_state.cache_budget_bytes = int(budget.get("budget_bytes") or 0)
+        self.model_cache_state.reserve_free_bytes = int(budget.get("reserve_free_bytes") or 0)
+        self.model_cache_state.cache_budget_source = str(budget.get("budget_source") or "derived")
         self.model_cache_state.likely_model = likely_model
         self.model_cache_state.likely_model_source = likely_source
+        self.model_cache_state.hot_models = hot_models
+        self.model_cache_state.pinned_models = pinned_models
 
         if not likely_model:
             value = "Checking cache"
@@ -1539,6 +3622,18 @@ class NodeRuntimeService:
             )
             tone = "warning"
 
+        budget_copy = (
+            f" Cache budget: {budget.get('budget_label')} with {budget.get('reserve_free_label')} kept free."
+        )
+        if budget.get("over_budget_bytes"):
+            budget_copy += (
+                f" Cached models are over budget by {format_bytes(int(budget['over_budget_bytes']))}, "
+                "so cold cache eviction will stay active."
+            )
+        elif budget.get("available_growth_bytes") is not None:
+            budget_copy += f" About {budget.get('available_growth_label')} is free for the next warm-up."
+        detail = f"{detail}{budget_copy}"
+
         return {
             "enabled": self.model_cache_state.enabled,
             "value": value,
@@ -1555,6 +3650,17 @@ class NodeRuntimeService:
             "expected_bytes": expected_bytes,
             "expected_label": format_bytes(expected_bytes),
             "reuse_percent": reuse_percent,
+            "cache_budget_bytes": budget.get("budget_bytes"),
+            "cache_budget_label": budget.get("budget_label"),
+            "cache_budget_source": budget.get("budget_source"),
+            "cache_reserve_free_bytes": budget.get("reserve_free_bytes"),
+            "cache_reserve_free_label": budget.get("reserve_free_label"),
+            "cache_available_growth_bytes": budget.get("available_growth_bytes"),
+            "cache_available_growth_label": budget.get("available_growth_label"),
+            "cache_budget_tier": budget.get("tier"),
+            "keep_hot_models_warm": keep_hot_models_warm,
+            "hot_models": hot_models,
+            "pinned_models": pinned_models,
             "last_checked_at": self.model_cache_state.last_checked_at,
             "last_warmed_model": self.model_cache_state.last_warmed_model,
             "last_warmed_at": self.model_cache_state.last_warmed_at,
@@ -1572,22 +3678,97 @@ class NodeRuntimeService:
         except (OSError, ValueError):
             return False
 
+    def ensure_model_cache_capacity(
+        self,
+        *,
+        target_model: str | None,
+        required_growth_bytes: int,
+        protected_models: set[str],
+        hot_models: list[str],
+        budget: dict[str, Any],
+    ) -> tuple[bool, list[tuple[str, int]], str | None]:
+        if not self.model_cache_state.enabled:
+            return False, [], "Model cache management is disabled."
+
+        current_cache_bytes = directory_size_bytes(self.data_dir / "model-cache")
+        current_free_bytes = max(0, int(budget.get("free_bytes") or 0))
+        budget_bytes = max(0, int(budget.get("budget_bytes") or 0))
+        reserve_free_bytes = max(0, int(budget.get("reserve_free_bytes") or 0))
+        required_relief_bytes = max(
+            0,
+            int(required_growth_bytes),
+            current_cache_bytes - budget_bytes,
+            reserve_free_bytes - current_free_bytes,
+        )
+        if required_relief_bytes <= 0:
+            return True, [], None
+
+        evictions: list[tuple[str, int]] = []
+        current_time = datetime.now(timezone.utc)
+        while required_relief_bytes > 0:
+            evicted_model, evicted_bytes = self.evict_cold_model_cache(
+                protected_models=protected_models,
+                cache_pressure=True,
+                now=current_time,
+                hot_models=set(hot_models),
+            )
+            if not evicted_model or evicted_bytes <= 0:
+                break
+            evictions.append((evicted_model, evicted_bytes))
+            current_cache_bytes = max(0, current_cache_bytes - evicted_bytes)
+            current_free_bytes += evicted_bytes
+            required_relief_bytes = max(
+                0,
+                int(required_growth_bytes) - min(
+                    max(0, budget_bytes - current_cache_bytes),
+                    max(0, current_free_bytes - reserve_free_bytes),
+                ),
+                current_cache_bytes - budget_bytes,
+                reserve_free_bytes - current_free_bytes,
+            )
+
+        if required_relief_bytes <= 0:
+            return True, evictions, None
+
+        target_label = target_model or "the next model"
+        message = (
+            f"{target_label} needs about {format_bytes(required_growth_bytes)} of additional cache space, but this node keeps "
+            f"{budget.get('reserve_free_label')} free and caps the model cache at {budget.get('budget_label')}."
+        )
+        if evictions:
+            message += " Cold cache was already evicted, but there still is not enough budget left for another warm-up."
+        return False, evictions, message
+
     def evict_cold_model_cache(
         self,
         *,
         protected_models: set[str],
         cache_pressure: bool,
         now: datetime | None = None,
+        hot_models: set[str] | None = None,
     ) -> tuple[str | None, int]:
         if not cache_pressure or not self.model_cache_state.enabled:
             return None, 0
         current_time = now or datetime.now(timezone.utc)
+        candidates: list[tuple[int, int, int, str]] = []
+        hot = hot_models or set()
         for model in sorted(self.cached_model_names()):
-            if model in protected_models:
+            if model in protected_models or model in hot:
                 continue
             last_used = parse_iso_timestamp(self.model_cache_state.last_used_by_model.get(model))
-            if last_used and (current_time - last_used).total_seconds() < MODEL_CACHE_COLD_SECONDS:
-                continue
+            age_seconds = int((current_time - last_used).total_seconds()) if last_used else MODEL_CACHE_COLD_SECONDS * 4
+            if age_seconds >= MODEL_CACHE_COLD_SECONDS:
+                age_rank = 0
+            elif age_seconds >= 24 * 60 * 60:
+                age_rank = 1
+            elif age_seconds >= MODEL_CACHE_RECENT_SECONDS:
+                age_rank = 2
+            else:
+                age_rank = 3
+            size_bytes = self.model_cache_bytes_for_model(model)
+            candidates.append((age_rank, -size_bytes, age_seconds, model))
+
+        for _age_rank, _negative_size, _age_seconds, model in sorted(candidates):
             evicted_bytes = 0
             for path in self.model_cache_paths(model):
                 if not path.exists() or not self.safe_model_cache_path(path):
@@ -1605,6 +3786,9 @@ class NodeRuntimeService:
         *,
         source: str = "control_plane_demand",
     ) -> tuple[bool, str]:
+        retry_hold = self.model_warm_retry_hold(likely_model)
+        if retry_hold:
+            return False, retry_hold
         env_values = self.guided_installer.effective_runtime_env()
         if not env_values:
             return False, "Model cache management is waiting for local runtime settings."
@@ -1632,6 +3816,11 @@ class NodeRuntimeService:
             owner_target_supported_models
             if owner_target_model and owner_target_model == likely_model and owner_target_supported_models
             else ",".join(runtime_profile.supported_models)
+        )
+        desired_supported_models = constrain_supported_models_for_runtime_profile(
+            desired_supported_models,
+            runtime_profile=runtime_profile,
+            preferred_model=likely_model,
         )
         selected_model, selected_supported_models, _fallback = resolve_accessible_startup_selection(
             likely_model,
@@ -1661,7 +3850,7 @@ class NodeRuntimeService:
                 )
             self.start_runtime_services(recreate=True)
             self.wait_for_runtime_health(timeout_seconds=240.0)
-        except Exception:
+        except Exception as error:
             self.guided_installer.write_runtime_settings(previous_env)
             self.guided_installer.write_runtime_env(previous_env)
             rollback_prefix = "Background owner-model warm-up" if source == "bootstrap_target" else "Demand-aware pre-warm"
@@ -1672,14 +3861,23 @@ class NodeRuntimeService:
             try:
                 self.start_runtime_services(recreate=True)
                 self.wait_for_runtime_health(timeout_seconds=90.0)
+                self.remember_known_good_runtime_state()
             except Exception as rollback_error:
                 self.log(f"Rollback after automatic model pre-warm also needs attention: {rollback_error}")
+            failure_count, cooldown_until = self.record_model_warm_failure(likely_model, error)
+            if source == "bootstrap_target" and cooldown_until is not None:
+                raise RuntimeError(
+                    f"{likely_model} failed to warm {failure_count} times in a row, so self-healing rolled back to the "
+                    f"last known-good bootstrap model until {cooldown_until}. Latest error: {error}"
+                ) from error
             raise
         warmed_at = now_iso()
         self.model_cache_state.last_warmed_model = likely_model
         self.model_cache_state.last_warmed_at = warmed_at
         self.model_cache_state.last_error = None
         self.touch_model_usage(likely_model)
+        self.clear_model_warm_failure(likely_model)
+        self.remember_known_good_runtime_tuple()
         if source == "bootstrap_target":
             return (
                 True,
@@ -1693,7 +3891,7 @@ class NodeRuntimeService:
 
         runtime = health.get("runtime", {})
         config = installer_snapshot.get("config", {})
-        autopilot = self.autopilot_payload()
+        autopilot = self.load_autopilot_payload()
         remote = self.remote_dashboard_snapshot()
         remote_summary = remote.get("summary") if isinstance(remote.get("summary"), dict) else {}
         remote_node = remote_summary.get("node") if isinstance(remote_summary.get("node"), dict) else {}
@@ -1707,22 +3905,43 @@ class NodeRuntimeService:
         )
         likely_model = model_cache.get("likely_model") if isinstance(model_cache.get("likely_model"), str) else None
         current_model = model_cache.get("current_model") if isinstance(model_cache.get("current_model"), str) else None
-        self.touch_model_usage(current_model, likely_model)
+        hot_models = [
+            model
+            for model in model_cache.get("hot_models", [])
+            if isinstance(model, str) and model.strip()
+        ]
+        protected_models = {
+            model
+            for model in model_cache.get("pinned_models", [])
+            if isinstance(model, str) and model.strip()
+        }
+        self.touch_model_usage(current_model, likely_model, *hot_models)
 
         disk = health.get("preflight", {}).get("disk") if isinstance(health.get("preflight"), dict) else {}
-        cache_pressure = bool(isinstance(disk, dict) and not bool(disk.get("ok", True)))
-        protected_models = {model for model in (current_model, likely_model) if model}
-        evicted_model, evicted_bytes = self.evict_cold_model_cache(
-            protected_models=protected_models,
-            cache_pressure=cache_pressure,
+        cache_pressure = bool(
+            isinstance(disk, dict)
+            and (
+                not bool(disk.get("ok", True))
+                or int(model_cache.get("cache_bytes") or 0) > int(model_cache.get("cache_budget_bytes") or 0)
+                or int(model_cache.get("cache_available_growth_bytes") or 0) <= 0
+            )
         )
-        if evicted_model:
+        _capacity_ok, background_evictions, _capacity_message = self.ensure_model_cache_capacity(
+            target_model=likely_model,
+            required_growth_bytes=0,
+            protected_models=protected_models,
+            hot_models=hot_models,
+            budget=self.cache_budget_payload(cache_bytes=int(model_cache.get("cache_bytes") or 0)),
+        )
+        if background_evictions:
+            last_evicted_model, last_evicted_bytes = background_evictions[-1]
+            total_evicted_bytes = sum(evicted_bytes for _model, evicted_bytes in background_evictions)
             self.model_cache_state.last_checked_at = now_iso()
-            self.model_cache_state.last_evicted_model = evicted_model
-            self.model_cache_state.last_evicted_bytes = evicted_bytes
+            self.model_cache_state.last_evicted_model = last_evicted_model
+            self.model_cache_state.last_evicted_bytes = total_evicted_bytes
             self.model_cache_state.last_evicted_at = self.model_cache_state.last_checked_at
             self.model_cache_state.last_result = (
-                f"Evicted {format_bytes(evicted_bytes)} of cold cache for {evicted_model} to protect disk space."
+                f"Evicted {format_bytes(total_evicted_bytes)} of colder model cache to stay within this node's local cache budget."
             )
             self.model_cache_state.last_error = None
             self.save_state()
@@ -1734,12 +3953,42 @@ class NodeRuntimeService:
             health.get("runtime_healthy")
             and likely_model
             and current_model != likely_model
-            and model_cache.get("likely_model_source") in {"control_plane_demand", "bootstrap_target"}
+            and model_cache.get("likely_model_source") in {
+                "control_plane_demand",
+                "bootstrap_target",
+                "recent_assignment_mix",
+                "owner_target_heat",
+            }
             and active_assignments == 0
             and not self.update_state.pending_restart
             and not bool(health.get("installer_state", {}).get("busy"))
         )
         if can_prewarm:
+            required_growth_bytes = max(
+                0,
+                int(model_cache.get("expected_bytes") or 0) - int(model_cache.get("likely_model_cache_bytes") or 0),
+            )
+            capacity_ok, prewarm_evictions, capacity_message = self.ensure_model_cache_capacity(
+                target_model=likely_model,
+                required_growth_bytes=required_growth_bytes,
+                protected_models=protected_models,
+                hot_models=hot_models,
+                budget=self.cache_budget_payload(cache_bytes=int(model_cache.get("cache_bytes") or 0)),
+            )
+            if prewarm_evictions:
+                last_evicted_model, _last_evicted_bytes = prewarm_evictions[-1]
+                self.model_cache_state.last_evicted_model = last_evicted_model
+                self.model_cache_state.last_evicted_bytes = sum(
+                    evicted_bytes for _model, evicted_bytes in prewarm_evictions
+                )
+                self.model_cache_state.last_evicted_at = now_iso()
+            if not capacity_ok and capacity_message:
+                self.model_cache_state.last_error = None
+                self.model_cache_state.last_result = capacity_message
+                self.model_cache_state.last_checked_at = now_iso()
+                self.save_state()
+                self.log(capacity_message)
+                return True, capacity_message, "model_cache_budget_hold"
             try:
                 applied, message = self.prewarm_likely_model(
                     likely_model,
@@ -1774,6 +4023,7 @@ class NodeRuntimeService:
         config: dict[str, Any],
         updates: dict[str, Any],
         autopilot: dict[str, Any],
+        heat_governor: dict[str, Any],
         remote: dict[str, Any],
         remote_summary: dict[str, Any],
         remote_node: dict[str, Any],
@@ -1802,6 +4052,7 @@ class NodeRuntimeService:
             or "current routing"
         ).strip()
         remote_error = remote.get("last_error") if isinstance(remote.get("last_error"), str) else None
+        heat_plan = heat_governor.get("plan") if isinstance(heat_governor.get("plan"), dict) else {}
         autopilot_pending_restart = bool(
             autopilot.get("status") == "restart_pending"
             or (
@@ -1837,6 +4088,36 @@ class NodeRuntimeService:
             return {
                 "value": "Waiting for approval",
                 "detail": detail,
+                "tone": "warning",
+            }
+
+        if active_assignments <= 0 and bool(heat_plan.get("paused")):
+            pause_reason = str(heat_plan.get("pause_reason") or "")
+            reason = str(heat_plan.get("reason") or "The owner heat governor paused new assignments.")
+            if pause_reason == "gpu_temperature_limit":
+                return {
+                    "value": "Thermal protection paused new work",
+                    "detail": reason,
+                    "tone": "danger",
+                }
+            return {
+                "value": "Owner heat target paused new work",
+                "detail": reason,
+                "tone": "warning",
+            }
+
+        if (
+            active_assignments <= 0
+            and queue_depth > 0
+            and bool(heat_plan.get("quiet_hours_active"))
+            and coerce_nonnegative_int(heat_plan.get("effective_target_pct")) <= 20
+        ):
+            return {
+                "value": "Quiet hours are holding a low-noise trickle",
+                "detail": str(
+                    heat_plan.get("reason")
+                    or "Quiet hours are active, so the node is staying in a low-noise trickle mode."
+                ),
                 "tone": "warning",
             }
 
@@ -1940,7 +4221,10 @@ class NodeRuntimeService:
                 "autopilot_tuning": "Autopilot retuned this machine",
                 "start_runtime": "Runtime started",
                 "restart_runtime": "Runtime restarted",
+                "restart_vllm": "Inference runtime restarted",
+                "restart_node_agent": "Node agent restarted",
                 "rollback_bad_update": "Rolled back to the last healthy release",
+                "rollback_owner_target_model": "Bootstrap model restored",
                 "resume_quick_start": "Quick Start resumed",
                 "waiting_for_approval": "Waiting for approval",
             }.get(self_heal_action, "Local runtime changed")
@@ -1990,6 +4274,458 @@ class NodeRuntimeService:
             "tone": "success",
         }
 
+    def dashboard_alerts_payload(
+        self,
+        *,
+        config: dict[str, Any],
+        connectivity: dict[str, Any],
+        heat_governor: dict[str, Any],
+        current_model: str | None,
+    ) -> list[dict[str, Any]]:
+        def describe_with_time(detail: str, timestamp: str | None) -> str:
+            if not timestamp:
+                return detail
+            relative = format_relative_time(timestamp)
+            if relative == "Waiting":
+                return detail
+            return f"{detail} Last change {relative}."
+
+        alerts: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
+        def add_alert(
+            *,
+            code: str,
+            title: str,
+            detail: str,
+            tone: str = "warning",
+            source: str,
+            observed_at: str | None = None,
+        ) -> None:
+            normalized_code = str(code or "").strip() or title.strip().lower().replace(" ", "_")
+            dedupe_key = normalized_code or title.strip()
+            if not title.strip() or not detail.strip() or dedupe_key in seen:
+                return
+            alert: dict[str, Any] = {
+                "code": normalized_code,
+                "title": title.strip(),
+                "detail": detail.strip(),
+                "tone": tone if tone in {"success", "warning", "danger"} else "warning",
+                "source": source.strip() or "service",
+            }
+            if observed_at:
+                alert["observed_at"] = observed_at
+                relative = format_relative_time(observed_at)
+                if relative != "Waiting":
+                    alert["observed_label"] = relative
+            seen.add(dedupe_key)
+            alerts.append(alert)
+
+        heat_plan = heat_governor.get("plan") if isinstance(heat_governor.get("plan"), dict) else {}
+        for alert in heat_plan.get("owner_alerts", []) if isinstance(heat_plan.get("owner_alerts"), list) else []:
+            if not isinstance(alert, dict):
+                continue
+            add_alert(
+                code=str(alert.get("code") or "heat_governor"),
+                title=str(alert.get("title") or "Heat governor alert"),
+                detail=str(alert.get("detail") or heat_plan.get("reason") or "The heat governor has an update."),
+                tone=str(alert.get("tone") or "warning"),
+                source=str(alert.get("source") or "heat_governor"),
+                observed_at=str(heat_governor.get("last_observed_at") or heat_governor.get("updated_at") or ""),
+            )
+
+        local_doctor_alert = (
+            self.local_doctor_state.last_transition_alert
+            if isinstance(self.local_doctor_state.last_transition_alert, dict)
+            else {}
+        )
+        if local_doctor_alert:
+            add_alert(
+                code=str(local_doctor_alert.get("code") or "local_doctor"),
+                title=str(local_doctor_alert.get("title") or "Local Doctor update"),
+                detail=str(local_doctor_alert.get("detail") or "Local Doctor has a new update."),
+                tone=str(local_doctor_alert.get("tone") or "warning"),
+                source=str(local_doctor_alert.get("source") or "local_doctor"),
+                observed_at=str(local_doctor_alert.get("observed_at") or ""),
+            )
+
+        connectivity_status = str(connectivity.get("status") or "")
+        if connectivity_status in {"degraded", "offline"} and bool(connectivity.get("fallback_active")):
+            add_alert(
+                code="fallback_connectivity",
+                title="Running in degraded mode on fallback connectivity",
+                detail=str(
+                    connectivity.get("detail")
+                    or "The primary control-plane path is unstable, so the node is staying online on a fallback path."
+                ),
+                tone="danger" if connectivity_status == "offline" and not connectivity.get("grace_active") else "warning",
+                source="connectivity",
+            )
+
+        owner_target_model = str(config.get("owner_target_model") or "").strip()
+        bootstrap_pending_upgrade = bool(
+            coerce_bool(config.get("bootstrap_pending_upgrade"), False)
+            and owner_target_model
+            and current_model
+            and owner_target_model != current_model
+        )
+        if bootstrap_pending_upgrade:
+            add_alert(
+                code="bootstrap_target_warming",
+                title="Bootstrap model is serving while target model warms",
+                detail=(
+                    f"{current_model} is serving so this node stays online quickly while {owner_target_model} finishes "
+                    "its background warm-up."
+                ),
+                tone="warning",
+                source="model_lifecycle",
+            )
+        elif str(self.self_heal_state.last_action or "") == "rollback_owner_target_model":
+            target_model = owner_target_model or "the owner target model"
+            add_alert(
+                code="bootstrap_target_warming",
+                title="Bootstrap model is serving while target model warms",
+                detail=describe_with_time(
+                    str(
+                        self.self_heal_state.last_result
+                        or f"The node restored its bootstrap model while {target_model} cools down and retries later."
+                    ),
+                    self.self_heal_state.last_repaired_at or self.self_heal_state.last_checked_at,
+                ),
+                tone="warning",
+                source="self_healing",
+                observed_at=self.self_heal_state.last_repaired_at or self.self_heal_state.last_checked_at,
+            )
+
+        self_heal_action = str(self.self_heal_state.last_action or "")
+        self_heal_issue = str(self.self_heal_state.last_issue or "")
+        self_heal_result = str(self.self_heal_state.last_result or "")
+        recovery_text = f"{self_heal_issue} {self_heal_result}".lower()
+        if self_heal_action in {"restart_runtime", "restart_vllm", "restart_node_agent"} and (
+            "docker" in recovery_text or "container" in recovery_text
+        ):
+            add_alert(
+                code="docker_restart_recovered",
+                title="Node recovered automatically after Docker restart",
+                detail=describe_with_time(
+                    self_heal_result or "The node restarted the affected runtime layer and returned to its last known healthy local plan.",
+                    self.self_heal_state.last_repaired_at or self.self_heal_state.last_checked_at,
+                ),
+                tone="success",
+                source="self_healing",
+                observed_at=self.self_heal_state.last_repaired_at or self.self_heal_state.last_checked_at,
+            )
+
+        priority = {"danger": 0, "warning": 1, "success": 2}
+        alerts.sort(key=lambda alert: (priority.get(str(alert.get("tone") or "warning"), 3), str(alert.get("title") or "")))
+        return alerts
+
+    def heat_usefulness_ratio(self, *, heat_plan: dict[str, Any]) -> tuple[float, str]:
+        if bool(heat_plan.get("paused")):
+            return 0.0, "Heat output is paused right now."
+
+        objective = normalize_owner_objective(heat_plan.get("owner_objective"))
+        effective_target_pct = coerce_nonnegative_int(heat_plan.get("effective_target_pct"))
+        if effective_target_pct <= 20:
+            ratio = 0.35
+        elif effective_target_pct <= 50:
+            ratio = 0.70
+        else:
+            ratio = 1.0
+
+        room_temp_c = coerce_float(heat_plan.get("room_temp_c"))
+        target_temp_c = coerce_float(heat_plan.get("target_temp_c"))
+        outside_temp_c = coerce_float(heat_plan.get("outside_temp_c"))
+
+        reason = "No room or weather hint is configured yet, so this uses a balanced default."
+        if room_temp_c is not None and target_temp_c is not None:
+            gap_c = target_temp_c - room_temp_c
+            if gap_c <= -0.3:
+                ratio = 0.0
+                reason = "The room is already above the owner target, so extra heat is unlikely to be useful."
+            elif gap_c <= 0.2:
+                ratio = min(ratio, 0.40)
+                reason = "The room is already near the target, so only part of the current heat output is likely to be useful."
+            elif gap_c <= 1.0:
+                ratio = max(ratio, 0.75)
+                reason = f"The room is about {round(gap_c, 1)} C below target, so most of the heat output is still useful."
+            else:
+                ratio = 1.0
+                reason = f"The room is about {round(gap_c, 1)} C below target, so the heat output is fully useful."
+        elif outside_temp_c is not None:
+            if outside_temp_c >= 18:
+                ratio = min(ratio, 0.20)
+                reason = f"The outside-temperature hint is {outside_temp_c:.0f} C, so only a small part of the heat is likely to be useful."
+            elif outside_temp_c >= 12:
+                ratio = min(ratio, 0.50)
+                reason = f"The outside-temperature hint is {outside_temp_c:.0f} C, so heat value is moderate."
+            elif outside_temp_c <= 5:
+                ratio = max(ratio, 0.85)
+                reason = f"The outside-temperature hint is {outside_temp_c:.0f} C, so most of the heat is likely to be useful."
+
+        if objective == "heat_first":
+            ratio = min(1.0, ratio + 0.15)
+            reason = f"{reason} Heat-first mode nudges the estimate upward."
+        elif objective == "earnings_only":
+            ratio = max(0.0, ratio - 0.25)
+            reason = f"{reason} Earnings-only mode treats less of the heat as owner-value."
+
+        return round(ratio, 3), reason
+
+    def economics_payload(
+        self,
+        *,
+        heat_governor: dict[str, Any],
+        autopilot: dict[str, Any],
+        remote_summary: dict[str, Any],
+    ) -> dict[str, Any]:
+        plan = heat_governor.get("plan") if isinstance(heat_governor.get("plan"), dict) else {}
+        signals = autopilot.get("signals") if isinstance(autopilot.get("signals"), dict) else {}
+        earnings = remote_summary.get("earnings") if isinstance(remote_summary.get("earnings"), dict) else {}
+
+        today_earnings_usd: float | None = None
+        today_source = ""
+        today_source_key = ""
+        today_source_confidence = "low"
+        today_source_detail = "No control-plane earnings source is available yet."
+        for key, label, confidence, detail in (
+            (
+                "today_usd",
+                "today",
+                "high",
+                "Using control-plane today_usd directly for today's earnings.",
+            ),
+            (
+                "last_24h_usd",
+                "last 24h",
+                "medium",
+                "Using rolling last_24h_usd because today_usd is not available yet.",
+            ),
+            (
+                "current_hour_usd",
+                "current hour",
+                "low",
+                "Using current_hour_usd because longer-window earnings data is not available yet.",
+            ),
+        ):
+            value = coerce_float(earnings.get(key))
+            if value is not None:
+                today_earnings_usd = value
+                today_source = label
+                today_source_key = key
+                today_source_confidence = confidence
+                today_source_detail = detail
+                break
+        if today_earnings_usd is None:
+            today_earnings_usd = 0.0
+
+        power_watts = None
+        power_source = ""
+        power_source_key = ""
+        power_source_confidence = "low"
+        power_source_detail = "No power source is available yet."
+        for raw_value, key, label, confidence, detail in (
+            (
+                signals.get("power_watts"),
+                "power_watts",
+                "live GPU watts",
+                "high",
+                "Measured from local GPU telemetry.",
+            ),
+            (
+                signals.get("estimated_heat_output_watts"),
+                "estimated_heat_output_watts",
+                "estimated heat telemetry",
+                "medium",
+                "Derived from runtime heat telemetry because live GPU watts are unavailable.",
+            ),
+            (
+                plan.get("desired_power_limit_watts"),
+                "desired_power_limit_watts",
+                "capped estimate",
+                "low",
+                (
+                    f"Using the current {format_watts(plan.get('desired_power_limit_watts'))} power cap because "
+                    "live GPU watts are unavailable."
+                ),
+            ),
+        ):
+            numeric = coerce_float(raw_value)
+            if numeric is not None and numeric > 0:
+                power_watts = numeric
+                power_source = label
+                power_source_key = key
+                power_source_confidence = confidence
+                power_source_detail = detail
+                break
+
+        energy_price_kwh = coerce_float(
+            heat_governor.get("energy_price_kwh")
+            if heat_governor.get("energy_price_kwh") is not None
+            else signals.get("energy_price_kwh")
+        )
+
+        local_now = datetime.now().astimezone()
+        service_started = parse_iso_timestamp(self.started_at) or datetime.fromtimestamp(
+            self.started_at_epoch,
+            tz=timezone.utc,
+        )
+        if service_started.tzinfo is None:
+            service_started = service_started.replace(tzinfo=timezone.utc)
+        service_started_local = service_started.astimezone(local_now.tzinfo)
+        local_midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        basis_start = max(local_midnight, service_started_local)
+        basis_hours = max(0.0, (local_now - basis_start).total_seconds() / 3600.0)
+        basis_label = "local midnight" if basis_start == local_midnight else "since service came online"
+        basis_confidence = "high"
+        basis_detail = (
+            "Using a local midnight basis because this runtime was already online when the local day started."
+            if basis_start == local_midnight
+            else "Using a since-service-came-online basis because this runtime started after local midnight."
+        )
+
+        electricity_cost_usd: float | None = None
+        if power_watts is not None and energy_price_kwh is not None:
+            electricity_cost_usd = (power_watts / 1000.0) * basis_hours * energy_price_kwh
+
+        heat_ratio, heat_reason = self.heat_usefulness_ratio(heat_plan=plan)
+        room_temp_c = coerce_float(plan.get("room_temp_c"))
+        target_temp_c = coerce_float(plan.get("target_temp_c"))
+        outside_temp_c = coerce_float(plan.get("outside_temp_c"))
+        if room_temp_c is not None and target_temp_c is not None and outside_temp_c is not None:
+            heat_assumption_source = "room target plus outside-temperature hint"
+            heat_assumption_confidence = "high"
+        elif room_temp_c is not None and target_temp_c is not None:
+            heat_assumption_source = "room target"
+            heat_assumption_confidence = "high"
+        elif outside_temp_c is not None:
+            heat_assumption_source = "outside-temperature hint"
+            heat_assumption_confidence = "medium"
+        else:
+            heat_assumption_source = "balanced default"
+            heat_assumption_confidence = "low"
+        heat_usefulness_pct = round(heat_ratio * 100.0, 1)
+        heat_offset_usd = None if electricity_cost_usd is None else electricity_cost_usd * heat_ratio
+        net_value_usd = (
+            None
+            if electricity_cost_usd is None or heat_offset_usd is None
+            else today_earnings_usd + heat_offset_usd - electricity_cost_usd
+        )
+
+        if today_source_key == "today_usd":
+            today_detail = "Using control-plane today_usd directly for today's earnings. Confidence: high."
+        elif today_source_key == "last_24h_usd":
+            today_detail = (
+                "Using rolling last_24h_usd because today_usd is not available yet, so this is an estimate instead of "
+                "a local-day total. Confidence: medium."
+            )
+        elif today_source_key == "current_hour_usd":
+            today_detail = (
+                "Using current_hour_usd because longer-window earnings are not available yet, so this is a short-window "
+                "estimate. Confidence: low."
+            )
+        else:
+            today_detail = "No control-plane earnings have been reported yet."
+
+        if energy_price_kwh is None:
+            electricity_card = {
+                "value": "Add power price",
+                "detail": "Enter electricity price in USD/kWh so this node can estimate cost, heat offset, and net value.",
+                "tone": "warning",
+            }
+            heat_offset_card = {
+                "value": "Add power price",
+                "detail": "Heat offset needs the local electricity price to value the recovered heat.",
+                "tone": "warning",
+            }
+            net_value_card = {
+                "value": "Add power price",
+                "detail": "Net value appears after the local electricity price is saved.",
+                "tone": "warning",
+            }
+        elif power_watts is None:
+            electricity_card = {
+                "value": "Waiting for power telemetry",
+                "detail": "The node has not reported live GPU power yet, so electricity and heat-value estimates are waiting.",
+                "tone": "warning",
+            }
+            heat_offset_card = {
+                "value": "Waiting for power telemetry",
+                "detail": "Heat offset appears after the node reports live or capped GPU power.",
+                "tone": "warning",
+            }
+            net_value_card = {
+                "value": "Waiting for power telemetry",
+                "detail": "Net value appears after the node reports GPU power telemetry.",
+                "tone": "warning",
+            }
+        else:
+            electricity_card = {
+                "value": format_usd(electricity_cost_usd),
+                "detail": (
+                    f"Estimated from {format_watts(power_watts)} at ${energy_price_kwh:.2f}/kWh. "
+                    f"Source: {power_source} ({power_source_key}, {power_source_confidence} confidence). "
+                    f"Basis: {basis_label}. {power_source_detail}"
+                ),
+                "tone": "warning" if electricity_cost_usd and electricity_cost_usd > 0 else "success",
+            }
+            heat_offset_card = {
+                "value": format_usd(heat_offset_usd),
+                "detail": (
+                    f"Assumes {heat_usefulness_pct:.0f}% of current heat output offsets household heating. "
+                    f"Source: {heat_assumption_source} ({heat_assumption_confidence} confidence). {heat_reason}"
+                ),
+                "tone": "success" if heat_offset_usd and heat_offset_usd > 0 else "warning",
+            }
+            net_value_card = {
+                "value": format_usd(net_value_usd),
+                "detail": (
+                    f"Combines {today_source_key or 'no control-plane earnings source'} earnings with electricity on a "
+                    f"{basis_label} basis. Power source confidence: {power_source_confidence}. "
+                    f"Heat assumptions: {heat_assumption_source} ({heat_assumption_confidence} confidence)."
+                ),
+                "tone": "success" if net_value_usd is not None and net_value_usd >= 0 else "warning",
+            }
+
+        return {
+            "summary": {
+                "today_earnings_usd": today_earnings_usd,
+                "today_source": today_source or None,
+                "today_source_key": today_source_key or None,
+                "today_source_confidence": today_source_confidence if today_source_key else None,
+                "today_source_detail": today_source_detail,
+                "power_watts": power_watts,
+                "power_source": power_source or None,
+                "power_source_key": power_source_key or None,
+                "power_source_confidence": power_source_confidence if power_source_key else None,
+                "power_source_detail": power_source_detail,
+                "basis_label": basis_label,
+                "basis_hours": round(basis_hours, 3),
+                "basis_detail": basis_detail,
+                "basis_confidence": basis_confidence,
+                "basis_started_at": basis_start.isoformat(),
+                "energy_price_kwh": energy_price_kwh,
+                "heat_usefulness_ratio": heat_ratio,
+                "heat_usefulness_pct": heat_usefulness_pct,
+                "heat_usefulness_detail": heat_reason,
+                "heat_assumption_source": heat_assumption_source,
+                "heat_assumption_confidence": heat_assumption_confidence,
+                "electricity_cost_usd": electricity_cost_usd,
+                "heat_offset_usd": heat_offset_usd,
+                "net_value_usd": net_value_usd,
+            },
+            "cards": {
+                "today_earnings": {
+                    "value": format_usd(today_earnings_usd),
+                    "detail": today_detail,
+                    "tone": "success" if today_earnings_usd > 0 else "warning",
+                },
+                "electricity": electricity_card,
+                "heat_offset": heat_offset_card,
+                "net_value": net_value_card,
+            },
+        }
+
     def apply_autopilot_tuning(self) -> tuple[bool, str]:
         state = self.load_autopilot_state()
         if not state:
@@ -2035,12 +4771,20 @@ class NodeRuntimeService:
 
         return True, "Autopilot applied updated concurrency and thermal tuning for the next runtime cycle."
 
-    def dashboard_payload(self, health: dict[str, Any], installer_snapshot: dict[str, Any]) -> dict[str, Any]:
+    def dashboard_payload(
+        self,
+        health: dict[str, Any],
+        installer_snapshot: dict[str, Any],
+        *,
+        heat_governor: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         runtime = health.get("runtime", {})
         installer_state = health.get("installer_state", {})
         config = installer_snapshot.get("config", {})
         updates = asdict(self.update_state)
         autopilot = self.autopilot_payload()
+        autopilot_state = self.load_autopilot_payload()
+        heat_governor = heat_governor or self.heat_governor_payload(autopilot_payload=autopilot_state)
         remote = self.remote_dashboard_snapshot()
         remote_summary = remote.get("summary") if isinstance(remote.get("summary"), dict) else {}
         remote_node = remote_summary.get("node") if isinstance(remote_summary.get("node"), dict) else {}
@@ -2054,13 +4798,14 @@ class NodeRuntimeService:
             if isinstance(remote_summary.get("setup_verification"), dict)
             else {}
         )
+        connectivity = self.control_plane_connectivity_payload(remote=remote)
         model_cache = self.model_cache_payload(
             health=health,
             runtime=runtime,
             config=config,
             remote_summary=remote_summary,
             remote_node=remote_node,
-            autopilot=autopilot,
+            autopilot=autopilot_state,
         )
 
         blocked_reason = (
@@ -2076,6 +4821,7 @@ class NodeRuntimeService:
             config=config,
             updates=updates,
             autopilot=autopilot,
+            heat_governor=heat_governor,
             remote=remote,
             remote_summary=remote_summary,
             remote_node=remote_node,
@@ -2083,6 +4829,11 @@ class NodeRuntimeService:
             blocked_reason=blocked_reason,
         )
         change_summary = self.change_summary_payload(updates=updates, autopilot=autopilot)
+        economics = self.economics_payload(
+            heat_governor=heat_governor,
+            autopilot=autopilot,
+            remote_summary=remote_summary,
+        )
 
         heartbeat_at = remote_node.get("last_heartbeat_at") if isinstance(remote_node.get("last_heartbeat_at"), str) else None
         heartbeat_age_seconds: float | None = None
@@ -2135,7 +4886,11 @@ class NodeRuntimeService:
             last_payout_detail = f" Last payout {payout_amount} is {payout_status}."
 
         if health.get("runtime_healthy") and not blocked_reason:
-            if setup_verification_status == "passed":
+            if connectivity.get("status") in {"degraded", "offline"}:
+                health_value = str(connectivity.get("value") or "Degraded mode")
+                health_tone = str(connectivity.get("tone") or "warning")
+                health_detail = str(connectivity.get("detail") or "The node is serving through a degraded network path.")
+            elif setup_verification_status == "passed":
                 health_value = "Setup verified"
                 health_tone = "success"
                 health_detail = (
@@ -2248,12 +5003,25 @@ class NodeRuntimeService:
         uptime_value = format_elapsed(time.time() - self.started_at_epoch)
         uptime_detail = f"Local service online since {self.started_at}."
         uptime_tone = "success"
+        alerts = self.dashboard_alerts_payload(
+            config=config,
+            connectivity=connectivity,
+            heat_governor=heat_governor,
+            current_model=current_model if isinstance(current_model, str) and current_model else None,
+        )
+        timeline = self.owner_timeline_payload()
 
         if health_value == "Setup verified":
             headline = "Setup verified"
             detail = idle_reason["detail"] or health_detail
         elif health_value == "Verifying setup":
             headline = "Verifying setup"
+            detail = health_detail
+        elif health_value == "Degraded mode":
+            headline = "Degraded mode"
+            detail = health_detail
+        elif health_value == "Offline grace":
+            headline = "Offline grace"
             detail = health_detail
         elif health_value == "Healthy":
             headline = "Node live"
@@ -2276,13 +5044,18 @@ class NodeRuntimeService:
                 "last_error": remote.get("last_error"),
                 "stale": bool(remote.get("stale")),
             },
+            "connectivity": connectivity,
             "cards": {
                 "health": {"value": health_value, "detail": health_detail, "tone": health_tone},
                 "earnings": {"value": earnings_value, "detail": earnings_detail, "tone": earnings_tone},
+                "today_earnings": economics["cards"]["today_earnings"],
                 "heartbeat": {"value": heartbeat_value, "detail": heartbeat_detail, "tone": heartbeat_tone},
                 "model": {"value": model_value, "detail": model_detail, "tone": model_tone},
                 "uptime": {"value": uptime_value, "detail": uptime_detail, "tone": uptime_tone},
                 "idle": {"value": idle_reason["value"], "detail": idle_reason["detail"], "tone": idle_reason["tone"]},
+                "electricity": economics["cards"]["electricity"],
+                "heat_offset": economics["cards"]["heat_offset"],
+                "net_value": economics["cards"]["net_value"],
                 "changes": {
                     "value": change_summary["value"],
                     "detail": change_summary["detail"],
@@ -2304,7 +5077,11 @@ class NodeRuntimeService:
                 "detail": setup_verification_detail,
                 "notification": setup_verification_notification,
             },
+            "alerts": alerts,
+            "timeline": timeline,
+            "connectivity": connectivity,
             "autopilot": autopilot,
+            "economics": economics["summary"],
             "model_cache": model_cache,
         }
 
@@ -2319,7 +5096,9 @@ class NodeRuntimeService:
             pass
         with self.lock:
             service_logs = list(self.logs)
-        dashboard = self.dashboard_payload(health, installer_snapshot)
+        heat_governor = self.heat_governor_payload()
+        dashboard = self.dashboard_payload(health, installer_snapshot, heat_governor=heat_governor)
+        appliance_release = self.appliance_release_payload()
         return {
             "service": {
                 "host": self.host,
@@ -2331,13 +5110,261 @@ class NodeRuntimeService:
             "installer": installer_snapshot,
             "owner_setup": installer_snapshot.get("owner_setup", {}),
             "dashboard": dashboard,
+            "alerts": dashboard.get("alerts", []),
+            "connectivity": dashboard.get("connectivity", {}),
+            "heat_governor": heat_governor,
             "model_cache": dashboard.get("model_cache", {}),
             "autostart": self.autostart_manager.status(),
             "desktop_launcher": self.desktop_launcher_manager.status(),
             "updates": asdict(self.update_state),
+            "appliance_release": appliance_release,
             "diagnostics": asdict(self.diagnostics_state),
+            "local_doctor": self.local_doctor_payload(),
             "self_healing": self.self_heal_payload(health),
+            "fault_drills": self.fault_drill_payload(),
         }
+
+    def _run_docker_restart_mid_run_drill(self) -> tuple[str, str, dict[str, Any]]:
+        health = self.runtime_health_snapshot()
+        if not health.get("runtime_healthy"):
+            return (
+                "unavailable",
+                "The runtime needs to be healthy before the Docker restart drill can run.",
+                {"issue_code": health.get("issue_code"), "issue_detail": health.get("issue_detail")},
+            )
+        if self.runtime_controller is not None:
+            self.runtime_controller.crash_vllm()
+            injected = "crash_vllm"
+        else:
+            self.log("Injecting a live fault by killing the vllm container.")
+            self.compose(["kill", "vllm"])
+            injected = "docker_compose_kill_vllm"
+        payload = self.self_heal_check()
+        post_health = self.runtime_health_snapshot()
+        action = self.self_heal_state.last_action or ""
+        if not post_health.get("runtime_healthy"):
+            raise RuntimeError(
+                "The runtime did not return to a healthy state after the restart drill. "
+                f"Last self-heal action: {action or 'unknown'}."
+            )
+        return (
+            "passed",
+            "Self-healing recovered after the local inference service was killed mid-run.",
+            {
+                "injected": injected,
+                "self_heal_action": action,
+                "self_heal_result": self.self_heal_state.last_result,
+                "payload_status": payload.get("self_healing", {}).get("status") if isinstance(payload, dict) else None,
+            },
+        )
+
+    def _run_dns_flap_drill(self) -> tuple[str, str, dict[str, Any]]:
+        controller = self.fault_controller()
+        body = json.dumps({"ok": True, "service": "fault-drill"}).encode("utf-8")
+        with self.local_drill_server(body=body, content_type="application/json") as (server, base_url):
+            controller.activate(
+                "dns_flap",
+                remaining_triggers=2,
+                note="Live fault drill: simulate a temporary DNS resolution failure.",
+            )
+            settings = self.build_fault_drill_settings(edge_control_url=base_url)
+            transport = EdgeControlTransport(settings)
+            response = transport._request_with_retry("GET", "/drill")
+            snapshot = transport.snapshot()
+            payload = response.json()
+        if payload.get("ok") is not True:
+            raise RuntimeError("The DNS flap drill did not receive a healthy response after retries.")
+        if int(snapshot.get("dns_failures") or 0) < 1:
+            raise RuntimeError("The DNS flap drill did not record any DNS failures.")
+        return (
+            "passed",
+            "The control-plane transport recovered from an injected DNS flap and recorded degraded mode correctly.",
+            {
+                "transport_status": snapshot.get("status"),
+                "degraded_reason": snapshot.get("degraded_reason"),
+                "dns_failures": snapshot.get("dns_failures"),
+                "requests_served": len(server.requests),
+            },
+        )
+
+    def _run_resumable_download_drill(self, fault_name: str, summary: str) -> tuple[str, str, dict[str, Any]]:
+        controller = self.fault_controller()
+        payload = {
+            "items": [
+                {
+                    "batch_item_id": "drill-item-1",
+                    "input": {"text": "live fault drill " * 12000},
+                }
+            ]
+        }
+        encrypted = encrypt_artifact(payload)
+        with self.local_drill_server(
+            body=encrypted["ciphertext"],
+            content_type="application/octet-stream",
+            enable_range=True,
+        ) as (server, base_url):
+            controller.activate(
+                fault_name,
+                remaining_triggers=1,
+                note=f"Live fault drill: {fault_name}.",
+            )
+            settings = self.build_fault_drill_settings(edge_control_url=base_url)
+            client = EdgeControlClient(settings)
+            assignment = SimpleNamespace(
+                assignment_id=f"drill-{fault_name}",
+                input_artifact_url=f"{base_url}/artifact.bin",
+                input_artifact_sha256=encrypted["ciphertext_sha256"],
+                input_artifact_encryption=encrypted["encryption"],
+                input_artifact_expires_at=None,
+                input_artifact_mirror_urls=[],
+            )
+            decrypted = client.fetch_artifact(assignment)
+            resume_dir = Path(settings.autopilot_state_path).parent / "artifact-resume"
+            leftover_parts = sorted(path.name for path in resume_dir.glob("*.part")) if resume_dir.exists() else []
+        range_requests = [request.get("range") for request in server.requests if request.get("range")]
+        if decrypted != payload:
+            raise RuntimeError("The resumable download drill did not round-trip the decrypted payload.")
+        if not range_requests:
+            raise RuntimeError("The resumable download drill never resumed with an HTTP range request.")
+        if leftover_parts:
+            raise RuntimeError(
+                "The resumable download drill left partial files behind: " + ", ".join(leftover_parts)
+            )
+        return (
+            "passed",
+            summary,
+            {
+                "requests_served": len(server.requests),
+                "range_requests": range_requests,
+                "resume_dir": str(resume_dir),
+            },
+        )
+
+    def _run_disk_pressure_drill(self) -> tuple[str, str, dict[str, Any]]:
+        controller = self.fault_controller()
+        controller.activate(
+            "disk_pressure",
+            remaining_triggers=8,
+            metadata={"free_bytes": 1 * (1024**3)},
+            note="Live fault drill: simulate a nearly full local disk.",
+        )
+        health = self.runtime_health_snapshot()
+        if health.get("issue_code") != "disk_low":
+            raise RuntimeError("The disk-pressure drill did not push the node into the low-disk path.")
+        payload = self.self_heal_check()
+        return (
+            "passed",
+            "The self-heal loop recognized injected low disk space and ran the storage recovery path.",
+            {
+                "issue_code": health.get("issue_code"),
+                "self_heal_action": self.self_heal_state.last_action,
+                "self_heal_result": self.self_heal_state.last_result,
+                "payload_status": payload.get("self_healing", {}).get("status") if isinstance(payload, dict) else None,
+            },
+        )
+
+    def _run_warm_gpu_oom_drill(self) -> tuple[str, str, dict[str, Any]]:
+        env_values = self.runtime_env_values()
+        if not env_values:
+            env_values = self.guided_installer.build_env({"setup_mode": "quickstart"})
+        owner_target_model = str(env_values.get("OWNER_TARGET_MODEL") or "").strip()
+        if not owner_target_model:
+            return (
+                "unavailable",
+                "This node does not have an owner target model configured, so the warm-up OOM rollback drill is unavailable.",
+                {},
+            )
+        if not self.runtime_health_snapshot().get("runtime_healthy"):
+            return (
+                "unavailable",
+                "The runtime needs to be healthy before the warm-up OOM drill can run.",
+                {},
+            )
+        if not self.self_heal_state.last_known_good_bootstrap_runtime_env:
+            self.remember_known_good_runtime_state()
+        if not self.self_heal_state.last_known_good_bootstrap_runtime_env:
+            return (
+                "unavailable",
+                "The node has not recorded a last known-good bootstrap runtime tuple yet, so rollback cannot be rehearsed.",
+                {},
+            )
+        controller = self.fault_controller()
+        controller.activate(
+            "warm_gpu_oom",
+            remaining_triggers=1,
+            note="Live fault drill: simulate GPU OOM during warm-up.",
+        )
+        success, message, action = self.attempt_vllm_recovery(model=owner_target_model, attempts=1)
+        if not success or action != "rollback_owner_target_model":
+            raise RuntimeError(message)
+        return (
+            "passed",
+            "The node rolled back to the last known-good bootstrap model after an injected warm-up GPU OOM.",
+            {
+                "owner_target_model": owner_target_model,
+                "self_heal_action": action,
+                "self_heal_result": message,
+            },
+        )
+
+    def run_fault_drill(self, scenario: str) -> dict[str, Any]:
+        normalized = str(scenario or "").strip().lower().replace("-", "_")
+        if normalized not in SUPPORTED_FAULT_DRILLS:
+            raise ValueError(
+                f"Unsupported fault drill {scenario!r}. Choose one of: {', '.join(SUPPORTED_FAULT_DRILLS)}."
+            )
+        controller = self.fault_controller()
+        controller.clear_all()
+        started_at = now_iso()
+        status = "failed"
+        summary = f"The {normalized} drill did not complete."
+        details: dict[str, Any] = {}
+        try:
+            if normalized == "docker_restart_mid_run":
+                status, summary, details = self._run_docker_restart_mid_run_drill()
+            elif normalized == "dns_flap":
+                status, summary, details = self._run_dns_flap_drill()
+            elif normalized == "disk_almost_full":
+                status, summary, details = self._run_disk_pressure_drill()
+            elif normalized == "partial_download_resume":
+                status, summary, details = self._run_resumable_download_drill(
+                    "partial_artifact_download",
+                    "The download path resumed cleanly after an injected partial download interruption.",
+                )
+            elif normalized == "power_loss_cache_write":
+                status, summary, details = self._run_resumable_download_drill(
+                    "cache_write_interrupt",
+                    "The download path resumed cleanly after an injected cache-write interruption.",
+                )
+            elif normalized == "warm_gpu_oom":
+                status, summary, details = self._run_warm_gpu_oom_drill()
+        except Exception as error:
+            details = {"error": str(error) or error.__class__.__name__}
+            summary = str(error) or summary
+            status = "failed"
+        details["scenario"] = normalized
+        details["fault_snapshot"] = self.fault_controller().snapshot()
+        controller.record_drill(
+            scenario=normalized,
+            status=status,
+            summary=summary,
+            details=details,
+            started_at=started_at,
+            completed_at=now_iso(),
+        )
+        controller.clear_all()
+        self.log(f"Fault drill {normalized} finished with status={status}: {summary}")
+        return self.status_payload()
+
+    def setup_preflight_payload(self, config: dict[str, Any]) -> dict[str, Any]:
+        preview_snapshot = self.guided_installer.preview_setup_payload(config)
+        payload = self.status_payload()
+        installer_payload = payload.get("installer") if isinstance(payload.get("installer"), dict) else {}
+        installer_payload.update(preview_snapshot)
+        payload["installer"] = installer_payload
+        payload["owner_setup"] = preview_snapshot.get("owner_setup", {})
+        payload["setup_preview"] = preview_snapshot
+        return payload
 
     def ensure_local_config(self) -> bool:
         self.ensure_dirs()
@@ -2422,6 +5449,14 @@ class NodeRuntimeService:
     def restart_inference_runtime_service(self) -> None:
         self.restart_vllm_service()
 
+    def restart_node_agent_service(self) -> None:
+        if self.runtime_controller is not None:
+            self.log("Restarting the in-container node agent...")
+            self.runtime_controller.restart_node_agent()
+            return
+        self.log("Restarting the node agent container...")
+        self.compose(["up", "-d", "--force-recreate", "node-agent"])
+
     def restart_vllm_service(self) -> None:
         runtime_label = self.guided_installer.inference_runtime_label(self.runtime_env_values())
         if self.runtime_controller is not None:
@@ -2442,7 +5477,13 @@ class NodeRuntimeService:
         deadline = time.time() + max(1.0, timeout_seconds)
         current_model = (model or "").strip() or env_values.get("VLLM_MODEL") or "the startup model"
         last_failure = f"{current_model} is still warming."
+        faults = self.fault_controller()
         while time.time() < deadline:
+            if faults.consume("warm_gpu_oom"):
+                raise RuntimeError(
+                    f"CUDA out of memory while warming {current_model}. "
+                    "The live fault drill forced a GPU OOM before readiness completed."
+                )
             try:
                 response = httpx.get(readiness_url, timeout=5.0)
                 if response.status_code < 500:
@@ -2497,17 +5538,21 @@ class NodeRuntimeService:
         )
 
     def attempt_runtime_recovery(self, *, recreate: bool, failure_reason: str) -> tuple[bool, str, str]:
-        self.start_runtime_services(recreate=recreate)
+        restored_tuple = self.restore_known_good_runtime_tuple(failure_reason)
+        recreate_runtime = recreate or restored_tuple
+        self.start_runtime_services(recreate=recreate_runtime)
         try:
             self.wait_for_runtime_health()
         except Exception as error:
             detail = str(error) or failure_reason
             if self.rollback_to_known_good_release(detail):
                 return True, "Self-healing rolled back to the last known healthy signed release.", "rollback_bad_update"
-            return False, detail, "restart_runtime" if recreate else "start_runtime"
+            return False, detail, "restart_runtime" if recreate_runtime else "start_runtime"
 
-        self.remember_known_good_release()
-        return True, "The runtime is healthy again.", "restart_runtime" if recreate else "start_runtime"
+        self.remember_known_good_runtime_state()
+        if restored_tuple:
+            return True, "Restarted the runtime from the last known healthy local plan.", "restart_runtime"
+        return True, "The runtime is healthy again.", "restart_runtime" if recreate_runtime else "start_runtime"
 
     def attempt_inference_runtime_recovery(
         self,
@@ -2521,6 +5566,9 @@ class NodeRuntimeService:
         env_values = self.runtime_env_values()
         runtime_label = self.guided_installer.inference_runtime_label(env_values)
         target_model = (model or "").strip() or env_values.get("VLLM_MODEL") or "the startup model"
+        retry_hold = self.model_warm_retry_hold(target_model)
+        if retry_hold:
+            return False, retry_hold, "rollback_owner_target_model"
         last_error = f"{runtime_label} still needs attention."
         for attempt in range(1, max(1, attempts) + 1):
             try:
@@ -2530,13 +5578,172 @@ class NodeRuntimeService:
                 )
                 self.restart_inference_runtime_service()
                 self.wait_for_inference_runtime_readiness(model=target_model)
-                self.remember_known_good_release()
+                self.clear_model_warm_failure(target_model)
+                self.remember_known_good_runtime_state()
                 return True, f"Restarted {runtime_label} and re-warmed {target_model} successfully.", "restart_vllm"
             except Exception as error:
                 last_error = str(error) or last_error
                 if attempt < max(1, attempts):
                     self.log(f"{runtime_label} warm-up retry {attempt} did not stick: {last_error}")
+        failure_count, cooldown_until = self.record_model_warm_failure(target_model, last_error)
+        owner_target_model = str(env_values.get("OWNER_TARGET_MODEL") or "").strip()
+        if target_model == owner_target_model and cooldown_until is not None:
+            restore_error = None
+            try:
+                restored = self.restore_known_good_runtime_tuple(last_error, prefer_bootstrap=True)
+                self.start_runtime_services(recreate=restored)
+                self.wait_for_runtime_health()
+                self.remember_known_good_runtime_state()
+                bootstrap_tuple = (
+                    self.self_heal_state.last_known_good_bootstrap_runtime_env
+                    or self.self_heal_state.last_known_good_runtime_env
+                    or {}
+                )
+                bootstrap_model = str(
+                    bootstrap_tuple.get("VLLM_MODEL")
+                    or env_values.get("VLLM_MODEL")
+                    or "the bootstrap model"
+                )
+                return (
+                    True,
+                    f"{target_model} failed to warm {failure_count} times in a row, so self-healing rolled back to "
+                    f"{bootstrap_model} until {cooldown_until}.",
+                    "rollback_owner_target_model",
+                )
+            except Exception as error:
+                restore_error = str(error) or "Bootstrap rollback failed."
+            return (
+                False,
+                f"{last_error} Self-healing also could not restore the bootstrap model automatically: {restore_error}",
+                "rollback_owner_target_model",
+            )
         return False, last_error, "restart_vllm"
+
+    def attempt_node_agent_recovery(self) -> tuple[bool, str, str]:
+        try:
+            self.log("Self-healing is restarting the local node agent process.")
+            self.restart_node_agent_service()
+            return True, "The local node agent was restarted.", "restart_node_agent"
+        except Exception as error:
+            return False, str(error) or "The local node agent still needs attention.", "restart_node_agent"
+
+    def watchdog_recovery(self, *, health: dict[str, Any]) -> tuple[bool, str, str] | None:
+        if not health.get("runtime_healthy") or health.get("issue_code"):
+            self.update_self_heal_state(
+                idle_queue_detected_at=None,
+                runtime_wedge_detected_at=None,
+            )
+            return None
+
+        autopilot_state = self.load_autopilot_state() or {}
+        signals = autopilot_state.get("signals") if isinstance(autopilot_state.get("signals"), dict) else {}
+        remote = self.remote_dashboard_snapshot()
+        remote_summary = remote.get("summary") if isinstance(remote.get("summary"), dict) else {}
+        remote_node = remote_summary.get("node") if isinstance(remote_summary.get("node"), dict) else {}
+        current_time = datetime.now(timezone.utc)
+
+        observed_at = parse_iso_timestamp(
+            str(signals.get("last_observed_at")) if signals.get("last_observed_at") else None
+        )
+        observed_age_seconds = (
+            max(0.0, (current_time - observed_at).total_seconds())
+            if observed_at is not None
+            else None
+        )
+        heartbeat_at = parse_iso_timestamp(
+            str(remote_node.get("last_heartbeat_at")) if remote_node.get("last_heartbeat_at") else None
+        )
+        heartbeat_age_seconds = (
+            max(0.0, (current_time - heartbeat_at).total_seconds())
+            if heartbeat_at is not None
+            else None
+        )
+        queue_depth = max(
+            coerce_nonnegative_int(signals.get("queue_depth")),
+            coerce_nonnegative_int(remote_node.get("queue_depth")),
+        )
+        active_assignments = max(
+            coerce_nonnegative_int(signals.get("active_assignments")),
+            coerce_nonnegative_int(remote_node.get("active_assignments")),
+        )
+        gpu_utilization_pct = coerce_float(signals.get("gpu_utilization_pct"))
+
+        idle_with_queue = bool(
+            observed_age_seconds is not None
+            and observed_age_seconds <= max(SELF_HEAL_INTERVAL_SECONDS * 2, IDLE_QUEUE_WATCHDOG_SECONDS)
+            and queue_depth > 0
+            and active_assignments == 0
+            and (
+                gpu_utilization_pct is None
+                or gpu_utilization_pct <= IDLE_QUEUE_GPU_UTILIZATION_THRESHOLD_PCT
+            )
+        )
+        idle_with_queue_elapsed = self.watchdog_timer_elapsed(
+            "idle_queue_detected_at",
+            active=idle_with_queue,
+            now=current_time,
+        )
+
+        remote_sync_error = bool(str(remote.get("last_error") or "").strip())
+        local_signals_stalled = bool(
+            observed_age_seconds is not None and observed_age_seconds >= RUNTIME_WEDGE_WATCHDOG_SECONDS
+        )
+        heartbeat_stalled = bool(
+            heartbeat_age_seconds is not None
+            and heartbeat_age_seconds >= RUNTIME_WEDGE_WATCHDOG_SECONDS
+            and not remote_sync_error
+        )
+        runtime_wedged = local_signals_stalled or (heartbeat_stalled and queue_depth > 0)
+        runtime_wedged_elapsed = self.watchdog_timer_elapsed(
+            "runtime_wedge_detected_at",
+            active=runtime_wedged,
+            now=current_time,
+        )
+
+        runtime = health.get("runtime") if isinstance(health.get("runtime"), dict) else {}
+        current_model = str(
+            runtime.get("current_model")
+            or self.runtime_env_values().get("VLLM_MODEL")
+            or ""
+        ).strip()
+
+        if (
+            idle_with_queue_elapsed is not None
+            and idle_with_queue_elapsed >= IDLE_QUEUE_WATCHDOG_SECONDS
+            and self.watchdog_restart_ready("last_targeted_inference_restart_at", now=current_time)
+        ):
+            success, message, action = self.attempt_inference_runtime_recovery(
+                model=current_model,
+                attempts=1,
+            )
+            self.update_self_heal_state(
+                idle_queue_detected_at=None,
+                last_targeted_inference_restart_at=now_iso(),
+            )
+            return (
+                success,
+                f"The local watchdog saw queued work with an idle GPU, so {message}",
+                action,
+            )
+
+        if (
+            runtime_wedged_elapsed is not None
+            and runtime_wedged_elapsed >= RUNTIME_WEDGE_WATCHDOG_SECONDS
+            and self.watchdog_restart_ready("last_targeted_node_restart_at", now=current_time)
+        ):
+            success, message, action = self.attempt_node_agent_recovery()
+            self.update_self_heal_state(
+                runtime_wedge_detected_at=None,
+                last_targeted_node_restart_at=now_iso(),
+            )
+            reason = (
+                "local runtime signals stopped updating"
+                if local_signals_stalled
+                else "the control-plane heartbeat stalled while work was still queued"
+            )
+            return success, f"The local watchdog restarted the node agent because {reason}. {message}", action
+
+        return None
 
     def attempt_nvidia_runtime_recovery(self, health: dict[str, Any]) -> tuple[bool, str, str] | None:
         issue_code = str(health.get("issue_code") or "")
@@ -2768,7 +5975,7 @@ class NodeRuntimeService:
                 )
                 use_status_payload = True
             elif health["runtime_healthy"]:
-                self.remember_known_good_release()
+                self.remember_known_good_runtime_state()
                 if startup_repaired or launcher_repaired or config_repaired or credentials_repaired:
                     startup_result = "Self-healing repaired local setup"
                     if startup_repaired and launcher_repaired:
@@ -2896,7 +6103,7 @@ class NodeRuntimeService:
         value = completed.stdout.strip()
         return value or None
 
-    def check_for_updates(self, apply: bool = False) -> dict[str, Any]:
+    def check_for_updates(self, apply: bool = False, *, automatic: bool = False) -> dict[str, Any]:
         if not runtime_backend_supports_compose(self.runtime_backend):
             self.update_state.last_checked_at = now_iso()
             self.update_state.last_error = None
@@ -2905,11 +6112,36 @@ class NodeRuntimeService:
                 "The unified runtime image updates by pulling a new container image and recreating the container."
             )
             self.save_state()
+            if apply:
+                self.queue_background_doctor("update")
             return self.status_payload()
 
         rollout_id = request_id()
         try:
             manifest = self.signed_release_manifest()
+            preferred_channel = normalize_release_channel(self.update_state.preferred_channel)
+            release_channel = normalize_release_channel(manifest.channel)
+            self.update_state.last_checked_at = now_iso()
+            self.update_state.release_version = manifest.version
+            self.update_state.release_channel = release_channel
+            self.update_state.last_error = None
+            if not release_channel_matches_preference(
+                release_channel=release_channel,
+                preferred_channel=preferred_channel,
+            ):
+                self.update_state.updated_images = []
+                self.update_state.pending_restart = False
+                self.update_state.last_result = (
+                    f"Signed release {manifest.version} is on the {update_channel_copy(release_channel).lower()} track. "
+                    f"This node stays on the {update_channel_copy(preferred_channel).lower()} track until a matching "
+                    "appliance release is available."
+                )
+                self.log(
+                    f"[request {rollout_id}] Skipping signed runtime release {manifest.version} on the "
+                    f"{release_channel} track because this node prefers {preferred_channel}."
+                )
+                self.save_state()
+                return self.status_payload()
             current_release = self.current_release_env(manifest)
             target_release = manifest.release_env()
 
@@ -2934,10 +6166,9 @@ class NodeRuntimeService:
                     if after and before != after:
                         updated.append(service)
 
-            self.update_state.last_checked_at = now_iso()
             self.update_state.updated_images = updated
             self.update_state.release_version = manifest.version
-            self.update_state.release_channel = manifest.channel
+            self.update_state.release_channel = release_channel
             self.update_state.last_error = None
 
             if not changed_services:
@@ -2960,37 +6191,61 @@ class NodeRuntimeService:
                 return self.status_payload()
 
             previous_content = self.release_env_path.read_text(encoding="utf-8") if self.release_env_path.exists() else None
+            previous_runtime_tuple = self.runtime_tuple_snapshot()
             self.write_release_env(target_release)
             try:
-                self.restart_runtime()
+                self.start_runtime_services(recreate=True)
                 self.wait_for_runtime_health()
+                canary = self.verify_runtime_canary(
+                    context=f"Signed release {manifest.version} local inference canary"
+                )
             except Exception as error:
-                self.restore_release_env(previous_content)
-                rollback_id = request_id()
                 self.log(
-                    f"[request {rollout_id}] Signed release {manifest.version} failed health checks: {error}"
+                    f"[request {rollout_id}] Signed release {manifest.version} failed readiness/canary checks: {error}"
                 )
-                try:
-                    self.log(f"[request {rollback_id}] Rolling back to the previous signed release.")
-                    self.restart_runtime()
-                    self.wait_for_runtime_health()
-                except Exception as rollback_error:  # pragma: no cover - defensive fallback
-                    self.log(
-                        f"[request {rollback_id}] Rollback failed after signed release "
-                        f"{manifest.version}: {rollback_error}"
+                rollback_ok, rollback_message = self.rollback_update_to_known_good_runtime_state(
+                    failure_reason=str(error) or f"Signed release {manifest.version} failed the update canary.",
+                    previous_release_content=previous_content,
+                    previous_runtime_tuple=previous_runtime_tuple,
+                )
+                if rollback_ok:
+                    self.update_state.last_error = None
+                    self.update_state.last_result = (
+                        f"Signed release {manifest.version} failed the local canary and rolled back automatically. "
+                        f"{rollback_message}"
                     )
-                self.update_state.last_error = (
-                    f"Signed release {manifest.version} could not be applied automatically. "
-                    f"Check the service log with request id {rollout_id}."
-                )
-                self.update_state.last_result = "The previous signed runtime release was restored."
+                    self.record_owner_timeline_event(
+                        code="update_rolled_back",
+                        title="Update rolled back automatically",
+                        detail=self.update_state.last_result,
+                        tone="warning",
+                        source="updates",
+                        observed_at=self.update_state.last_checked_at,
+                    )
+                else:
+                    self.update_state.last_error = (
+                        f"Signed release {manifest.version} could not be applied automatically, and rollback needs attention. "
+                        f"Check the service log with request id {rollout_id}."
+                    )
+                    self.update_state.last_result = "Automatic rollback after the failed signed release update needs attention."
                 self.update_state.pending_restart = False
                 self.save_state()
                 return self.status_payload()
 
-            self.update_state.last_result = f"Signed release {manifest.version} was applied successfully."
+            self.update_state.last_result = (
+                f"Signed release {manifest.version} was applied successfully after readiness "
+                f"and a tiny local {str(canary.get('api') or 'inference')} canary passed."
+            )
             self.update_state.pending_restart = False
-            self.remember_known_good_release()
+            self.record_owner_timeline_event(
+                code="update_applied",
+                title="Update applied successfully",
+                detail=self.update_state.last_result,
+                tone="success",
+                source="updates",
+                observed_at=self.update_state.last_checked_at,
+            )
+            self.remember_known_good_runtime_state()
             self.log(f"[request {rollout_id}] Signed runtime release {manifest.version} is now active.")
             self.save_state()
             return self.status_payload()
@@ -3014,15 +6269,20 @@ class NodeRuntimeService:
             self.log(f"[request {rollout_id}] Signed release check failed: {error}")
             self.save_state()
             return self.status_payload()
+        finally:
+            if apply:
+                self.queue_background_doctor("update")
 
-    def configure_updates(self, enabled: bool, interval_hours: int) -> dict[str, Any]:
+    def configure_updates(self, enabled: bool, interval_hours: int, preferred_channel: str | None = None) -> dict[str, Any]:
         self.update_state.auto_update_enabled = enabled
         self.update_state.interval_hours = max(1, int(interval_hours))
+        self.update_state.preferred_channel = normalize_release_channel(preferred_channel or self.update_state.preferred_channel)
         self.update_state.last_error = None
         self.save_state()
         self.log(
             "Auto-update settings changed: "
-            f"{'enabled' if enabled else 'disabled'} every {self.update_state.interval_hours} hour(s)."
+            f"{'enabled' if enabled else 'disabled'} every {self.update_state.interval_hours} hour(s) on the "
+            f"{update_channel_copy(self.update_state.preferred_channel).lower()} track."
         )
         return self.status_payload()
 
@@ -3070,9 +6330,126 @@ class NodeRuntimeService:
 
         payload = self.status_payload()
         payload["generated_at"] = generated_at
+        dashboard = payload.get("dashboard") if isinstance(payload.get("dashboard"), dict) else {}
+        alerts = dashboard.get("alerts") if isinstance(dashboard.get("alerts"), list) else []
+        diagnostics_summary = {
+            "generated_at": generated_at,
+            "dashboard_headline": dashboard.get("headline"),
+            "dashboard_detail": dashboard.get("detail"),
+            "connectivity": payload.get("connectivity"),
+            "alerts": alerts,
+            "timeline": dashboard.get("timeline"),
+            "heat_governor": payload.get("heat_governor"),
+            "economics": dashboard.get("economics"),
+            "local_doctor": payload.get("local_doctor"),
+            "self_healing": payload.get("self_healing"),
+            "fault_drills": payload.get("fault_drills"),
+        }
+        support_summary_lines = [
+            f"Generated at: {generated_at}",
+            f"Dashboard: {dashboard.get('headline') or 'Owner dashboard'}",
+            f"Detail: {dashboard.get('detail') or 'No dashboard detail available.'}",
+        ]
+        if alerts:
+            support_summary_lines.append("Owner alerts:")
+            for alert in alerts[:5]:
+                if not isinstance(alert, dict):
+                    continue
+                title = str(alert.get("title") or "Alert").strip()
+                detail = str(alert.get("detail") or "").strip()
+                if detail:
+                    support_summary_lines.append(f"- {title}: {detail}")
+                else:
+                    support_summary_lines.append(f"- {title}")
+        timeline = dashboard.get("timeline") if isinstance(dashboard.get("timeline"), list) else []
+        if timeline:
+            support_summary_lines.append("Recent timeline:")
+            for event in timeline[:5]:
+                if not isinstance(event, dict):
+                    continue
+                title = str(event.get("title") or "Owner update").strip()
+                detail = str(event.get("detail") or "").strip()
+                observed = str(event.get("observed_label") or event.get("observed_at") or "").strip()
+                prefix = f"- {title}"
+                if observed:
+                    prefix = f"{prefix} ({observed})"
+                support_summary_lines.append(f"{prefix}: {detail}" if detail else prefix)
+        heat_governor = payload.get("heat_governor") if isinstance(payload.get("heat_governor"), dict) else {}
+        heat_plan = heat_governor.get("plan") if isinstance(heat_governor.get("plan"), dict) else {}
+        if heat_plan:
+            support_summary_lines.append(
+                "Heat governor: "
+                f"{heat_plan.get('effective_target_pct', heat_plan.get('requested_target_pct', '?'))}% target. "
+                f"{heat_plan.get('reason') or ''}".strip()
+            )
+        local_doctor = payload.get("local_doctor") if isinstance(payload.get("local_doctor"), dict) else {}
+        if local_doctor:
+            support_summary_lines.append(
+                "Local Doctor: "
+                f"{local_doctor.get('status') or 'unknown'}. "
+                f"{local_doctor.get('headline') or ''}".strip()
+            )
+            if local_doctor.get("detail"):
+                support_summary_lines.append(f"Local Doctor detail: {local_doctor.get('detail')}")
+            recommended_fix = (
+                local_doctor.get("recommended_fix")
+                if isinstance(local_doctor.get("recommended_fix"), dict)
+                else {}
+            )
+            if recommended_fix.get("label") or recommended_fix.get("detail"):
+                support_summary_lines.append(
+                    "Recommended fix: "
+                    f"{recommended_fix.get('label') or 'Fix'}"
+                    + (f" - {recommended_fix.get('detail')}" if recommended_fix.get("detail") else "")
+                )
+            last_fix_attempt = (
+                local_doctor.get("last_fix_attempt")
+                if isinstance(local_doctor.get("last_fix_attempt"), dict)
+                else {}
+            )
+            if last_fix_attempt.get("summary"):
+                support_summary_lines.append(f"Local Doctor fix loop: {last_fix_attempt.get('summary')}")
+            if last_fix_attempt.get("before_after"):
+                support_summary_lines.append(str(last_fix_attempt.get("before_after")))
+        economics = dashboard.get("economics") if isinstance(dashboard.get("economics"), dict) else {}
+        if economics:
+            economics_sources: list[str] = []
+            if economics.get("today_source_key"):
+                economics_sources.append(
+                    f"earnings {economics.get('today_source_key')} ({economics.get('today_source_confidence') or 'unknown'} confidence)"
+                )
+            if economics.get("power_source_key"):
+                economics_sources.append(
+                    f"power {economics.get('power_source_key')} ({economics.get('power_source_confidence') or 'unknown'} confidence)"
+                )
+            if economics.get("basis_label"):
+                economics_sources.append(f"basis {economics.get('basis_label')}")
+            if economics.get("heat_assumption_source"):
+                economics_sources.append(
+                    f"heat assumptions {economics.get('heat_assumption_source')} "
+                    f"({economics.get('heat_assumption_confidence') or 'unknown'} confidence)"
+                )
+            support_summary_lines.append(
+                "Economics: "
+                f"today {format_usd(economics.get('today_earnings_usd'))}, "
+                f"electricity {format_usd(economics.get('electricity_cost_usd'))}, "
+                f"heat offset {format_usd(economics.get('heat_offset_usd'))}, "
+                f"net {format_usd(economics.get('net_value_usd'))}. "
+                + (f"Sources: {'; '.join(economics_sources)}." if economics_sources else "")
+            )
+        fault_drills = payload.get("fault_drills") if isinstance(payload.get("fault_drills"), dict) else {}
+        last_drill = fault_drills.get("last_drill") if isinstance(fault_drills.get("last_drill"), dict) else {}
+        if last_drill.get("scenario"):
+            support_summary_lines.append(
+                "Fault drill: "
+                f"{last_drill.get('scenario')} -> {last_drill.get('status')}. "
+                f"{last_drill.get('summary') or ''}".strip()
+            )
 
         with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             archive.writestr("status.json", json.dumps(payload, indent=2))
+            archive.writestr("diagnostics-summary.json", json.dumps(diagnostics_summary, indent=2))
+            archive.writestr("support-summary.txt", "\n".join(support_summary_lines) + "\n")
             archive.writestr("env.redacted", self.redacted_env())
             if self.guided_installer.runtime_settings_path.exists():
                 archive.writestr("runtime-settings.redacted.json", self.redacted_runtime_settings())
@@ -3097,6 +6474,11 @@ class NodeRuntimeService:
             recovery_note = self.guided_installer.credentials_dir / "recovery-note.txt"
             if recovery_note.exists():
                 archive.writestr("recovery-note.txt", recovery_note.read_text(encoding="utf-8"))
+            if self.fault_injection_state_path.exists():
+                archive.writestr(
+                    "fault-injection-state.json",
+                    self.fault_injection_state_path.read_text(encoding="utf-8"),
+                )
 
         self.diagnostics_state.last_bundle_name = bundle_name
         self.diagnostics_state.last_bundle_created_at = generated_at
@@ -3182,7 +6564,7 @@ class NodeRuntimeService:
                         last_checked = datetime.fromisoformat(self.update_state.last_checked_at)
                         due = (datetime.now(timezone.utc) - last_checked).total_seconds() >= self.update_state.interval_hours * 3600
                     if due:
-                        self.check_for_updates(apply=True)
+                        self.check_for_updates(apply=True, automatic=True)
             except Exception as error:  # pragma: no cover
                 loop_request_id = request_id()
                 self.update_state.last_error = (
@@ -3192,6 +6574,38 @@ class NodeRuntimeService:
                 self.save_state()
                 self.log(f"[request {loop_request_id}] Automatic signed runtime release check failed: {error}")
             self.shutdown_event.wait(60)
+
+    def local_doctor_loop(self) -> None:
+        self.queue_background_doctor("service_start")
+        while not self.shutdown_event.is_set():
+            try:
+                trigger = self.pop_background_doctor_trigger()
+                if trigger:
+                    self.run_local_doctor(
+                        background=True,
+                        trigger=trigger,
+                        attach_bundle_on_failure=False,
+                    )
+                    continue
+                if self.local_doctor_background_due() and self.local_doctor_can_run_in_background():
+                    self.run_local_doctor(
+                        background=True,
+                        trigger="idle_interval",
+                        attach_bundle_on_failure=False,
+                    )
+                    continue
+            except Exception as error:  # pragma: no cover
+                loop_request_id = request_id()
+                self.update_local_doctor_state(
+                    last_error=(
+                        "Automatic Local Doctor hit an unexpected error. "
+                        f"Check the local service log with request id {loop_request_id}."
+                    ),
+                    last_check_mode="background",
+                )
+                self.log(f"[request {loop_request_id}] Automatic Local Doctor failed: {error}")
+            self.local_doctor_wakeup.wait(LOCAL_DOCTOR_LOOP_SECONDS)
+            self.local_doctor_wakeup.clear()
 
     def self_heal_check(self) -> dict[str, Any]:
         health = self.runtime_health_snapshot()
@@ -3239,7 +6653,24 @@ class NodeRuntimeService:
                     fix_available=False,
                 )
                 return self.status_payload()
-            self.remember_known_good_release()
+            self.remember_known_good_runtime_state()
+            watchdog_recovery = self.watchdog_recovery(health=health)
+            if watchdog_recovery is not None:
+                success, message, action = watchdog_recovery
+                self.update_self_heal_state(
+                    status="healthy" if success else "error",
+                    last_result=(
+                        message
+                        if success
+                        else f"Self-healing could not complete the watchdog recovery automatically: {message}"
+                    ),
+                    last_issue=None,
+                    last_error=None if success else message,
+                    last_action=action,
+                    last_repaired_at=now_iso() if success else self.self_heal_state.last_repaired_at,
+                    fix_available=not success,
+                )
+                return self.status_payload()
             applied, autopilot_result = self.apply_autopilot_tuning()
             if applied:
                 self.update_self_heal_state(
@@ -3332,7 +6763,11 @@ class NodeRuntimeService:
         while not self.shutdown_event.is_set():
             try:
                 if self.self_heal_state.enabled and not self.repair_lock.locked():
+                    previous_action = self.self_heal_state.last_action
                     self.self_heal_check()
+                    trigger = self.local_doctor_background_trigger_for_self_heal(previous_action)
+                    if trigger:
+                        self.queue_background_doctor(trigger)
             except Exception as error:  # pragma: no cover
                 loop_request_id = request_id()
                 self.update_self_heal_state(
@@ -3352,6 +6787,7 @@ class NodeRuntimeService:
     def request_shutdown(self) -> dict[str, Any]:
         self.log("Shutdown requested for node runtime service.")
         self.shutdown_event.set()
+        self.local_doctor_wakeup.set()
         return {"ok": True}
 
     def write_meta(self) -> None:
@@ -3520,6 +6956,10 @@ def make_handler(service: NodeRuntimeService, server_ref: dict[str, ThreadingHTT
                     payload = self._read_json()
                     self._send_json(service.guided_installer.start_install(payload))
                     return
+                if path == "/api/setup-preflight":
+                    payload = self._read_json()
+                    self._send_json(service.setup_preflight_payload(payload))
+                    return
                 if path == "/api/runtime/start":
                     self._send_json(service.start_runtime())
                     return
@@ -3528,6 +6968,10 @@ def make_handler(service: NodeRuntimeService, server_ref: dict[str, ThreadingHTT
                     return
                 if path == "/api/runtime/restart":
                     self._send_json(service.restart_runtime())
+                    return
+                if path == "/api/heat-governor":
+                    payload = self._read_json()
+                    self._send_json(service.configure_heat_governor(payload))
                     return
                 if path == "/api/updates/check":
                     payload = self._read_json()
@@ -3539,6 +6983,7 @@ def make_handler(service: NodeRuntimeService, server_ref: dict[str, ThreadingHTT
                         service.configure_updates(
                             enabled=bool(payload.get("enabled")),
                             interval_hours=int(payload.get("interval_hours", 24)),
+                            preferred_channel=str(payload.get("preferred_channel", DEFAULT_UPDATE_CHANNEL)),
                         )
                     )
                     return
@@ -3557,11 +7002,21 @@ def make_handler(service: NodeRuntimeService, server_ref: dict[str, ThreadingHTT
                 if path == "/api/repair":
                     self._send_json(service.repair_runtime())
                     return
+                if path == "/api/local-doctor":
+                    self._send_json(service.run_local_doctor())
+                    return
+                if path == "/api/local-doctor/fix":
+                    self._send_json(service.apply_local_doctor_fix())
+                    return
                 if path == "/api/diagnostics":
                     self._send_json(service.create_diagnostics_bundle())
                     return
                 if path == "/api/support/send":
                     self._send_json(service.send_support_bundle())
+                    return
+                if path == "/api/fault-drills/run":
+                    payload = self._read_json()
+                    self._send_json(service.run_fault_drill(str(payload.get("scenario") or "")))
                     return
                 if path == "/api/shutdown":
                     self._send_json(service.request_shutdown())
@@ -3667,6 +7122,8 @@ def command_run(host: str, port: int) -> int:
     server_ref["server"] = server
     auto_thread = threading.Thread(target=service.auto_update_loop, daemon=True)
     auto_thread.start()
+    local_doctor_thread = threading.Thread(target=service.local_doctor_loop, daemon=True)
+    local_doctor_thread.start()
     self_heal_thread = threading.Thread(target=service.self_heal_loop, daemon=True)
     self_heal_thread.start()
 

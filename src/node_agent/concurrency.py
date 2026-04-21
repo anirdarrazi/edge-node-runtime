@@ -87,13 +87,65 @@ def resolved_embeddings_microbatch_assignment_limit(
     return min(64, max(recommended_bundle, configured_bundle or 1))
 
 
+def resolved_local_queue_assignment_limit(
+    *,
+    supported_models: str | None,
+    operations: list[str] | tuple[str, ...],
+    gpu_memory_gb: float | None,
+    max_concurrent_assignments: int,
+    pull_bundle_size: int,
+    max_microbatch_assignments: Any = None,
+    override: Any = None,
+) -> int:
+    configured_override = _safe_positive_int(override)
+    if configured_override is not None:
+        return max(max_concurrent_assignments, min(64, configured_override))
+
+    configured_bundle = _safe_positive_int(pull_bundle_size) or 1
+    embedding_microbatch_limit = resolved_embeddings_microbatch_assignment_limit(
+        supported_models=supported_models,
+        operations=operations,
+        gpu_memory_gb=gpu_memory_gb,
+        max_concurrent_assignments=max_concurrent_assignments,
+        pull_bundle_size=pull_bundle_size,
+        override=max_microbatch_assignments,
+    )
+    if embedding_microbatch_limit is not None:
+        recommended = max(
+            configured_bundle,
+            max_concurrent_assignments * 4,
+            embedding_microbatch_limit + (max(1, max_concurrent_assignments) * 4),
+        )
+        return min(64, max(max_concurrent_assignments, recommended))
+
+    recommended = max(max_concurrent_assignments * 4, configured_bundle)
+    return min(32, max(max_concurrent_assignments, recommended))
+
+
 def max_worker_assignments_from_capabilities(capabilities: dict[str, Any]) -> int:
+    if capabilities.get("heat_governor_paused") is True:
+        return 0
+    if "max_concurrent_assignments" in capabilities and _safe_nonnegative_int(capabilities.get("max_concurrent_assignments")) == 0:
+        return 0
     base_limit = _safe_positive_int(capabilities.get("max_concurrent_assignments")) or 1
     embedding_limit = _safe_nonnegative_int(capabilities.get("max_concurrent_assignments_embeddings"))
     return max(1, base_limit, embedding_limit)
 
 
+def max_microbatch_assignments_from_capabilities(capabilities: dict[str, Any]) -> int:
+    if capabilities.get("heat_governor_paused") is True:
+        return 0
+    return max(1, _safe_nonnegative_int(capabilities.get("max_microbatch_assignments_embeddings")) or 1)
+
+
 def max_local_queue_assignments_from_capabilities(capabilities: dict[str, Any]) -> int:
+    if capabilities.get("heat_governor_paused") is True:
+        return 0
+    explicit_limit = _safe_nonnegative_int(capabilities.get("max_local_queue_assignments"))
+    if explicit_limit > 0:
+        return explicit_limit
+    if "max_concurrent_assignments" in capabilities and _safe_nonnegative_int(capabilities.get("max_concurrent_assignments")) == 0:
+        return 0
     base_limit = _safe_positive_int(capabilities.get("max_concurrent_assignments")) or 1
     embedding_limit = _safe_nonnegative_int(capabilities.get("max_concurrent_assignments_embeddings"))
     microbatch_limit = _safe_nonnegative_int(capabilities.get("max_microbatch_assignments_embeddings"))

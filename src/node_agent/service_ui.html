@@ -169,7 +169,8 @@
       }
 
       .setup-verified-notice,
-      .blocker-card {
+      .blocker-card,
+      .setup-checks-shell {
         display: grid;
         gap: 10px;
       }
@@ -195,6 +196,44 @@
       .blocker-card[data-state="clear"] {
         border-color: rgba(37, 111, 75, 0.18);
         background: rgba(245, 255, 249, 0.75);
+      }
+
+      .setup-checks-shell {
+        border-color: rgba(25, 34, 40, 0.12);
+        background: rgba(255, 255, 255, 0.72);
+      }
+
+      .setup-checks-header,
+      .setup-check-title {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .setup-check-list {
+        display: grid;
+        gap: 10px;
+      }
+
+      .setup-check-row {
+        display: grid;
+        gap: 8px;
+        padding: 12px 14px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: rgba(255, 255, 255, 0.72);
+      }
+
+      .setup-check-copy,
+      .setup-check-fix {
+        color: var(--muted);
+        line-height: 1.55;
+      }
+
+      .setup-check-fix strong {
+        display: inline;
+        margin-right: 6px;
       }
 
       .pill {
@@ -424,7 +463,7 @@
       <section class="hero">
         <p class="eyebrow">AUTONOMOUSc Local Node Service</p>
         <h1>One local app for Quick Start, runtime health, updates, and support.</h1>
-<p class="lede">This app is the normal owner path for checkout builds. Start with Quick Start, approve the machine once, and then use the same local app to keep the node healthy and online, even through the slower first-time download and warm-up steps.</p>
+<p class="lede">This app is the normal owner path for the packaged appliance. Start with Quick Start once, approve the machine, and then use the same local app to keep the node healthy and online through first-time downloads, warm-up, signed updates, and recovery.</p>
         <div class="hero-grid">
           <div class="step-chip">
             <strong>Quick Start</strong>
@@ -485,21 +524,37 @@
                   <p id="profile-summary" class="supporting">The service is building an inferred runtime plan for this machine.</p>
                 </div>
                 <div id="recommendation-grid" class="status-grid"></div>
+                <div class="callout setup-checks-shell">
+                  <div class="setup-checks-header">
+                    <strong id="wizard-headline">First-run appliance plan</strong>
+                    <span id="wizard-pill" class="pill warning">Planning</span>
+                  </div>
+                  <p id="wizard-copy" class="supporting">Quick Start is turning this machine into a self-managing heat-and-compute appliance.</p>
+                  <div id="wizard-list" class="setup-check-list">
+                    <div class="setup-check-row">
+                      <div class="setup-check-title">
+                        <strong>Preparing the first-run plan</strong>
+                        <span class="pill warning">Checking</span>
+                      </div>
+                      <p class="setup-check-copy">GPU detection, heat profile, heat and earnings estimate, install path, bootstrap model, and claim readiness will appear here.</p>
+                    </div>
+                  </div>
+                </div>
                 <div class="callout">
                   <strong id="operator-mode-title">Everything else stays automatic</strong>
-                  <p id="operator-mode-copy" class="supporting">Normal setup keeps routing, startup model, concurrency, capacity, and local credentials automatic on this machine. Operator controls stay hidden unless this app is opened in operator/admin mode.</p>
+                  <p id="operator-mode-copy" class="supporting">Normal setup keeps routing, startup model, concurrency, capacity, and local credentials automatic on this machine. Advanced support settings stay hidden unless you intentionally open them here.</p>
                 </div>
                 <div class="button-row">
                   <button id="refresh-button" type="button" class="secondary">Refresh status</button>
                 </div>
               </div>
               <div id="operator-mode-button-row" class="button-row" hidden>
-                <button id="toggle-operator-mode" type="button" class="secondary">Open operator/admin mode</button>
+                <button id="toggle-operator-mode" type="button" class="secondary">Show advanced support settings</button>
               </div>
             </details>
 
             <div id="operator-settings-shell" class="callout" hidden>
-              <strong>Operator/admin settings</strong>
+              <strong>Advanced support settings</strong>
               <p class="supporting">Use this for support, self-hosted control plane changes, or manual routing and model overrides. Normal owners should usually leave these alone.</p>
               <details id="operator-settings">
                 <summary>Show advanced controls</summary>
@@ -512,6 +567,7 @@
                     </select>
                   </label>
                   <label>Control plane URL<input id="edge_control_url" placeholder="https://edge.autonomousc.com"></label>
+                  <label>Offline appliance bundle directory<input id="offline_install_bundle_dir" placeholder="C:\\AUTONOMOUSc\\offline-bundle"></label>
                   <label>Region<input id="node_region" placeholder="eu-se-1"></label>
                   <label>Trust tier
                     <select id="trust_tier">
@@ -560,6 +616,46 @@
               <button id="restart-runtime" type="button" class="secondary">Restart runtime</button>
             </div>
           </div>
+
+          <div class="callout">
+            <strong>Heat governor</strong>
+            <p id="heat-governor-copy" class="supporting">Default output is 100%. Lower it when the room is warm, or use auto heat when this machine should follow the room target.</p>
+            <div class="button-row" id="heat-mode-buttons">
+              <button type="button" data-heat-mode="0" class="secondary">0%</button>
+              <button type="button" data-heat-mode="20" class="secondary">20%</button>
+              <button type="button" data-heat-mode="50" class="secondary">50%</button>
+              <button type="button" data-heat-mode="100">100%</button>
+              <button type="button" data-heat-mode="auto" class="secondary">Auto heat</button>
+            </div>
+            <div class="button-row" id="heat-objective-buttons">
+              <button type="button" data-owner-objective="balanced">Balanced</button>
+              <button type="button" data-owner-objective="earnings_only" class="secondary">Earnings only</button>
+              <button type="button" data-owner-objective="heat_first" class="secondary">Heat first</button>
+            </div>
+            <div class="dual">
+              <label>Room temp C<input id="heat-room-temp" type="number" step="0.1" placeholder="19.5"></label>
+              <label>Target temp C<input id="heat-target-temp" type="number" step="0.1" placeholder="21"></label>
+            </div>
+            <div class="dual">
+              <label>Outside hint C<input id="heat-outside-temp" type="number" step="0.1" placeholder="0"></label>
+              <label>GPU limit C<input id="heat-gpu-limit" type="number" min="65" max="95" step="1" placeholder="82"></label>
+            </div>
+            <div class="dual">
+              <label>Quiet start<input id="heat-quiet-start" type="time"></label>
+              <label>Quiet end<input id="heat-quiet-end" type="time"></label>
+            </div>
+            <div class="dual">
+              <label>Max power cap W<input id="heat-max-power-cap" type="number" min="1" step="1" placeholder="220"></label>
+              <label>Electricity USD/kWh<input id="heat-energy-price" type="number" min="0" step="0.01" placeholder="0.18"></label>
+            </div>
+            <label class="checkbox"><input id="heat-power-limit-enabled" type="checkbox" checked>Allow GPU power-limit tuning</label>
+            <p id="heat-governor-policy" class="meta">Balanced policy. Quiet hours and power cap are optional.</p>
+            <p id="heat-governor-detail" class="meta">Waiting for the node agent to report thermal state.</p>
+            <p id="heat-governor-why" class="meta">The local app will explain why this node is throttling, pausing, or ramping back up.</p>
+            <div class="button-row">
+              <button id="save-heat-governor" type="button" class="secondary">Save heat settings</button>
+            </div>
+          </div>
         </article>
 
         <article class="panel stack">
@@ -576,6 +672,22 @@
             </div>
           </div>
 
+          <div id="dashboard-alerts" class="callout setup-checks-shell" hidden>
+            <div class="setup-checks-header">
+              <strong>Owner alerts</strong>
+              <span id="dashboard-alerts-pill" class="pill warning">Watching</span>
+            </div>
+            <div id="dashboard-alerts-list" class="setup-check-list"></div>
+          </div>
+
+          <div id="dashboard-timeline-shell" class="journey">
+            <div class="setup-checks-header">
+              <strong>What happened recently</strong>
+              <span id="dashboard-timeline-pill" class="pill warning">Watching</span>
+            </div>
+            <ul id="dashboard-timeline-list" class="journey-list"></ul>
+          </div>
+
           <div class="status-grid">
             <div class="status-card">
               <strong>Health</strong>
@@ -588,6 +700,12 @@
               <span id="dashboard-earnings-pill" class="pill">Checking</span>
               <span id="dashboard-earnings-value" class="metric-value">Loading...</span>
               <p id="dashboard-earnings-copy" class="meta"></p>
+            </div>
+            <div class="status-card">
+              <strong>Today earnings</strong>
+              <span id="dashboard-today_earnings-pill" class="pill">Checking</span>
+              <span id="dashboard-today_earnings-value" class="metric-value">Loading...</span>
+              <p id="dashboard-today_earnings-copy" class="meta"></p>
             </div>
             <div class="status-card">
               <strong>Last heartbeat</strong>
@@ -606,6 +724,24 @@
               <span id="dashboard-uptime-pill" class="pill">Checking</span>
               <span id="dashboard-uptime-value" class="metric-value">Loading...</span>
               <p id="dashboard-uptime-copy" class="meta"></p>
+            </div>
+            <div class="status-card">
+              <strong>Electricity</strong>
+              <span id="dashboard-electricity-pill" class="pill">Checking</span>
+              <span id="dashboard-electricity-value" class="metric-value">Loading...</span>
+              <p id="dashboard-electricity-copy" class="meta"></p>
+            </div>
+            <div class="status-card">
+              <strong>Heat offset</strong>
+              <span id="dashboard-heat_offset-pill" class="pill">Checking</span>
+              <span id="dashboard-heat_offset-value" class="metric-value">Loading...</span>
+              <p id="dashboard-heat_offset-copy" class="meta"></p>
+            </div>
+            <div class="status-card">
+              <strong>Net value</strong>
+              <span id="dashboard-net_value-pill" class="pill">Checking</span>
+              <span id="dashboard-net_value-value" class="metric-value">Loading...</span>
+              <p id="dashboard-net_value-copy" class="meta"></p>
             </div>
             <div class="status-card">
               <strong>Why idle</strong>
@@ -700,6 +836,23 @@
             </div>
           </div>
 
+          <div class="callout setup-checks-shell">
+            <div class="setup-checks-header">
+              <strong>Setup checks before claim</strong>
+              <span id="setup-check-summary-pill" class="pill warning">Checking</span>
+            </div>
+            <p id="setup-check-summary-copy" class="supporting">The local service is checking this machine before it opens a claim.</p>
+            <div id="setup-check-list" class="setup-check-list">
+              <div class="setup-check-row">
+                <div class="setup-check-title">
+                  <strong>Preparing local checks</strong>
+                  <span class="pill warning">Checking</span>
+                </div>
+                <p class="setup-check-copy">Docker, GPU access, disk, control-plane reachability, model cache, and runtime flags will appear here.</p>
+              </div>
+            </div>
+          </div>
+
           <div class="dual">
             <div class="callout">
               <strong>Start automatically</strong>
@@ -731,14 +884,36 @@
 
             <div class="callout">
               <strong>Update policy</strong>
-              <p class="supporting">The service can periodically fetch signed runtime releases and apply them for you.</p>
-              <label class="checkbox"><input id="auto_update_enabled" type="checkbox">Enable automatic signed runtime updates</label>
+              <p id="update-policy-copy" class="supporting">The service can periodically fetch signed appliance releases, verify them locally, and apply them for you.</p>
+              <label class="checkbox"><input id="auto_update_enabled" type="checkbox">Enable automatic signed appliance updates</label>
+              <label>Update track
+                <select id="auto_update_channel">
+                  <option value="stable">Stable</option>
+                  <option value="early">Early access</option>
+                </select>
+              </label>
               <label>Check interval (hours)<input id="auto_update_interval" type="number" min="1" max="168"></label>
+              <p id="update-release-copy" class="meta">Signed appliance verification status will appear here.</p>
               <div class="button-row">
                 <button id="save-update-policy" type="button">Save update policy</button>
                 <button id="check-updates" type="button" class="secondary">Check now</button>
                 <button id="apply-updates" type="button" class="secondary">Download and apply</button>
               </div>
+            </div>
+
+            <div class="callout">
+              <strong>Local Doctor</strong>
+              <p id="local-doctor-copy" class="supporting">One click re-checks Docker, GPU access, network reachability, model cache, warm readiness, and one tiny local inference.</p>
+              <p id="local-doctor-meta" class="meta">No Local Doctor run has been recorded yet.</p>
+              <p id="local-doctor-fix" class="meta">The recommended next fix will appear here when this machine needs one.</p>
+              <p id="local-doctor-verify" class="setup-check-fix" hidden></p>
+              <p id="local-doctor-verify-detail" class="meta" hidden></p>
+              <div class="button-row">
+                <button id="run-local-doctor" type="button">Run Local Doctor</button>
+                <button id="apply-local-doctor-fix" type="button" class="secondary" disabled>Apply recommended fix</button>
+              </div>
+              <div id="local-doctor-checks" class="setup-check-list"></div>
+              <a id="local-doctor-download-link" class="download-link" hidden>Download Local Doctor bundle</a>
             </div>
 
             <div class="callout">
@@ -777,6 +952,7 @@
       const claimQrShell = document.getElementById("claim-qr-shell");
       const claimQr = document.getElementById("claim-qr");
       const downloadLink = document.getElementById("download-link");
+      const localDoctorDownloadLink = document.getElementById("local-doctor-download-link");
       const profileInput = document.getElementById("setup_profile");
       const advancedProfileSelect = document.getElementById("advanced_setup_profile");
       const operatorModeToggle = document.getElementById("toggle-operator-mode");
@@ -790,9 +966,32 @@
       const setupVerifiedTitle = document.getElementById("setup-verified-title");
       const setupVerifiedCopy = document.getElementById("setup-verified-copy");
       const dismissSetupVerified = document.getElementById("dismiss-setup-verified");
+      const dashboardAlerts = document.getElementById("dashboard-alerts");
+      const dashboardAlertsPill = document.getElementById("dashboard-alerts-pill");
+      const dashboardAlertsList = document.getElementById("dashboard-alerts-list");
+      const dashboardTimelineShell = document.getElementById("dashboard-timeline-shell");
+      const dashboardTimelinePill = document.getElementById("dashboard-timeline-pill");
+      const dashboardTimelineList = document.getElementById("dashboard-timeline-list");
+      const localDoctorChecks = document.getElementById("local-doctor-checks");
+      const localDoctorVerify = document.getElementById("local-doctor-verify");
+      const localDoctorVerifyDetail = document.getElementById("local-doctor-verify-detail");
+      const applyLocalDoctorFixButton = document.getElementById("apply-local-doctor-fix");
+      const heatModeButtons = document.getElementById("heat-mode-buttons");
+      const heatObjectiveButtons = document.getElementById("heat-objective-buttons");
+      const heatGovernorCopy = document.getElementById("heat-governor-copy");
+      const heatGovernorPolicy = document.getElementById("heat-governor-policy");
+      const heatGovernorDetail = document.getElementById("heat-governor-detail");
+      const heatGovernorWhy = document.getElementById("heat-governor-why");
       const blockerCard = document.getElementById("blocker-card");
       const blockerTitle = document.getElementById("blocker-title");
       const blockerActionDetail = document.getElementById("blocker-action-detail");
+      const setupCheckSummaryPill = document.getElementById("setup-check-summary-pill");
+      const setupCheckSummaryCopy = document.getElementById("setup-check-summary-copy");
+      const setupCheckList = document.getElementById("setup-check-list");
+      const wizardHeadline = document.getElementById("wizard-headline");
+      const wizardPill = document.getElementById("wizard-pill");
+      const wizardCopy = document.getElementById("wizard-copy");
+      const wizardList = document.getElementById("wizard-list");
       const operatorModeAvailable = new URLSearchParams(window.location.search).get("operator") === "1";
       let formHydrated = false;
       let claimUrl = "";
@@ -802,6 +1001,7 @@
       let credentialsPresent = false;
       let operatorModeEnabled = false;
       let setupVerifiedNoticeKey = "";
+      let stickyApiError = "";
 
       function primeClaimWindow() {
         if (claimWindowPrimed || credentialsPresent) {
@@ -874,11 +1074,13 @@
       }
 
       function showApiError(message) {
+        stickyApiError = message || "";
         errorBanner.hidden = false;
         errorBanner.textContent = message;
       }
 
       function clearApiError() {
+        stickyApiError = "";
         errorBanner.hidden = true;
         errorBanner.textContent = "";
       }
@@ -905,12 +1107,12 @@
         operatorSettingsShell.hidden = !operatorModeEnabled;
         operatorSettings.open = operatorModeEnabled;
         operatorModeTitle.textContent = operatorModeEnabled
-          ? "Operator/admin mode is on"
+          ? "Advanced support settings are open"
           : "Everything else stays automatic";
         operatorModeCopy.textContent = operatorModeEnabled
           ? "Advanced routing, startup model, capacity, and control-plane settings are visible for this machine."
-          : "Normal setup keeps routing, startup model, concurrency, capacity, and local credentials automatic on this machine. Operator controls stay hidden unless this app is opened in operator/admin mode.";
-        operatorModeToggle.textContent = operatorModeEnabled ? "Hide operator/admin mode" : "Open operator/admin mode";
+          : "Normal setup keeps routing, startup model, concurrency, capacity, and local credentials automatic on this machine. Advanced support settings stay hidden unless you intentionally open them here.";
+        operatorModeToggle.textContent = operatorModeEnabled ? "Hide advanced support settings" : "Show advanced support settings";
         try {
           window.localStorage.setItem("edge-node-operator-mode", operatorModeEnabled ? "true" : "false");
         } catch (_error) {
@@ -932,6 +1134,7 @@
           ...payload,
           setup_profile: profileInput.value,
           edge_control_url: document.getElementById("edge_control_url").value.trim(),
+          offline_install_bundle_dir: document.getElementById("offline_install_bundle_dir").value.trim(),
           node_region: document.getElementById("node_region").value.trim(),
           trust_tier: document.getElementById("trust_tier").value,
           restricted_capable: document.getElementById("restricted_capable").checked,
@@ -946,6 +1149,7 @@
       function hydrateForm(config, updates) {
         if (!formHydrated && config) {
           document.getElementById("edge_control_url").value = config.edge_control_url || "";
+          document.getElementById("offline_install_bundle_dir").value = config.offline_install_bundle_dir || "";
           document.getElementById("node_label").value = config.node_label || "";
           document.getElementById("node_region").value = config.node_region || "";
           document.getElementById("trust_tier").value = config.trust_tier || "restricted";
@@ -961,7 +1165,87 @@
         if (updates) {
           document.getElementById("auto_update_enabled").checked = Boolean(updates.auto_update_enabled);
           document.getElementById("auto_update_interval").value = updates.interval_hours || 24;
+          document.getElementById("auto_update_channel").value = updates.preferred_channel || "stable";
         }
+      }
+
+      function setInputValue(id, value) {
+        const input = document.getElementById(id);
+        if (document.activeElement === input) return;
+        input.value = value === undefined || value === null ? "" : String(value);
+      }
+
+      function optionalNumber(id) {
+        const value = document.getElementById(id).value.trim();
+        return value === "" ? null : Number(value);
+      }
+
+      function optionalText(id) {
+        const value = document.getElementById(id).value.trim();
+        return value === "" ? null : value;
+      }
+
+      function heatGovernorPayload(mode = null) {
+        return {
+          mode: mode || (heatGovernorCopy.dataset.mode || "100"),
+          owner_objective: heatGovernorCopy.dataset.ownerObjective || "balanced",
+          room_temp_c: optionalNumber("heat-room-temp"),
+          target_temp_c: optionalNumber("heat-target-temp"),
+          outside_temp_c: optionalNumber("heat-outside-temp"),
+          quiet_hours_start_local: optionalText("heat-quiet-start"),
+          quiet_hours_end_local: optionalText("heat-quiet-end"),
+          gpu_temp_limit_c: optionalNumber("heat-gpu-limit"),
+          gpu_power_limit_enabled: document.getElementById("heat-power-limit-enabled").checked,
+          max_power_cap_watts: optionalNumber("heat-max-power-cap"),
+          energy_price_kwh: optionalNumber("heat-energy-price")
+        };
+      }
+
+      function renderHeatGovernor(heatGovernor) {
+        const plan = heatGovernor?.plan || {};
+        const mode = heatGovernor?.mode || plan.mode || "100";
+        const ownerObjective = heatGovernor?.owner_objective || plan.owner_objective || "balanced";
+        heatGovernorCopy.dataset.mode = mode;
+        heatGovernorCopy.dataset.ownerObjective = ownerObjective;
+        Array.from(heatModeButtons.querySelectorAll("button[data-heat-mode]")).forEach((button) => {
+          const active = button.dataset.heatMode === mode;
+          button.classList.toggle("secondary", !active);
+          button.disabled = false;
+        });
+        Array.from(heatObjectiveButtons.querySelectorAll("button[data-owner-objective]")).forEach((button) => {
+          const active = button.dataset.ownerObjective === ownerObjective;
+          button.classList.toggle("secondary", !active);
+          button.disabled = false;
+        });
+        setInputValue("heat-room-temp", heatGovernor?.room_temp_c ?? plan.room_temp_c);
+        setInputValue("heat-target-temp", heatGovernor?.target_temp_c ?? plan.target_temp_c);
+        setInputValue("heat-outside-temp", heatGovernor?.outside_temp_c ?? plan.outside_temp_c);
+        setInputValue("heat-quiet-start", heatGovernor?.quiet_hours_start_local ?? plan.quiet_hours_start_local);
+        setInputValue("heat-quiet-end", heatGovernor?.quiet_hours_end_local ?? plan.quiet_hours_end_local);
+        setInputValue("heat-gpu-limit", heatGovernor?.gpu_temp_limit_c ?? plan.gpu_temp_limit_c ?? 82);
+        setInputValue("heat-max-power-cap", heatGovernor?.max_power_cap_watts ?? plan.max_power_cap_watts);
+        setInputValue("heat-energy-price", heatGovernor?.energy_price_kwh);
+        document.getElementById("heat-power-limit-enabled").checked =
+          heatGovernor?.gpu_power_limit_enabled !== false;
+        const target = plan.effective_target_pct ?? plan.requested_target_pct ?? mode;
+        const paused = Boolean(plan.paused);
+        const quietHoursActive = Boolean(plan.quiet_hours_active);
+        heatGovernorCopy.textContent = paused
+          ? "New assignments are paused. Active work can finish, and staged work is returned safely."
+          : (quietHoursActive
+            ? `Quiet hours are active, so the node is holding a quieter ${target}% trickle.`
+            : `Heat target is ${target}%. The node will tune concurrency, microbatching, and GPU power around that target.`);
+        heatGovernorPolicy.textContent =
+          heatGovernor?.policy_summary ||
+          "Balanced policy. Quiet hours and power cap are optional.";
+        heatGovernorDetail.textContent =
+          plan.reason || "Default output is 100%. Use auto heat when this machine should follow the room target.";
+        const whyParts = Array.isArray(plan.decision_reasons)
+          ? Array.from(new Set(plan.decision_reasons.filter((entry) => typeof entry === "string" && entry.trim())))
+          : [];
+        heatGovernorWhy.textContent = whyParts.length
+          ? `Why: ${whyParts.join(" ")}`
+          : "The local app will explain why this node is throttling, pausing, or ramping back up.";
       }
 
       function renderHuggingFaceAccess(config) {
@@ -969,6 +1253,8 @@
         const repository = config?.hugging_face_repository || "";
         const tokenRequired = Boolean(config?.hugging_face_token_required);
         const tokenConfigured = Boolean(config?.hugging_face_token_configured);
+        const tokenSaved = Boolean(config?.hugging_face_token_saved);
+        const previewTokenSupplied = Boolean(config?.hugging_face_token_preview_supplied);
 
         if (!operatorModeEnabled || !tokenRequired) {
           huggingFaceTokenShell.hidden = true;
@@ -977,19 +1263,390 @@
         }
         huggingFaceTokenShell.hidden = false;
 
-        document.getElementById("hf-token-title").textContent = tokenConfigured
+        document.getElementById("hf-token-title").textContent = tokenSaved
           ? "Hugging Face access ready"
-          : "Hugging Face token required";
-        document.getElementById("hf-token-copy").textContent = tokenConfigured
+          : (previewTokenSupplied ? "Hugging Face token ready" : "Hugging Face token required");
+        document.getElementById("hf-token-copy").textContent = tokenSaved
           ? `A Hugging Face token for ${repository} is already saved locally. Paste a new token only if you want to replace it.`
-          : `${repository} is gated on Hugging Face. Add a token here so Quick Start can validate access before the first download starts.`;
-        document.getElementById("hf-token-hint").textContent = tokenConfigured
+          : (previewTokenSupplied
+            ? `A new Hugging Face token is ready for ${repository}. Continue and Quick Start will validate it before the first download starts.`
+            : `${repository} is gated on Hugging Face. Add a token here so Quick Start can validate access before the first download starts.`);
+        document.getElementById("hf-token-hint").textContent = tokenSaved
           ? "Leave the field blank to keep the saved token for future Quick Start runs."
-          : "The token stays local to this machine and is reused for future Quick Start runs.";
-        tokenInput.placeholder = tokenConfigured ? "Leave blank to keep the saved token" : "hf_...";
-        if (tokenConfigured) {
+          : (previewTokenSupplied
+            ? "The typed token stays in this form until Quick Start saves it locally for this machine."
+            : "The token stays local to this machine and is reused for future Quick Start runs.");
+        tokenInput.placeholder = tokenSaved ? "Leave blank to keep the saved token" : "hf_...";
+        if (tokenSaved && !tokenInput.value.trim()) {
           tokenInput.value = "";
         }
+      }
+
+      function checkTone(status) {
+        if (status === "pass") return "success";
+        if (status === "warn") return "warning";
+        return "danger";
+      }
+
+      function checkLabel(status) {
+        if (status === "pass") return "Ready";
+        if (status === "warn") return "Watch";
+        return "Fix";
+      }
+
+      function firstSetupBlocker(preflight) {
+        const setupAudit = preflight?.setup_audit || {};
+        const blockingChecks = Array.isArray(setupAudit?.blocking_checks) ? setupAudit.blocking_checks : [];
+        return blockingChecks.length ? blockingChecks[0] : null;
+      }
+
+      function firstSetupBlockerMessage(payload) {
+        const preview = payload?.setup_preview || {};
+        const previewPreflight = preview?.preflight || {};
+        const livePreflight = payload?.installer?.preflight || {};
+        const previewBlockers = Array.isArray(previewPreflight?.claim_gate_blockers) ? previewPreflight.claim_gate_blockers : [];
+        if (previewBlockers.length) {
+          return previewBlockers[0];
+        }
+        const liveBlockers = Array.isArray(livePreflight?.claim_gate_blockers) ? livePreflight.claim_gate_blockers : [];
+        return liveBlockers.length ? liveBlockers[0] : "";
+      }
+
+      function renderSetupChecks(preflight) {
+        const checks = Array.isArray(preflight?.setup_checks) ? preflight.setup_checks : [];
+        const audit = preflight?.setup_audit || {};
+        const automaticFixes = preflight?.automatic_fixes || {};
+        const readyForClaim = Boolean(preflight?.ready_for_claim);
+        const failed = Number(audit?.failed || 0);
+        const warnings = Number(audit?.warnings || 0);
+        const total = Number(audit?.total || checks.length || 0);
+        const summary = audit?.summary
+          || (readyForClaim
+            ? "Everything needed for claim and startup is ready on this machine."
+            : "Quick Start still has local setup work to clear before it should claim capacity.");
+        const blocker = firstSetupBlocker(preflight);
+
+        setPill(
+          setupCheckSummaryPill,
+          readyForClaim
+            ? "Ready for claim"
+            : (failed > 0 ? `${failed} blocker${failed === 1 ? "" : "s"}` : (warnings > 0 ? `${warnings} warning${warnings === 1 ? "" : "s"}` : `${total} checks`)),
+          readyForClaim ? "success" : (failed > 0 ? "danger" : "warning")
+        );
+        setupCheckSummaryCopy.textContent =
+          blocker?.fix
+          || automaticFixes?.summary
+          || summary;
+
+        setupCheckList.innerHTML = "";
+        if (!checks.length) {
+          const row = document.createElement("div");
+          row.className = "setup-check-row";
+          const title = document.createElement("div");
+          title.className = "setup-check-title";
+          const strong = document.createElement("strong");
+          strong.textContent = "Preparing local checks";
+          const pill = document.createElement("span");
+          pill.className = "pill warning";
+          pill.textContent = "Checking";
+          title.appendChild(strong);
+          title.appendChild(pill);
+          const copy = document.createElement("p");
+          copy.className = "setup-check-copy";
+          copy.textContent = "Docker, GPU access, disk, control-plane reachability, model cache, and runtime flags will appear here.";
+          row.appendChild(title);
+          row.appendChild(copy);
+          setupCheckList.appendChild(row);
+          return;
+        }
+
+        if (automaticFixes?.attempted && automaticFixes?.summary) {
+          const row = document.createElement("div");
+          row.className = "setup-check-row";
+          const title = document.createElement("div");
+          title.className = "setup-check-title";
+          const strong = document.createElement("strong");
+          strong.textContent = "Automatic fixes";
+          const pill = document.createElement("span");
+          pill.className = `pill ${automaticFixes?.pending_count ? "warning" : "success"}`;
+          pill.textContent = automaticFixes?.pending_count ? "Adjusted" : "Ready";
+          title.appendChild(strong);
+          title.appendChild(pill);
+          const copy = document.createElement("p");
+          copy.className = "setup-check-copy";
+          copy.textContent = automaticFixes.summary;
+          row.appendChild(title);
+          row.appendChild(copy);
+          setupCheckList.appendChild(row);
+        }
+
+        checks.forEach((check) => {
+          const row = document.createElement("div");
+          row.className = "setup-check-row";
+
+          const title = document.createElement("div");
+          title.className = "setup-check-title";
+          const strong = document.createElement("strong");
+          strong.textContent = check?.label || "Check";
+          const pill = document.createElement("span");
+          pill.className = `pill ${checkTone(check?.status)}`;
+          pill.textContent = checkLabel(check?.status);
+          title.appendChild(strong);
+          title.appendChild(pill);
+
+          const summary = document.createElement("p");
+          summary.className = "setup-check-copy";
+          summary.textContent = check?.summary || check?.detail || "Waiting for setup details.";
+
+          row.appendChild(title);
+          row.appendChild(summary);
+
+          if (check?.detail && check.detail !== check.summary) {
+            const detail = document.createElement("p");
+            detail.className = "meta";
+            detail.textContent = check.detail;
+            row.appendChild(detail);
+          }
+
+          if (check?.fix) {
+            const fix = document.createElement("p");
+            fix.className = "setup-check-fix";
+            const fixLabel = document.createElement("strong");
+            fixLabel.textContent = "Fix:";
+            const fixText = document.createElement("span");
+            fixText.textContent = ` ${check.fix}`;
+            fix.appendChild(fixLabel);
+            fix.appendChild(fixText);
+            row.appendChild(fix);
+          }
+
+          setupCheckList.appendChild(row);
+        });
+      }
+
+      function renderLocalDoctor(localDoctor) {
+        const checks = Array.isArray(localDoctor?.checks) ? localDoctor.checks : [];
+        const warmReadiness = localDoctor?.warm_readiness || {};
+        const inferenceProbe = localDoctor?.inference_probe || {};
+        const recommendedFix = localDoctor?.recommended_fix || {};
+        const lastFixAttempt = localDoctor?.last_fix_attempt || {};
+        const status = localDoctor?.status || "standing_by";
+        const statusLabel =
+          status === "healthy"
+            ? "Passed"
+            : status === "warning"
+              ? "Warning"
+              : status === "attention"
+                ? "Needs attention"
+                : "Standing by";
+
+        document.getElementById("local-doctor-copy").textContent =
+          localDoctor?.detail
+          || "One click re-checks Docker, GPU access, network reachability, model cache, warm readiness, and one tiny local inference.";
+        const triggerLabel =
+          localDoctor?.last_check_mode === "background"
+            ? ` automatically after ${String(localDoctor?.last_trigger || "the latest background check").replace(/^self_heal:/, "self-heal ").replace(/_/g, " ")}`
+            : "";
+        document.getElementById("local-doctor-meta").textContent =
+          localDoctor?.last_checked_at
+            ? `${localDoctor?.headline || "Local Doctor"} - checked ${localDoctor.last_checked_at}${triggerLabel}`
+            : "No Local Doctor run has been recorded yet.";
+        document.getElementById("local-doctor-fix").textContent =
+          recommendedFix?.detail
+            ? `Recommended fix: ${recommendedFix.label || "Fix"} - ${recommendedFix.detail}`
+            : "The recommended next fix will appear here when this machine needs one.";
+        if (lastFixAttempt?.summary) {
+          localDoctorVerify.hidden = false;
+          localDoctorVerify.textContent = lastFixAttempt.summary;
+        } else {
+          localDoctorVerify.hidden = true;
+          localDoctorVerify.textContent = "";
+        }
+        if (lastFixAttempt?.before_after) {
+          localDoctorVerifyDetail.hidden = false;
+          localDoctorVerifyDetail.textContent = lastFixAttempt.before_after;
+        } else {
+          localDoctorVerifyDetail.hidden = true;
+          localDoctorVerifyDetail.textContent = "";
+        }
+
+        localDoctorChecks.innerHTML = "";
+        const entries = [
+          ...checks,
+          {
+            key: "warm_readiness",
+            label: "Warm readiness",
+            status: warmReadiness?.status || "warn",
+            summary: warmReadiness?.summary || "Warm readiness has not been checked yet.",
+            detail: warmReadiness?.detail || "",
+            tone: warmReadiness?.tone || "warning",
+          },
+          {
+            key: "inference_probe",
+            label: "Local inference",
+            status: inferenceProbe?.status || "warn",
+            summary: inferenceProbe?.summary || "The tiny local inference probe has not run yet.",
+            detail: inferenceProbe?.detail || "",
+            tone: inferenceProbe?.tone || "warning",
+          }
+        ];
+
+        if (!entries.length) {
+          const row = document.createElement("div");
+          row.className = "setup-check-row";
+          const title = document.createElement("div");
+          title.className = "setup-check-title";
+          const strong = document.createElement("strong");
+          strong.textContent = "Waiting for Local Doctor";
+          const pill = document.createElement("span");
+          pill.className = "pill warning";
+          pill.textContent = "Standing by";
+          title.appendChild(strong);
+          title.appendChild(pill);
+          const copy = document.createElement("p");
+          copy.className = "setup-check-copy";
+          copy.textContent = "Run Local Doctor to build an end-to-end health report for this machine.";
+          row.appendChild(title);
+          row.appendChild(copy);
+          localDoctorChecks.appendChild(row);
+        } else {
+          entries.forEach((entry) => {
+            const row = document.createElement("div");
+            row.className = "setup-check-row";
+            const title = document.createElement("div");
+            title.className = "setup-check-title";
+            const strong = document.createElement("strong");
+            strong.textContent = entry?.label || "Doctor check";
+            const pill = document.createElement("span");
+            const entryTone = entry?.tone || (entry?.status === "pass" ? "success" : (entry?.status === "warn" ? "warning" : "danger"));
+            pill.className = `pill ${entryTone}`;
+            pill.textContent =
+              entry?.status === "pass"
+                ? "Passed"
+                : entry?.status === "warn"
+                  ? "Warning"
+                  : entry?.status === "healthy"
+                    ? "Passed"
+                    : entry?.status === "warning"
+                      ? "Warning"
+                      : entry?.status === "attention"
+                        ? "Needs attention"
+                        : "Needs attention";
+            title.appendChild(strong);
+            title.appendChild(pill);
+
+            const copy = document.createElement("p");
+            copy.className = "setup-check-copy";
+            copy.textContent = entry?.summary || entry?.detail || "Local Doctor finished this check.";
+
+            row.appendChild(title);
+            row.appendChild(copy);
+            if (entry?.detail && entry.detail !== entry.summary) {
+              const detail = document.createElement("p");
+              detail.className = "meta";
+              detail.textContent = entry.detail;
+              row.appendChild(detail);
+            }
+            localDoctorChecks.appendChild(row);
+          });
+        }
+
+        if (localDoctor?.attached_bundle_name) {
+          localDoctorDownloadLink.hidden = false;
+          localDoctorDownloadLink.href = `/downloads/${encodeURIComponent(localDoctor.attached_bundle_name)}`;
+          localDoctorDownloadLink.textContent =
+            localDoctor?.attached_bundle_created_at
+              ? `Download ${localDoctor.attached_bundle_name} from Local Doctor (${localDoctor.attached_bundle_created_at})`
+              : `Download ${localDoctor.attached_bundle_name} from Local Doctor`;
+        } else {
+          localDoctorDownloadLink.hidden = true;
+          localDoctorDownloadLink.removeAttribute("href");
+        }
+
+        document.getElementById("run-local-doctor").textContent =
+          status === "attention"
+            ? "Run Local Doctor again"
+            : "Run Local Doctor";
+        document.getElementById("run-local-doctor").dataset.status = status;
+        document.getElementById("run-local-doctor").title = `${statusLabel} - ${localDoctor?.headline || "Local Doctor"}`;
+        const automatedFixAvailable = Boolean(recommendedFix?.automated) && Boolean(recommendedFix?.detail);
+        applyLocalDoctorFixButton.disabled = !automatedFixAvailable;
+        applyLocalDoctorFixButton.textContent = automatedFixAvailable
+          ? "Apply recommended fix"
+          : "No automatic fix";
+        applyLocalDoctorFixButton.title = automatedFixAvailable
+          ? `${recommendedFix?.label || "Recommended fix"} will run now, then Local Doctor will re-check the machine automatically.`
+          : "Local Doctor did not find a safe one-click fix right now.";
+      }
+
+      function wizardTone(step) {
+        return step?.tone || "warning";
+      }
+
+      function wizardLabel(step) {
+        if (step?.tone === "success") return "Ready";
+        if (step?.tone === "danger") return "Fix";
+        return "Watch";
+      }
+
+      function renderFirstRunWizard(ownerSetup) {
+        const wizard = ownerSetup?.first_run_wizard || {};
+        const steps = Array.isArray(wizard?.steps) ? wizard.steps : [];
+        wizardHeadline.textContent = wizard?.headline || "First-run appliance plan";
+        wizardCopy.textContent =
+          wizard?.detail || "Quick Start is building a hardware-first setup plan for this machine.";
+        wizardList.innerHTML = "";
+
+        if (!steps.length) {
+          const row = document.createElement("div");
+          row.className = "setup-check-row";
+          row.innerHTML = `
+            <div class="setup-check-title">
+              <strong>Preparing the first-run plan</strong>
+              <span class="pill warning">Checking</span>
+            </div>
+            <p class="setup-check-copy">GPU detection, heat profile, heat and earnings estimate, install path, bootstrap model, and claim readiness will appear here.</p>
+          `;
+          wizardList.appendChild(row);
+          setPill(wizardPill, "Planning", "warning");
+          return;
+        }
+
+        const hasDanger = steps.some((step) => wizardTone(step) === "danger");
+        const hasWarning = steps.some((step) => wizardTone(step) === "warning");
+        setPill(
+          wizardPill,
+          hasDanger ? "Needs attention" : (hasWarning ? "In progress" : "Ready"),
+          hasDanger ? "danger" : (hasWarning ? "warning" : "success")
+        );
+
+        steps.forEach((step) => {
+          const row = document.createElement("div");
+          row.className = "setup-check-row";
+
+          const title = document.createElement("div");
+          title.className = "setup-check-title";
+          const strong = document.createElement("strong");
+          strong.textContent = step?.label || "Step";
+          const pill = document.createElement("span");
+          pill.className = `pill ${wizardTone(step)}`;
+          pill.textContent = wizardLabel(step);
+          title.appendChild(strong);
+          title.appendChild(pill);
+
+          const value = document.createElement("p");
+          value.className = "recommendation-value";
+          value.textContent = step?.value || "Pending";
+
+          const detail = document.createElement("p");
+          detail.className = "meta";
+          detail.textContent = step?.detail || "";
+
+          row.appendChild(title);
+          row.appendChild(value);
+          row.appendChild(detail);
+          wizardList.appendChild(row);
+        });
       }
 
       function renderRecommendations(ownerSetup) {
@@ -1060,7 +1717,21 @@
         document.getElementById("dashboard-detail").textContent =
           dashboard?.detail || "Health, earnings, idle reason, and recent changes will appear here.";
 
-        ["health", "earnings", "heartbeat", "model", "uptime", "idle", "changes", "autopilot", "model_cache"].forEach((key) => {
+        [
+          "health",
+          "earnings",
+          "today_earnings",
+          "heartbeat",
+          "model",
+          "uptime",
+          "electricity",
+          "heat_offset",
+          "net_value",
+          "idle",
+          "changes",
+          "autopilot",
+          "model_cache"
+        ].forEach((key) => {
           const card = cards[key] || {};
           const pillLabel =
             card.badge ||
@@ -1074,6 +1745,81 @@
           document.getElementById(`dashboard-${key}-copy`).textContent =
             card.detail || "Waiting for local dashboard data.";
         });
+      }
+
+      function renderDashboardAlerts(dashboard) {
+        const alerts = Array.isArray(dashboard?.alerts) ? dashboard.alerts : [];
+        dashboardAlertsList.innerHTML = "";
+        if (!alerts.length) {
+          dashboardAlerts.hidden = true;
+          setPill(dashboardAlertsPill, "Watching", "success");
+          return;
+        }
+        const hasDanger = alerts.some((alert) => alert?.tone === "danger");
+        const hasWarning = alerts.some((alert) => alert?.tone === "warning");
+        setPill(
+          dashboardAlertsPill,
+          `${alerts.length} alert${alerts.length === 1 ? "" : "s"}`,
+          hasDanger ? "danger" : (hasWarning ? "warning" : "success")
+        );
+        alerts.forEach((alert) => {
+          const row = document.createElement("div");
+          row.className = "setup-check-row";
+
+          const title = document.createElement("div");
+          title.className = "setup-check-title";
+          const strong = document.createElement("strong");
+          strong.textContent = alert?.title || "Owner alert";
+          const pill = document.createElement("span");
+          const toneName = alert?.tone === "danger" ? "danger" : (alert?.tone === "success" ? "success" : "warning");
+          pill.className = `pill ${toneName}`;
+          pill.textContent =
+            alert?.badge ||
+            (toneName === "danger" ? "Needs attention" : (toneName === "success" ? "Recovered" : "Watching"));
+          title.appendChild(strong);
+          title.appendChild(pill);
+
+          const detail = document.createElement("p");
+          detail.className = "setup-check-copy";
+          detail.textContent = alert?.detail || "The local service has an owner-facing update.";
+
+          row.appendChild(title);
+          row.appendChild(detail);
+          dashboardAlertsList.appendChild(row);
+        });
+        dashboardAlerts.hidden = false;
+      }
+
+      function renderDashboardTimeline(dashboard) {
+        const items = Array.isArray(dashboard?.timeline) ? dashboard.timeline : [];
+        dashboardTimelineList.innerHTML = "";
+        if (!items.length) {
+          dashboardTimelineList.innerHTML =
+            "<li class='journey-item pending'><strong>Watching this node</strong><div class='meta'>Recovery actions, update results, and Local Doctor attachments will appear here.</div></li>";
+          setPill(dashboardTimelinePill, "Watching", "success");
+          dashboardTimelineShell.hidden = false;
+          return;
+        }
+        const hasDanger = items.some((item) => item?.tone === "danger");
+        const hasWarning = items.some((item) => item?.tone === "warning");
+        setPill(
+          dashboardTimelinePill,
+          `${items.length} event${items.length === 1 ? "" : "s"}`,
+          hasDanger ? "danger" : (hasWarning ? "warning" : "success")
+        );
+        items.forEach((item) => {
+          const row = document.createElement("li");
+          const toneName = item?.tone === "danger" ? "error" : (item?.tone === "success" ? "complete" : "warning");
+          row.className = `journey-item ${toneName}`;
+          const observed = item?.observed_label ? `<div class="meta">${item.observed_label}</div>` : "";
+          row.innerHTML = `
+            <strong>${item?.title || "Owner update"}</strong>
+            ${observed}
+            <div class="meta">${item?.detail || "The local service recorded a recent event."}</div>
+          `;
+          dashboardTimelineList.appendChild(row);
+        });
+        dashboardTimelineShell.hidden = false;
       }
 
       function renderSetupVerifiedNotice(dashboard) {
@@ -1111,11 +1857,14 @@
         const config = installer.config || {};
         const updates = payload.updates || {};
         const diagnostics = payload.diagnostics || {};
+        const localDoctor = payload.local_doctor || {};
         const ownerSetup = payload.owner_setup || installer.owner_setup || {};
+        const applianceRelease = payload.appliance_release || installer.appliance_release || {};
         const autostart = payload.autostart || installer.autostart || {};
         const launcher = payload.desktop_launcher || installer.desktop_launcher || {};
         const selfHealing = payload.self_healing || {};
         const dashboard = payload.dashboard || {};
+        const heatGovernor = payload.heat_governor || {};
         const claim = installerState.claim || null;
         const gpu = preflight.gpu || {};
         const nvidiaRuntime = preflight.nvidia_container_runtime || {};
@@ -1126,7 +1875,13 @@
         credentialsPresent = Boolean(runtime.credentials_present);
 
         renderDashboard(dashboard);
+        renderDashboardAlerts(dashboard);
+        renderDashboardTimeline(dashboard);
+        renderHeatGovernor(heatGovernor);
+        renderLocalDoctor(localDoctor);
         renderSetupVerifiedNotice(dashboard);
+        renderSetupChecks(preflight);
+        renderFirstRunWizard(ownerSetup);
         document.getElementById("next-headline").textContent = ownerSetup.headline || runtime.message || "Local node service is ready.";
         document.getElementById("next-detail").textContent = ownerSetup.detail || runtime.message || "Use Quick Start to bring this machine online.";
         document.getElementById("machine-summary").textContent =
@@ -1173,9 +1928,18 @@
           runtimeOk ? "The node agent and supporting services are running." : (runtime.message || "Runtime is idle.");
 
         const updateHealthy = !updates.pending_restart && !updates.last_error;
-        setPill(document.getElementById("update-pill"), updates.auto_update_enabled ? "Enabled" : "Manual", tone(updateHealthy, true));
+        const updateTrackLabel = applianceRelease.preferred_channel_label || (updates.preferred_channel === "early" ? "Early access" : "Stable");
+        setPill(
+          document.getElementById("update-pill"),
+          updates.auto_update_enabled ? `${updateTrackLabel} track` : "Manual",
+          tone(updateHealthy, true)
+        );
         document.getElementById("update-copy").textContent =
           updates.last_error || updates.last_result || "No update checks have run yet.";
+        document.getElementById("update-policy-copy").textContent =
+          applianceRelease.detail || "The service can periodically fetch signed appliance releases, verify them locally, and apply them for you.";
+        document.getElementById("update-release-copy").textContent =
+          applianceRelease.package_signature?.detail || applianceRelease.runtime_bundle_signature?.detail || "Signed appliance verification status will appear here.";
 
         setPill(document.getElementById("autostart-pill"), autostart.label || "Unavailable", tone(Boolean(autostart.enabled), Boolean(autostart.supported)));
         document.getElementById("autostart-copy").textContent =
@@ -1189,7 +1953,8 @@
         document.getElementById("install-launcher").disabled = !launcher.supported || Boolean(launcher.enabled);
         document.getElementById("remove-launcher").disabled = !launcher.supported || !launcher.enabled;
         const prerequisiteAction = selfHealing.prerequisite_action || {};
-        const hasSetupBlocker = Boolean(selfHealing.issue_code);
+        const setupBlocker = firstSetupBlocker(preflight);
+        const hasSetupBlocker = Boolean(selfHealing.issue_code || setupBlocker);
         const selfHealStatusLabel =
           selfHealing.status === "healthy"
             ? "Active"
@@ -1215,7 +1980,7 @@
           selfHealing.detail ||
           (
             hasSetupBlocker
-              ? "Setup found one prerequisite blocker. Use the recommended action below, then this app will re-check the machine."
+              ? (setupBlocker?.summary || "Setup found one prerequisite blocker. Clear it here, then this app will re-check the machine.")
               : (!engineReady
                 ? "Prerequisite-healing can open or start Docker, restore local setup files, and re-check disk space, GPU access, and automatic startup before the node comes online."
                 : registrationReady
@@ -1225,12 +1990,12 @@
         blockerActionDetail.textContent =
           prerequisiteAction.detail ||
           (hasSetupBlocker
-            ? "Use this one recommended action first; lower-priority diagnostics stay visible below for support."
+            ? (setupBlocker?.fix || "Use this one recommended action first; lower-priority diagnostics stay visible below for support.")
             : "No prerequisite blocker is active right now.");
         document.getElementById("fix-machine").textContent =
-          prerequisiteAction.label || selfHealing.action_label || "Fix it";
+          prerequisiteAction.label || (setupBlocker ? "Manual fix" : selfHealing.action_label) || "Fix it";
         document.getElementById("fix-machine").title =
-          prerequisiteAction.detail || selfHealing.action_label || "Fix it";
+          prerequisiteAction.detail || setupBlocker?.fix || selfHealing.action_label || "Fix it";
         document.getElementById("fix-machine").disabled =
           Boolean(installerState.busy) ||
           Boolean(selfHealing.status === "repairing") ||
@@ -1271,6 +2036,8 @@
 
         if (installerState.error) {
           showApiError(installerState.error);
+        } else if (stickyApiError) {
+          showApiError(stickyApiError);
         } else {
           clearApiError();
         }
@@ -1353,25 +2120,51 @@
 
       setupForm.addEventListener("submit", async (event) => {
         event.preventDefault();
-        primeClaimWindow();
-        await runAction(async () => {
-          try {
-            return await postJson("/api/install", setupPayload());
-          } catch (error) {
-            resetPrimedClaimWindow(true);
-            throw error;
+        clearApiError();
+        const payload = setupPayload();
+        let claimPrimedForInstall = false;
+        try {
+          const preview = await postJson("/api/setup-preflight", payload);
+          render(preview);
+          const blockerMessage = firstSetupBlockerMessage(preview);
+          if (blockerMessage) {
+            throw new Error(blockerMessage);
           }
-        });
+          primeClaimWindow();
+          claimPrimedForInstall = true;
+          render(await postJson("/api/install", payload));
+        } catch (error) {
+          if (claimPrimedForInstall) {
+            resetPrimedClaimWindow(true);
+          }
+          const message = error instanceof Error ? error.message : "The request could not be completed.";
+          showApiError(message);
+        }
       });
 
       document.getElementById("refresh-button").addEventListener("click", () => { void refreshStatus(); });
       document.getElementById("start-runtime").addEventListener("click", async () => runAction(() => postJson("/api/runtime/start")));
       document.getElementById("stop-runtime").addEventListener("click", async () => runAction(() => postJson("/api/runtime/stop")));
       document.getElementById("restart-runtime").addEventListener("click", async () => runAction(() => postJson("/api/runtime/restart")));
+      heatModeButtons.addEventListener("click", async (event) => {
+        const button = event.target.closest("button[data-heat-mode]");
+        if (!button) return;
+        await runAction(() => postJson("/api/heat-governor", heatGovernorPayload(button.dataset.heatMode)));
+      });
+      heatObjectiveButtons.addEventListener("click", async (event) => {
+        const button = event.target.closest("button[data-owner-objective]");
+        if (!button) return;
+        heatGovernorCopy.dataset.ownerObjective = button.dataset.ownerObjective || "balanced";
+        await runAction(() => postJson("/api/heat-governor", heatGovernorPayload()));
+      });
+      document.getElementById("save-heat-governor").addEventListener("click", async () => {
+        await runAction(() => postJson("/api/heat-governor", heatGovernorPayload()));
+      });
       document.getElementById("save-update-policy").addEventListener("click", async () => {
         await runAction(() => postJson("/api/updates/configure", {
           enabled: document.getElementById("auto_update_enabled").checked,
-          interval_hours: Number(document.getElementById("auto_update_interval").value || "24")
+          interval_hours: Number(document.getElementById("auto_update_interval").value || "24"),
+          preferred_channel: document.getElementById("auto_update_channel").value || "stable"
         }));
       });
       document.getElementById("check-updates").addEventListener("click", async () => runAction(() => postJson("/api/updates/check", { apply: false })));
@@ -1391,6 +2184,8 @@
         setupVerifiedNotice.hidden = true;
       });
       document.getElementById("fix-machine").addEventListener("click", async () => runAction(() => postJson("/api/repair")));
+      document.getElementById("run-local-doctor").addEventListener("click", async () => runAction(() => postJson("/api/local-doctor")));
+      applyLocalDoctorFixButton.addEventListener("click", async () => runAction(() => postJson("/api/local-doctor/fix")));
       document.getElementById("send-support-bundle").addEventListener("click", async () => runAction(() => postJson("/api/support/send")));
       document.getElementById("create-diagnostics").addEventListener("click", async () => runAction(() => postJson("/api/diagnostics")));
       openClaimButton.addEventListener("click", () => {

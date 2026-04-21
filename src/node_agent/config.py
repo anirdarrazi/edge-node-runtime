@@ -5,6 +5,13 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .heat_governor import (
+    DEFAULT_GPU_TEMP_LIMIT_C,
+    DEFAULT_HEAT_GOVERNOR_MODE,
+    normalize_heat_governor_mode,
+    normalize_local_clock,
+    normalize_owner_objective,
+)
 from .inference_engine import (
     AUTO_DEPLOYMENT_TARGET,
     AUTO_INFERENCE_ENGINE,
@@ -24,6 +31,8 @@ class NodeAgentSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     edge_control_url: str = Field(default="http://edge-control:8787")
+    edge_control_fallback_urls: str | None = None
+    artifact_mirror_base_urls: str | None = None
     operator_token: str | None = None
     node_label: str = "AUTONOMOUSc Edge Node"
     node_region: str = "eu-se-1"
@@ -35,6 +44,9 @@ class NodeAgentSettings(BaseSettings):
     attestation_state_path: str = "/var/lib/autonomousc/credentials/attestation-state.json"
     recovery_note_path: str = "/var/lib/autonomousc/credentials/recovery-note.txt"
     autopilot_state_path: str = "/var/lib/autonomousc/scratch/autopilot-state.json"
+    heat_governor_state_path: str = "/var/lib/autonomousc/scratch/heat-governor-state.json"
+    control_plane_state_path: str = "/var/lib/autonomousc/scratch/control-plane-state.json"
+    fault_injection_state_path: str = "/var/lib/autonomousc/scratch/fault-injection-state.json"
     runtime_profile: str = AUTO_RUNTIME_PROFILE
     deployment_target: str = AUTO_DEPLOYMENT_TARGET
     inference_engine: str = AUTO_INFERENCE_ENGINE
@@ -70,19 +82,34 @@ class NodeAgentSettings(BaseSettings):
     max_concurrent_assignments: int = 2
     max_concurrent_assignments_embeddings: int | None = None
     max_microbatch_assignments_embeddings: int | None = None
+    max_local_queue_assignments: int | None = None
     pull_bundle_size: int = 16
+    model_cache_budget_gb: float | None = None
+    model_cache_reserve_free_gb: float | None = None
+    offline_install_bundle_dir: str | None = None
+    heat_governor_mode: str = DEFAULT_HEAT_GOVERNOR_MODE
+    owner_objective: Literal["balanced", "earnings_only", "heat_first"] = "balanced"
     target_gpu_utilization_pct: int = 100
     min_gpu_memory_headroom_pct: float = 20.0
     thermal_headroom: float = 0.8
     heat_demand: Literal["none", "low", "medium", "high"] = "none"
     room_temp_c: float | None = None
     target_temp_c: float | None = None
+    outside_temp_c: float | None = None
+    quiet_hours_start_local: str | None = None
+    quiet_hours_end_local: str | None = None
     gpu_temp_c: float | None = None
+    gpu_temp_limit_c: float = DEFAULT_GPU_TEMP_LIMIT_C
     power_watts: float | None = None
     estimated_heat_output_watts: float | None = None
+    gpu_power_limit_enabled: bool = True
+    max_power_cap_watts: int | None = None
     energy_price_kwh: float | None = None
     supported_models: str = "meta-llama/Llama-3.1-8B-Instruct,BAAI/bge-large-en-v1.5"
     poll_interval_seconds: int = 10
+    control_plane_grace_seconds: int = 180
+    control_plane_retry_floor_seconds: int = 3
+    control_plane_retry_cap_seconds: int = 30
     agent_version: str = "0.1.0"
     docker_image: str = DEFAULT_NODE_AGENT_IMAGE
     model_manifest_digest: str | None = None
@@ -94,6 +121,8 @@ class NodeAgentSettings(BaseSettings):
         "operator_token",
         "node_id",
         "node_key",
+        "edge_control_fallback_urls",
+        "artifact_mirror_base_urls",
         "inference_base_url",
         "runtime_image",
         "vllm_image",
@@ -108,11 +137,20 @@ class NodeAgentSettings(BaseSettings):
         "burst_cost_ceiling_usd",
         "max_concurrent_assignments_embeddings",
         "max_microbatch_assignments_embeddings",
+        "max_local_queue_assignments",
+        "model_cache_budget_gb",
+        "model_cache_reserve_free_gb",
+        "offline_install_bundle_dir",
         "room_temp_c",
         "target_temp_c",
+        "outside_temp_c",
+        "quiet_hours_start_local",
+        "quiet_hours_end_local",
         "gpu_temp_c",
+        "gpu_temp_limit_c",
         "power_watts",
         "estimated_heat_output_watts",
+        "max_power_cap_watts",
         "energy_price_kwh",
         "model_manifest_digest",
         "tokenizer_digest",
@@ -135,6 +173,32 @@ class NodeAgentSettings(BaseSettings):
             return 100
         return min(100, max(30, parsed))
 
+    @field_validator("heat_governor_mode", mode="before")
+    @classmethod
+    def _normalize_heat_governor_mode(cls, value: Any) -> str:
+        return normalize_heat_governor_mode(value)
+
+    @field_validator("owner_objective", mode="before")
+    @classmethod
+    def _normalize_owner_objective(cls, value: Any) -> str:
+        return normalize_owner_objective(value)
+
+    @field_validator("quiet_hours_start_local", "quiet_hours_end_local", mode="before")
+    @classmethod
+    def _normalize_local_clock(cls, value: Any) -> str | None:
+        return normalize_local_clock(value)
+
+    @field_validator("gpu_temp_limit_c", mode="before")
+    @classmethod
+    def _clamp_gpu_temp_limit_c(cls, value: Any) -> float:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return DEFAULT_GPU_TEMP_LIMIT_C
+        try:
+            parsed = float(str(value).strip())
+        except (TypeError, ValueError):
+            return DEFAULT_GPU_TEMP_LIMIT_C
+        return min(95.0, max(65.0, parsed))
+
     @field_validator("min_gpu_memory_headroom_pct", mode="before")
     @classmethod
     def _clamp_min_gpu_memory_headroom_pct(cls, value: Any) -> float:
@@ -145,6 +209,28 @@ class NodeAgentSettings(BaseSettings):
         except (TypeError, ValueError):
             return 20.0
         return min(60.0, max(5.0, parsed))
+
+    @field_validator("model_cache_budget_gb", "model_cache_reserve_free_gb", mode="before")
+    @classmethod
+    def _positive_optional_float(cls, value: Any) -> float | None:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        try:
+            parsed = float(str(value).strip())
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
+
+    @field_validator("max_power_cap_watts", mode="before")
+    @classmethod
+    def _positive_optional_int(cls, value: Any) -> int | None:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        try:
+            parsed = int(float(str(value).strip()))
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
 
     @property
     def runtime_backend(self) -> str:
@@ -282,6 +368,8 @@ class AssignmentEnvelope(BaseModel):
     expected_runtime_tuple_digest: str | None = None
     microbatch_key: str | None = None
     input_artifact_url: str
+    input_artifact_mirror_urls: list[str] = Field(default_factory=list)
+    input_artifact_expires_at: str | None = None
     input_artifact_sha256: str
     input_artifact_encryption: dict
 

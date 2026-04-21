@@ -4,12 +4,14 @@ from dataclasses import dataclass
 import json
 import logging
 from queue import Empty, Queue
+import socket
 import shutil
 import subprocess
 import sys
 import threading
 import time
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 import httpx
 
@@ -22,22 +24,40 @@ from .autopilot import AutopilotController
 from .config import NodeAgentSettings
 from .concurrency import (
     max_local_queue_assignments_from_capabilities,
+    max_microbatch_assignments_from_capabilities,
     max_worker_assignments_from_capabilities,
 )
-from .control_plane import EdgeControlClient
-from .gguf_artifacts import resolved_gguf_artifact_contract
+from .control_plane import ArtifactFlowError, EdgeControlClient
+from .gguf_artifacts import find_gguf_artifact, resolved_gguf_artifact_contract
+from .heat_governor import NvidiaPowerLimitController, power_limit_for_target
 from .inference_engine import VLLM_INFERENCE_ENGINE
+from .model_artifacts import find_model_artifact
 from .runtime import VLLMRuntime
+from .single_container import known_safe_max_model_len
 from .runtime_tuple import resolved_runtime_tuple
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 LOGGER = logging.getLogger("autonomousc-node-agent")
 assignment_progress_keepalive_seconds = 30.0
+assignment_lease_keepalive_seconds = 30.0
 heartbeat_interval_seconds = 15.0
 throughput_log_interval_seconds = 30.0
 gpu_telemetry_refresh_interval_seconds = 5.0
 supported_operations = frozenset({"responses", "embeddings"})
 vram_comparison_tolerance_gb = 0.25
+low_utilization_alert_threshold_pct = 25.0
+queued_idle_alert_threshold_fraction = 0.10
+local_reservoir_floor_assignments = 16
+degraded_reservoir_floor_assignments = 32
+degraded_reservoir_cap_assignments = 96
+oom_message_markers = (
+    "out of memory",
+    "cuda out of memory",
+    "cuda error: out of memory",
+    "insufficient memory",
+    "cublas_status_alloc_failed",
+    "allocation on device",
+)
 
 
 def normalize_region_token(value: object) -> str:
@@ -107,12 +127,46 @@ class AssignmentWorkerResult:
 
 
 @dataclass
+class PreparedAssignment:
+    assignment: object
+    items: list[dict[str, object]]
+    item_count: int
+    prefetched_at_monotonic: float
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self.assignment, name)
+
+
+@dataclass
+class PrefetchWorkerResult:
+    assignment: object
+    prepared_assignment: PreparedAssignment | None = None
+    error: Exception | None = None
+
+
+@dataclass
+class ActiveBundleWorker:
+    thread: threading.Thread
+    assignment_ids: set[str]
+
+
+@dataclass
 class HeartbeatState:
     last_sent_at: float | None = None
     status: str | None = None
     active_assignments: int | None = None
     capabilities_signature: str | None = None
     runtime_signature: str | None = None
+    consecutive_failures: int = 0
+    retry_after_at: float | None = None
+
+
+@dataclass
+class LeaseKeepaliveState:
+    last_sent_at: float | None = None
+    assignment_signature: str | None = None
+    consecutive_failures: int = 0
+    retry_after_at: float | None = None
 
 
 @dataclass
@@ -248,10 +302,12 @@ class NodeThroughputLogger:
         self._active_assignments_sum = 0
         self._worker_limit_sum = 0
         self._queue_depth_sum = 0
+        self._prefetch_queue_depth_sum = 0
         self._active_assignments_peak = 0
         self._last_active_assignments = 0
         self._last_worker_limit = 0
         self._last_queue_depth = 0
+        self._last_prefetch_queue_depth = 0
         self._queued_idle_seconds = 0.0
         self._refill_gap_started_at: float | None = None
         self._refill_gap_seconds_sum = 0.0
@@ -270,6 +326,8 @@ class NodeThroughputLogger:
         self._gpu_temperature_count = 0
         self._gpu_temperature_peak = 0.0
         self._gpu_source: str | None = None
+        self._microbatch_assignments_sum = 0
+        self._microbatch_observations = 0
         self._buckets: dict[tuple[str, str], ThroughputWindowBucket] = {}
 
     @staticmethod
@@ -291,6 +349,7 @@ class NodeThroughputLogger:
         active_assignments: int,
         worker_limit: int,
         queue_depth: int,
+        prefetch_queue_depth: int = 0,
         gpu_sample: GPUTelemetrySample | None = None,
         now_monotonic: float | None = None,
     ) -> None:
@@ -298,6 +357,7 @@ class NodeThroughputLogger:
         active_value = max(0, int(active_assignments))
         worker_limit_value = max(0, int(worker_limit))
         queue_depth_value = max(0, int(queue_depth))
+        prefetch_queue_depth_value = max(0, int(prefetch_queue_depth))
         if self._sample_count:
             interval_seconds = max(0.0, current_time - self._last_observed_at)
             if self._last_queue_depth > 0 and self._last_active_assignments == 0:
@@ -315,10 +375,12 @@ class NodeThroughputLogger:
         self._active_assignments_sum += active_value
         self._worker_limit_sum += worker_limit_value
         self._queue_depth_sum += queue_depth_value
+        self._prefetch_queue_depth_sum += prefetch_queue_depth_value
         self._active_assignments_peak = max(self._active_assignments_peak, active_value)
         self._last_active_assignments = active_value
         self._last_worker_limit = worker_limit_value
         self._last_queue_depth = queue_depth_value
+        self._last_prefetch_queue_depth = prefetch_queue_depth_value
         self._last_observed_at = current_time
         if gpu_sample is not None:
             self._gpu_source = gpu_sample.source
@@ -361,6 +423,8 @@ class NodeThroughputLogger:
         if isinstance(result.microbatch_assignments, int) and result.microbatch_assignments > 0:
             bucket.microbatch_assignments_sum += result.microbatch_assignments
             bucket.microbatch_observations += 1
+            self._microbatch_assignments_sum += result.microbatch_assignments
+            self._microbatch_observations += 1
 
     def maybe_log(self, *, now_monotonic: float | None = None) -> None:
         current_time = time.monotonic() if now_monotonic is None else now_monotonic
@@ -383,6 +447,11 @@ class NodeThroughputLogger:
             if self._sample_count
             else float(self._last_queue_depth)
         )
+        average_prefetch_queue_depth = (
+            self._prefetch_queue_depth_sum / self._sample_count
+            if self._sample_count
+            else float(self._last_prefetch_queue_depth)
+        )
         average_slot_utilization = (
             average_active_assignments / average_worker_limit if average_worker_limit > 0 else 0.0
         )
@@ -404,6 +473,11 @@ class NodeThroughputLogger:
         average_gpu_temperature = (
             self._gpu_temperature_sum / self._gpu_temperature_count if self._gpu_temperature_count else None
         )
+        average_microbatch_assignments = (
+            self._microbatch_assignments_sum / self._microbatch_observations
+            if self._microbatch_observations
+            else None
+        )
         completed_assignments = sum(bucket.completed_assignments for bucket in self._buckets.values())
         completed_items = sum(bucket.completed_items for bucket in self._buckets.values())
         if completed_assignments == 0 and self._active_assignments_peak == 0 and average_queue_depth <= 0.0:
@@ -413,10 +487,11 @@ class NodeThroughputLogger:
         LOGGER.info(
             "node throughput summary window=%.1fs active_now=%s active_avg=%.2f active_peak=%s "
             "worker_limit_now=%s worker_limit_avg=%.2f slot_utilization_avg=%.2f "
-            "queue_depth_now=%s queue_depth_avg=%.2f queued_idle_s=%.2f queued_idle_pct=%.2f "
+            "queue_depth_now=%s queue_depth_avg=%.2f prefetch_queue_now=%s prefetch_queue_avg=%.2f "
+            "queued_idle_s=%.2f queued_idle_pct=%.2f "
             "refill_gap_avg_s=%.2f refill_gap_max_s=%.2f gpu_source=%s gpu_util_avg=%s gpu_util_peak=%s "
             "gpu_mem_avg=%s gpu_mem_peak=%s gpu_power_avg=%s gpu_power_peak=%s gpu_temp_avg=%s gpu_temp_peak=%s "
-            "completed_assignments=%s completed_items=%s",
+            "microbatch_avg=%s completed_assignments=%s completed_items=%s",
             effective_elapsed,
             self._last_active_assignments,
             average_active_assignments,
@@ -426,6 +501,8 @@ class NodeThroughputLogger:
             average_slot_utilization,
             self._last_queue_depth,
             average_queue_depth,
+            self._last_prefetch_queue_depth,
+            average_prefetch_queue_depth,
             self._queued_idle_seconds,
             queued_idle_fraction,
             average_refill_gap_seconds,
@@ -455,9 +532,32 @@ class NodeThroughputLogger:
                 suffix="C",
                 decimals=1,
             ),
+            self._format_metric(average_microbatch_assignments, decimals=2),
             completed_assignments,
             completed_items,
         )
+        if average_queue_depth >= 1.0 and (
+            queued_idle_fraction >= queued_idle_alert_threshold_fraction
+            or (
+                average_gpu_utilization is not None
+                and average_gpu_utilization < low_utilization_alert_threshold_pct
+                and average_slot_utilization < 0.75
+            )
+        ):
+            LOGGER.warning(
+                "node utilization alert condition=queued_capable_idle_or_low_util window=%.1fs "
+                "queue_depth_avg=%.2f prefetch_queue_avg=%.2f active_avg=%.2f worker_limit_avg=%.2f "
+                "slot_utilization_avg=%.2f queued_idle_pct=%.2f refill_gap_avg_s=%.2f gpu_util_avg=%s",
+                effective_elapsed,
+                average_queue_depth,
+                average_prefetch_queue_depth,
+                average_active_assignments,
+                average_worker_limit,
+                average_slot_utilization,
+                queued_idle_fraction,
+                average_refill_gap_seconds,
+                self._format_metric(average_gpu_utilization, suffix="%", decimals=1),
+            )
         for bucket in sorted(self._buckets.values(), key=lambda value: (value.operation, value.model)):
             average_latency = (
                 bucket.latency_seconds_sum / bucket.latency_observations
@@ -505,6 +605,60 @@ def heartbeat_payload_signature(payload: dict[str, object] | None) -> str | None
     return json.dumps(signature_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
+def control_plane_connectivity_snapshot(control: object) -> dict[str, Any]:
+    snapshot = getattr(control, "control_plane_snapshot", None)
+    if callable(snapshot):
+        payload = snapshot()
+        return payload if isinstance(payload, dict) else {}
+    transport = getattr(control, "transport", None)
+    transport_snapshot = getattr(transport, "snapshot", None)
+    if callable(transport_snapshot):
+        payload = transport_snapshot()
+        return payload if isinstance(payload, dict) else {}
+    return {}
+
+
+def recommended_control_plane_retry_delay_seconds(control: object) -> float:
+    recommender = getattr(control, "recommended_control_plane_retry_delay_seconds", None)
+    if callable(recommender):
+        try:
+            return max(0.5, float(recommender()))
+        except (TypeError, ValueError):
+            pass
+    return max(0.5, float(getattr(getattr(control, "settings", object()), "poll_interval_seconds", 10.0) or 10.0))
+
+
+def control_plane_dispatch_allowed(connectivity: dict[str, Any]) -> bool:
+    status = str(connectivity.get("status") or "").strip().lower()
+    if status not in {"degraded", "offline"}:
+        return True
+    return bool(connectivity.get("grace_active"))
+
+
+def recommended_local_reservoir_target(
+    *,
+    worker_limit: int,
+    local_queue_limit: int,
+    connectivity: dict[str, Any] | None = None,
+) -> int:
+    queue_cap = max(0, int(local_queue_limit))
+    if queue_cap <= 0:
+        return 0
+    healthy_target = min(
+        queue_cap,
+        max(local_reservoir_floor_assignments, max(1, worker_limit) * 8),
+    )
+    connectivity = connectivity or {}
+    status = str(connectivity.get("status") or "").strip().lower()
+    if status in {"degraded", "offline"}:
+        return min(
+            queue_cap,
+            degraded_reservoir_cap_assignments,
+            max(healthy_target, degraded_reservoir_floor_assignments, max(1, worker_limit) * 12),
+        )
+    return min(queue_cap, degraded_reservoir_cap_assignments, healthy_target)
+
+
 def maybe_send_heartbeat(
     control: EdgeControlClient,
     heartbeat_state: HeartbeatState,
@@ -528,6 +682,7 @@ def maybe_send_heartbeat(
     interval_elapsed = (
         heartbeat_state.last_sent_at is None or current_time - heartbeat_state.last_sent_at >= heartbeat_interval_seconds
     )
+    retry_blocked = heartbeat_state.retry_after_at is not None and current_time < heartbeat_state.retry_after_at
 
     if not (
         heartbeat_state.last_sent_at is None
@@ -536,25 +691,91 @@ def maybe_send_heartbeat(
         or capabilities_changed
         or runtime_changed
         or interval_elapsed
-    ):
+    ) or retry_blocked:
         return heartbeat_state
 
     include_capabilities = heartbeat_state.last_sent_at is None or capabilities_changed
     include_runtime = heartbeat_state.last_sent_at is None or runtime_changed
-    control.heartbeat(
-        queue_depth=queue_depth,
-        active_assignments=active_assignments,
-        capabilities=capabilities if include_capabilities else None,
-        runtime=runtime if include_runtime else None,
-        include_capabilities=include_capabilities,
-        include_runtime=include_runtime,
-    )
+    try:
+        control.heartbeat(
+            status=status,
+            queue_depth=queue_depth,
+            active_assignments=active_assignments,
+            capabilities=capabilities if include_capabilities else None,
+            runtime=runtime if include_runtime else None,
+            include_capabilities=include_capabilities,
+            include_runtime=include_runtime,
+        )
+    except Exception as error:
+        if hasattr(control, "is_transient_network_error") and control.is_transient_network_error(error):
+            retry_delay = recommended_control_plane_retry_delay_seconds(control)
+            LOGGER.warning("control plane connectivity degraded temporarily; heartbeat failed: %s", error)
+            return HeartbeatState(
+                last_sent_at=heartbeat_state.last_sent_at,
+                status=status,
+                active_assignments=active_assignments,
+                capabilities_signature=capabilities_signature or heartbeat_state.capabilities_signature,
+                runtime_signature=runtime_signature or heartbeat_state.runtime_signature,
+                consecutive_failures=heartbeat_state.consecutive_failures + 1,
+                retry_after_at=current_time + retry_delay,
+            )
+        raise
     return HeartbeatState(
         last_sent_at=current_time,
         status=status,
         active_assignments=active_assignments,
         capabilities_signature=capabilities_signature or heartbeat_state.capabilities_signature,
         runtime_signature=runtime_signature or heartbeat_state.runtime_signature,
+        consecutive_failures=0,
+        retry_after_at=None,
+    )
+
+
+def maybe_touch_assignment_leases(
+    control: EdgeControlClient,
+    lease_keepalive_state: LeaseKeepaliveState,
+    assignment_ids: list[str],
+    *,
+    now_monotonic: float | None = None,
+) -> LeaseKeepaliveState:
+    current_time = time.monotonic() if now_monotonic is None else now_monotonic
+    unique_assignment_ids = sorted({assignment_id for assignment_id in assignment_ids if assignment_id})
+    if not unique_assignment_ids:
+        return LeaseKeepaliveState()
+
+    assignment_signature = ",".join(unique_assignment_ids)
+    assignments_changed = lease_keepalive_state.assignment_signature != assignment_signature
+    interval_elapsed = (
+        lease_keepalive_state.last_sent_at is None
+        or current_time - lease_keepalive_state.last_sent_at >= assignment_lease_keepalive_seconds
+    )
+    retry_blocked = lease_keepalive_state.retry_after_at is not None and current_time < lease_keepalive_state.retry_after_at
+    if not assignments_changed and not interval_elapsed:
+        return lease_keepalive_state
+    if retry_blocked and not assignments_changed:
+        return lease_keepalive_state
+
+    try:
+        control.touch_assignments(unique_assignment_ids)
+    except Exception as error:
+        if hasattr(control, "is_transient_network_error") and control.is_transient_network_error(error):
+            retry_delay = recommended_control_plane_retry_delay_seconds(control)
+            LOGGER.warning(
+                "control plane connectivity degraded temporarily; assignment lease keepalive failed: %s",
+                error,
+            )
+            return LeaseKeepaliveState(
+                last_sent_at=lease_keepalive_state.last_sent_at,
+                assignment_signature=assignment_signature,
+                consecutive_failures=lease_keepalive_state.consecutive_failures + 1,
+                retry_after_at=current_time + retry_delay,
+            )
+        raise
+    return LeaseKeepaliveState(
+        last_sent_at=current_time,
+        assignment_signature=assignment_signature,
+        consecutive_failures=0,
+        retry_after_at=None,
     )
 
 
@@ -599,6 +820,8 @@ def resolved_inference_base_url_for_settings(settings: object) -> str:
 
 
 def is_transient_http_error(error: Exception) -> bool:
+    if isinstance(error, ArtifactFlowError):
+        return error.retryable
     if isinstance(error, httpx.RequestError):
         return True
     if not isinstance(error, httpx.HTTPStatusError):
@@ -606,7 +829,30 @@ def is_transient_http_error(error: Exception) -> bool:
     return error.response.status_code in {408, 409, 425, 429} or error.response.status_code >= 500
 
 
+def looks_like_gpu_oom(error: Exception | str) -> bool:
+    if isinstance(error, Exception):
+        text = str(error)
+        if isinstance(error, httpx.HTTPStatusError):
+            try:
+                response_text = error.response.text
+            except Exception:
+                response_text = ""
+            text = f"{text} {response_text}".strip()
+    else:
+        text = str(error)
+    normalized = text.strip().lower()
+    if not normalized:
+        return False
+    if any(marker in normalized for marker in oom_message_markers):
+        return True
+    return " oom " in f" {normalized} "
+
+
 def classify_assignment_failure(error: Exception) -> tuple[str, str, bool]:
+    if isinstance(error, ArtifactFlowError):
+        return error.code, str(error), error.retryable
+    if looks_like_gpu_oom(error):
+        return "gpu_oom", str(error) or "GPU ran out of memory.", True
     if isinstance(error, httpx.HTTPStatusError):
         status = error.response.status_code
         request_url = str(error.request.url)
@@ -641,6 +887,82 @@ def control_plane_queue_depth(control: object) -> int:
 
 def configured_supported_models(settings: NodeAgentSettings) -> set[str]:
     return {model.strip() for model in str(settings.supported_models).split(",") if model.strip()}
+
+
+def configured_supported_operations(settings: NodeAgentSettings) -> set[str]:
+    return {operation.strip() for operation in settings.resolved_runtime_profile.supported_apis if operation.strip()}
+
+
+def model_supports_runtime_operation(model: str, operation: str, inference_engine: str) -> bool:
+    return (
+        find_model_artifact(model, operation, runtime_engine=inference_engine) is not None
+        or find_gguf_artifact(model, operation) is not None
+    )
+
+
+def _looks_like_node_region(region: str) -> bool:
+    normalized = normalize_region_token(region).replace("_", "-")
+    parts = [part for part in normalized.split("-") if part]
+    return len(parts) >= 3 and all(part.isalnum() for part in parts)
+
+
+def validate_startup_settings(settings: NodeAgentSettings) -> None:
+    errors: list[str] = []
+    if not _looks_like_node_region(settings.node_region):
+        errors.append(
+            f"NODE_REGION={settings.node_region!r} is invalid. Use a concrete region like 'eu-se-1' or 'us-ca-1'."
+        )
+
+    supported_models = configured_supported_models(settings)
+    if not supported_models:
+        errors.append("SUPPORTED_MODELS must advertise at least one model.")
+
+    current_model = settings.current_model
+    if supported_models and current_model not in supported_models:
+        errors.append(
+            f"Current model {current_model!r} is not present in SUPPORTED_MODELS={sorted(supported_models)!r}."
+        )
+
+    supported_operations = configured_supported_operations(settings)
+    if not supported_operations:
+        errors.append(
+            f"Runtime profile {settings.resolved_runtime_profile_id!r} does not advertise any supported operations."
+        )
+
+    incompatible_models = sorted(
+        model
+        for model in supported_models
+        if not any(
+            model_supports_runtime_operation(model, operation, settings.resolved_inference_engine)
+            for operation in supported_operations
+        )
+    )
+    if incompatible_models:
+        errors.append(
+            "SUPPORTED_MODELS advertises models the active runtime cannot actually serve for its configured "
+            f"operations: {incompatible_models!r}."
+        )
+
+    safe_context_limit = known_safe_max_model_len(current_model)
+    if safe_context_limit is not None and settings.max_context_tokens > safe_context_limit:
+        errors.append(
+            f"MAX_CONTEXT_TOKENS={settings.max_context_tokens} exceeds the safe limit {safe_context_limit} "
+            f"for startup model {current_model!r}."
+        )
+
+    control_plane_host = urlparse(settings.edge_control_url).hostname
+    if not control_plane_host:
+        errors.append(f"EDGE_CONTROL_URL={settings.edge_control_url!r} is missing a valid hostname.")
+    else:
+        try:
+            socket.getaddrinfo(control_plane_host, None)
+        except OSError as error:
+            errors.append(
+                f"Could not resolve control-plane host {control_plane_host!r} during startup: {error}."
+            )
+
+    if errors:
+        raise RuntimeError("Node runtime startup validation failed:\n- " + "\n- ".join(errors))
 
 
 def restricted_attestation_state(control: EdgeControlClient) -> dict[str, object] | None:
@@ -980,14 +1302,28 @@ def report_assignment_failure(
     except Exception as progress_error:
         if control.is_auth_error(progress_error):
             raise
-        LOGGER.warning("failed to report terminal progress for %s: %s", assignment_id, progress_error)
+        if control.is_transient_network_error(progress_error):
+            LOGGER.warning(
+                "terminal progress report for %s deferred because control-plane connectivity is degraded: %s",
+                assignment_id,
+                progress_error,
+            )
+        else:
+            LOGGER.warning("failed to report terminal progress for %s: %s", assignment_id, progress_error)
 
     try:
         control.fail_assignment(assignment_id, code, message, retryable=retryable)
     except Exception as fail_error:
         if control.is_auth_error(fail_error):
             raise
-        LOGGER.warning("failed to mark assignment %s as failed; stale reclaim will handle it: %s", assignment_id, fail_error)
+        if control.is_transient_network_error(fail_error):
+            LOGGER.warning(
+                "assignment %s failure report deferred because control-plane connectivity is degraded; lease reclaim will handle it: %s",
+                assignment_id,
+                fail_error,
+            )
+        else:
+            LOGGER.warning("failed to mark assignment %s as failed; stale reclaim will handle it: %s", assignment_id, fail_error)
 
     return AssignmentWorkerResult(
         assignment_id=assignment_id,
@@ -1002,6 +1338,89 @@ def report_assignment_failure(
     )
 
 
+def return_assignment_for_heat_pause(
+    control: EdgeControlClient,
+    assignment: object,
+    *,
+    item_count: int,
+    queue_depth: int,
+    pause_reason: str | None,
+) -> AssignmentWorkerResult:
+    assignment_id = str(getattr(assignment, "assignment_id", "unknown"))
+    message = (
+        "Owner heat target paused this node before the assignment started. "
+        "The assignment can be retried after the owner resumes heat output."
+    )
+    try:
+        control.report_progress(
+            assignment_id,
+            assignment_progress(
+                "failed",
+                item_count,
+                error_code="owner_heat_pause",
+                retryable=True,
+                pause_reason=pause_reason or "heat_governor_paused",
+            ),
+        )
+        control.fail_assignment(assignment_id, "owner_heat_pause", message, retryable=True)
+    except Exception as fail_error:
+        if control.is_auth_error(fail_error):
+            raise
+        if control.is_transient_network_error(fail_error):
+            LOGGER.warning(
+                "assignment %s pause handoff deferred because control-plane connectivity is degraded; lease reclaim will handle it: %s",
+                assignment_id,
+                fail_error,
+            )
+        else:
+            LOGGER.warning("assignment %s pause handoff failed; stale reclaim will handle it: %s", assignment_id, fail_error)
+
+    return AssignmentWorkerResult(
+        assignment_id=assignment_id,
+        kind="failure",
+        queue_depth=max(1, queue_depth),
+        operation=getattr(assignment, "operation", None),
+        model=getattr(assignment, "model", None),
+        item_count=max(0, int(item_count)),
+        code="owner_heat_pause",
+        retryable=True,
+    )
+
+
+def return_local_queue_for_heat_pause(
+    control: EdgeControlClient,
+    leased_assignments: list[object],
+    ready_assignments: list[PreparedAssignment],
+    *,
+    queue_depth: int,
+    pause_reason: str | None,
+) -> list[AssignmentWorkerResult]:
+    worker_results: list[AssignmentWorkerResult] = []
+    while ready_assignments:
+        prepared_assignment = ready_assignments.pop(0)
+        worker_results.append(
+            return_assignment_for_heat_pause(
+                control,
+                prepared_assignment.assignment,
+                item_count=prepared_assignment.item_count,
+                queue_depth=queue_depth,
+                pause_reason=pause_reason,
+            )
+        )
+    while leased_assignments:
+        assignment = leased_assignments.pop(0)
+        worker_results.append(
+            return_assignment_for_heat_pause(
+                control,
+                assignment,
+                item_count=max(0, int(getattr(assignment, "item_count", 0) or 0)),
+                queue_depth=queue_depth,
+                pause_reason=pause_reason,
+            )
+        )
+    return worker_results
+
+
 def process_accepted_assignment(
     control: EdgeControlClient,
     runtime: VLLMRuntime,
@@ -1010,20 +1429,31 @@ def process_accepted_assignment(
     queue_depth: int,
 ) -> AssignmentWorkerResult:
     results_ready = False
+    prepared_assignment: PreparedAssignment | object = assignment
     item_count = max(0, int(getattr(assignment, "item_count", 0) or 0))
     latency_seconds: float | None = None
     try:
-        payload = control.fetch_artifact(assignment)
-        items = validate_assignment(control, assignment, payload.get("items", []))
-        item_count = len(items)
-        control.report_progress(assignment.assignment_id, assignment_progress("running", item_count))
-        progress_keepalive = AssignmentProgressKeepalive(control, assignment.assignment_id, item_count)
+        prepared_assignment = ensure_prepared_assignment(control, assignment)
+        item_count = max(0, int(prepared_assignment.item_count))
+        control.report_progress(
+            prepared_assignment.assignment_id,
+            assignment_progress("running", item_count),
+        )
+        progress_keepalive = AssignmentProgressKeepalive(
+            control,
+            prepared_assignment.assignment_id,
+            item_count,
+        )
         progress_keepalive.start()
         results = []
         runtime_error: Exception | None = None
         runtime_started_at = time.monotonic()
         try:
-            results = runtime.execute(assignment.operation, assignment.model, items)
+            results = runtime.execute(
+                prepared_assignment.operation,
+                prepared_assignment.model,
+                prepared_assignment.items,
+            )
         except Exception as error:
             runtime_error = error
         try:
@@ -1034,24 +1464,32 @@ def process_accepted_assignment(
             else:
                 LOGGER.warning(
                     "progress keepalive for %s stopped with an auth error after runtime failure: %s",
-                    assignment.assignment_id,
+                    prepared_assignment.assignment_id,
                     error,
                 )
         if runtime_error is not None:
             raise runtime_error
         latency_seconds = time.monotonic() - runtime_started_at
         results_ready = True
-        control.report_progress(assignment.assignment_id, assignment_progress("completed", item_count))
+        control.report_progress(
+            prepared_assignment.assignment_id,
+            assignment_progress("completed", item_count),
+        )
         usage_summary = summarize_provider_usage(results)
-        runtime_receipt = build_runtime_receipt(control, assignment, results)
-        complete_assignment_with_retry(control, assignment.assignment_id, results, runtime_receipt)
+        runtime_receipt = build_runtime_receipt(control, prepared_assignment, results)
+        complete_assignment_with_retry(
+            control,
+            prepared_assignment.assignment_id,
+            results,
+            runtime_receipt,
+        )
         return AssignmentWorkerResult(
-            assignment_id=assignment.assignment_id,
+            assignment_id=prepared_assignment.assignment_id,
             kind="success",
             queue_depth=max(1, queue_depth),
             latency_seconds=latency_seconds,
-            operation=getattr(assignment, "operation", None),
-            model=getattr(assignment, "model", None),
+            operation=getattr(prepared_assignment, "operation", None),
+            model=getattr(prepared_assignment, "model", None),
             item_count=int(usage_summary.get("item_count", item_count) or item_count),
             usage_summary={
                 key: int(value) for key, value in usage_summary.items() if isinstance(value, int)
@@ -1061,7 +1499,7 @@ def process_accepted_assignment(
     except Exception as assignment_error:
         return report_assignment_failure(
             control,
-            assignment,
+            prepared_assignment,
             assignment_error,
             item_count=item_count,
             queue_depth=queue_depth,
@@ -1070,12 +1508,38 @@ def process_accepted_assignment(
         )
 
 
+def ensure_prepared_assignment(control: EdgeControlClient, assignment: object) -> PreparedAssignment:
+    if isinstance(assignment, PreparedAssignment):
+        return assignment
+
+    item_count = max(0, int(getattr(assignment, "item_count", 0) or 0))
+    payload = control.fetch_artifact(assignment)
+    items = validate_assignment(control, assignment, payload.get("items", []))
+    resolved_item_count = len(items) if items else item_count
+    return PreparedAssignment(
+        assignment=assignment,
+        items=items,
+        item_count=resolved_item_count,
+        prefetched_at_monotonic=time.monotonic(),
+    )
+
+
 def assignment_microbatch_key(assignment: object) -> str | None:
     if getattr(assignment, "operation", None) != "embeddings":
         return None
     explicit_key = getattr(assignment, "microbatch_key", None)
     if isinstance(explicit_key, str) and explicit_key:
         return explicit_key
+    allowed_regions = getattr(assignment, "allowed_regions", None)
+    region_key = ""
+    if isinstance(allowed_regions, list):
+        region_key = ",".join(
+            sorted(
+                normalize_region_token(region)
+                for region in allowed_regions
+                if normalize_region_token(region)
+            )
+        )
     return "|".join(
         str(getattr(assignment, field, "") or "")
         for field in (
@@ -1085,11 +1549,15 @@ def assignment_microbatch_key(assignment: object) -> str | None:
             "node_trust_requirement",
             "result_guarantee",
             "expected_runtime_tuple_digest",
+            "expected_runtime_image_digest",
             "expected_model_manifest_digest",
             "expected_tokenizer_digest",
+            "expected_chat_template_digest",
+            "expected_gguf_file_digest",
+            "expected_quantization_type",
             "expected_effective_context_tokens",
         )
-    )
+    ) + f"|regions={region_key}"
 
 
 def group_assignments_for_local_execution(assignments: list[object]) -> list[list[object]]:
@@ -1113,6 +1581,7 @@ def select_assignment_bundles_for_dispatch(
     pending_assignments: list[object],
     *,
     available_slots: int,
+    max_microbatch_assignments: int = 1,
 ) -> list[list[object]]:
     if available_slots <= 0 or not pending_assignments:
         return []
@@ -1125,7 +1594,7 @@ def select_assignment_bundles_for_dispatch(
         ranked_groups = sorted(
             enumerate(grouped),
             key=lambda entry: (
-                min(len(entry[1]), available_slots),
+                min(len(entry[1]), max(1, max_microbatch_assignments)),
                 1 if assignment_microbatch_key(entry[1][0]) is not None else 0,
                 -entry[0],
             ),
@@ -1133,7 +1602,11 @@ def select_assignment_bundles_for_dispatch(
         )
         _group_index, selected_group = ranked_groups[0]
         selected_key = assignment_microbatch_key(selected_group[0])
-        bundle_size = 1 if selected_key is None else min(len(selected_group), available_slots)
+        bundle_size = (
+            1
+            if selected_key is None
+            else min(len(selected_group), max(1, max_microbatch_assignments))
+        )
         bundle = selected_group[:bundle_size]
         bundle_ids = {
             getattr(assignment, "assignment_id", "")
@@ -1145,11 +1618,120 @@ def select_assignment_bundles_for_dispatch(
             for assignment in remaining
             if getattr(assignment, "assignment_id", "") not in bundle_ids
         ]
-        available_slots -= len(bundle)
+        available_slots -= 1
         bundles.append(bundle)
 
     pending_assignments[:] = remaining
     return bundles
+
+
+def local_work_reservoir_depth(
+    leased_assignments: list[object],
+    ready_assignments: list[PreparedAssignment],
+    active_prefetch_workers: dict[str, threading.Thread],
+) -> int:
+    return len(leased_assignments) + len(ready_assignments) + len(active_prefetch_workers)
+
+
+def recommended_prefetch_worker_limit(
+    *,
+    worker_limit: int,
+    max_microbatch_assignments: int,
+    local_queue_limit: int,
+) -> int:
+    reservoir_parallelism = max(1, (max(0, local_queue_limit) + 3) // 4)
+    return min(
+        8,
+        max(
+            2,
+            max(0, worker_limit) * 2,
+            min(8, max(1, max_microbatch_assignments)),
+            reservoir_parallelism,
+        ),
+    )
+
+
+def run_prefetch_assignment_worker(
+    control: EdgeControlClient,
+    assignment: object,
+    *,
+    completion_queue: Queue[PrefetchWorkerResult],
+) -> None:
+    try:
+        completion_queue.put(
+            PrefetchWorkerResult(
+                assignment=assignment,
+                prepared_assignment=ensure_prepared_assignment(control, assignment),
+            )
+        )
+    except Exception as error:
+        completion_queue.put(PrefetchWorkerResult(assignment=assignment, error=error))
+
+
+def prefetch_assignments_for_local_queue(
+    leased_assignments: list[object],
+    *,
+    desired_ready_assignments: int,
+    max_prefetch_workers: int,
+    ready_assignments: list[PreparedAssignment],
+    active_prefetch_workers: dict[str, threading.Thread],
+    prefetch_completion_queue: Queue[PrefetchWorkerResult],
+    control: EdgeControlClient,
+) -> None:
+    if desired_ready_assignments <= 0 or max_prefetch_workers <= 0:
+        return
+    while (
+        leased_assignments
+        and len(active_prefetch_workers) < max_prefetch_workers
+        and (len(ready_assignments) + len(active_prefetch_workers)) < max(0, desired_ready_assignments)
+    ):
+        assignment = leased_assignments.pop(0)
+        assignment_id = str(getattr(assignment, "assignment_id", "") or f"prefetch-{time.monotonic_ns()}")
+        worker = threading.Thread(
+            target=run_prefetch_assignment_worker,
+            args=(control, assignment),
+            kwargs={"completion_queue": prefetch_completion_queue},
+            name=f"prefetch-assignment-{assignment_id}",
+            daemon=True,
+        )
+        active_prefetch_workers[assignment_id] = worker
+        worker.start()
+
+
+def drain_prefetched_assignments_for_local_queue(
+    control: EdgeControlClient,
+    ready_assignments: list[PreparedAssignment],
+    *,
+    active_prefetch_workers: dict[str, threading.Thread],
+    prefetch_completion_queue: Queue[PrefetchWorkerResult],
+    queue_depth: int,
+) -> list[AssignmentWorkerResult]:
+    worker_results: list[AssignmentWorkerResult] = []
+    while True:
+        try:
+            prefetch_result = prefetch_completion_queue.get_nowait()
+        except Empty:
+            break
+        assignment_id = str(getattr(prefetch_result.assignment, "assignment_id", "") or "")
+        worker = active_prefetch_workers.pop(assignment_id, None)
+        if worker is not None:
+            worker.join()
+        if prefetch_result.prepared_assignment is not None and prefetch_result.error is None:
+            ready_assignments.append(prefetch_result.prepared_assignment)
+            continue
+        assignment_error = prefetch_result.error or RuntimeError(
+            "prefetch worker completed without a prepared assignment"
+        )
+        worker_results.append(
+            report_assignment_failure(
+                control,
+                prefetch_result.assignment,
+                assignment_error,
+                item_count=max(0, int(getattr(prefetch_result.assignment, "item_count", 0) or 0)),
+                queue_depth=max(1, queue_depth),
+            )
+        )
+    return worker_results
 
 
 def process_microbatch_assignments(
@@ -1159,17 +1741,16 @@ def process_microbatch_assignments(
     *,
     queue_depth: int,
 ) -> list[AssignmentWorkerResult]:
-    prepared: list[tuple[object, list[dict[str, object]], int]] = []
+    prepared: list[PreparedAssignment] = []
     worker_results: list[AssignmentWorkerResult] = []
     microbatch_key = assignment_microbatch_key(assignments[0]) if assignments else None
 
     for assignment in assignments:
         item_count = max(0, int(getattr(assignment, "item_count", 0) or 0))
         try:
-            payload = control.fetch_artifact(assignment)
-            items = validate_assignment(control, assignment, payload.get("items", []))
-            item_count = len(items)
-            prepared.append((assignment, items, item_count))
+            prepared_assignment = ensure_prepared_assignment(control, assignment)
+            item_count = prepared_assignment.item_count
+            prepared.append(prepared_assignment)
         except Exception as assignment_error:
             worker_results.append(
                 report_assignment_failure(
@@ -1189,23 +1770,25 @@ def process_microbatch_assignments(
     runtime_started_at = time.monotonic()
     results_by_assignment: dict[str, list[dict[str, object]]] = {}
     try:
-        for assignment, _items, item_count in prepared:
+        for prepared_assignment in prepared:
             control.report_progress(
-                assignment.assignment_id,
-                assignment_progress(
-                    "running",
-                    item_count,
-                    microbatch_key=microbatch_key,
-                    microbatch_assignments=len(prepared),
-                ),
+                prepared_assignment.assignment_id,
+                assignment_progress("running", prepared_assignment.item_count, microbatch_key=microbatch_key, microbatch_assignments=len(prepared)),
             )
-            keepalive = AssignmentProgressKeepalive(control, assignment.assignment_id, item_count)
+            keepalive = AssignmentProgressKeepalive(
+                control,
+                prepared_assignment.assignment_id,
+                prepared_assignment.item_count,
+            )
             keepalive.start()
             keepalives.append(keepalive)
         results_by_assignment = runtime.execute_microbatch(
             "embeddings",
             getattr(assignments[0], "model"),
-            [(assignment.assignment_id, items) for assignment, items, _item_count in prepared],
+            [
+                (prepared_assignment.assignment_id, prepared_assignment.items)
+                for prepared_assignment in prepared
+            ],
         )
     except Exception as error:
         runtime_error = error
@@ -1221,36 +1804,47 @@ def process_microbatch_assignments(
 
     latency_seconds = time.monotonic() - runtime_started_at
     if runtime_error is not None:
-        for assignment, _items, item_count in prepared:
+        for prepared_assignment in prepared:
             worker_results.append(
                 report_assignment_failure(
                     control,
-                    assignment,
+                    prepared_assignment,
                     runtime_error,
-                    item_count=item_count,
+                    item_count=prepared_assignment.item_count,
                     queue_depth=queue_depth,
                 )
             )
         return worker_results
 
-    for assignment, _items, item_count in prepared:
+    for prepared_assignment in prepared:
         try:
-            results = results_by_assignment.get(assignment.assignment_id)
+            results = results_by_assignment.get(prepared_assignment.assignment_id)
             if results is None:
                 raise RuntimeError("runtime did not return microbatch results for assignment")
-            control.report_progress(assignment.assignment_id, assignment_progress("completed", item_count))
+            control.report_progress(
+                prepared_assignment.assignment_id,
+                assignment_progress("completed", prepared_assignment.item_count),
+            )
             usage_summary = summarize_provider_usage(results)
-            runtime_receipt = build_runtime_receipt(control, assignment, results)
-            complete_assignment_with_retry(control, assignment.assignment_id, results, runtime_receipt)
+            runtime_receipt = build_runtime_receipt(control, prepared_assignment, results)
+            complete_assignment_with_retry(
+                control,
+                prepared_assignment.assignment_id,
+                results,
+                runtime_receipt,
+            )
             worker_results.append(
                 AssignmentWorkerResult(
-                    assignment_id=assignment.assignment_id,
+                    assignment_id=prepared_assignment.assignment_id,
                     kind="success",
                     queue_depth=max(1, queue_depth),
                     latency_seconds=latency_seconds,
-                    operation=getattr(assignment, "operation", None),
-                    model=getattr(assignment, "model", None),
-                    item_count=int(usage_summary.get("item_count", item_count) or item_count),
+                    operation=getattr(prepared_assignment, "operation", None),
+                    model=getattr(prepared_assignment, "model", None),
+                    item_count=int(
+                        usage_summary.get("item_count", prepared_assignment.item_count)
+                        or prepared_assignment.item_count
+                    ),
                     usage_summary={
                         key: int(value) for key, value in usage_summary.items() if isinstance(value, int)
                     },
@@ -1261,9 +1855,9 @@ def process_microbatch_assignments(
             worker_results.append(
                 report_assignment_failure(
                     control,
-                    assignment,
+                    prepared_assignment,
                     assignment_error,
-                    item_count=item_count,
+                    item_count=prepared_assignment.item_count,
                     queue_depth=queue_depth,
                     results_ready=True,
                     latency_seconds=latency_seconds,
@@ -1351,11 +1945,19 @@ def run_worker_loop(control: EdgeControlClient, runtime: VLLMRuntime, attest_on_
     node_id, _node_key = control.require_credentials()
     autopilot = AutopilotController(control.settings)
     heartbeat_state = HeartbeatState()
+    lease_keepalive_state = LeaseKeepaliveState()
     throughput_logger = NodeThroughputLogger()
     gpu_telemetry_sampler = GPUTelemetrySampler()
+    power_limit_controller = NvidiaPowerLimitController(
+        enabled=bool(getattr(control.settings, "gpu_power_limit_enabled", True))
+    )
     completion_queue: Queue[AssignmentWorkerResult] = Queue()
-    active_workers: dict[str, threading.Thread] = {}
-    pending_assignments: list[object] = []
+    prefetch_completion_queue: Queue[PrefetchWorkerResult] = Queue()
+    active_bundle_workers: dict[str, ActiveBundleWorker] = {}
+    active_assignment_bundle_ids: dict[str, str] = {}
+    active_prefetch_workers: dict[str, threading.Thread] = {}
+    leased_assignments: list[object] = []
+    ready_assignments: list[PreparedAssignment] = []
     LOGGER.info("node enrolled or restored: %s", node_id)
     if attest_on_start:
         print("Refreshing node attestation before entering the worker loop...")
@@ -1371,9 +1973,14 @@ def run_worker_loop(control: EdgeControlClient, runtime: VLLMRuntime, attest_on_
                     result = completion_queue.get_nowait()
                 except Empty:
                     break
-                worker = active_workers.pop(result.assignment_id, None)
-                if worker is not None:
-                    worker.join()
+                bundle_id = active_assignment_bundle_ids.pop(result.assignment_id, None)
+                if bundle_id is not None:
+                    bundle_worker = active_bundle_workers.get(bundle_id)
+                    if bundle_worker is not None:
+                        bundle_worker.assignment_ids.discard(result.assignment_id)
+                        if not bundle_worker.assignment_ids:
+                            bundle_worker.thread.join()
+                            active_bundle_workers.pop(bundle_id, None)
                 if result.kind == "fatal":
                     raise result.error if result.error is not None else RuntimeError("assignment worker failed")
                 if result.kind == "success":
@@ -1381,7 +1988,7 @@ def run_worker_loop(control: EdgeControlClient, runtime: VLLMRuntime, attest_on_
                     autopilot.observe_assignment_success(
                         latency_seconds=max(0.0, result.latency_seconds or 0.0),
                         queue_depth=result.queue_depth,
-                        active_assignments=len(active_workers),
+                        active_assignments=len(active_bundle_workers),
                         gpu_sample=loop_gpu_sample,
                     )
                 else:
@@ -1389,9 +1996,31 @@ def run_worker_loop(control: EdgeControlClient, runtime: VLLMRuntime, attest_on_
                         code=result.code or "node_runtime_error",
                         retryable=bool(result.retryable),
                         queue_depth=result.queue_depth,
-                        active_assignments=len(active_workers),
+                        active_assignments=len(active_bundle_workers),
                         gpu_sample=loop_gpu_sample,
                     )
+            prefetch_results = drain_prefetched_assignments_for_local_queue(
+                control,
+                ready_assignments,
+                active_prefetch_workers=active_prefetch_workers,
+                prefetch_completion_queue=prefetch_completion_queue,
+                queue_depth=max(
+                    1,
+                    local_work_reservoir_depth(
+                        leased_assignments,
+                        ready_assignments,
+                        active_prefetch_workers,
+                    ),
+                ),
+            )
+            for result in prefetch_results:
+                autopilot.observe_assignment_failure(
+                    code=result.code or "node_runtime_error",
+                    retryable=bool(result.retryable),
+                    queue_depth=result.queue_depth,
+                    active_assignments=len(active_bundle_workers),
+                    gpu_sample=loop_gpu_sample,
+                )
 
             if (
                 control.settings.restricted_capable
@@ -1402,10 +2031,15 @@ def run_worker_loop(control: EdgeControlClient, runtime: VLLMRuntime, attest_on_
                 LOGGER.info("local restricted attestation is stale or missing; refreshing it before polling")
                 control.attest()
             queue_depth = control_plane_queue_depth(control)
-            active_assignments = len(active_workers)
+            active_assignments = len(active_bundle_workers)
+            active_running_assignments = len(active_assignment_bundle_ids)
             loop_time = time.monotonic()
             gpu_sample = gpu_telemetry_sampler.sample(now_monotonic=loop_time)
-            local_queue_depth = len(pending_assignments)
+            local_queue_depth = local_work_reservoir_depth(
+                leased_assignments,
+                ready_assignments,
+                active_prefetch_workers,
+            )
             observable_queue_depth = max(queue_depth, local_queue_depth)
             autopilot.observe_idle(
                 queue_depth=observable_queue_depth,
@@ -1413,12 +2047,62 @@ def run_worker_loop(control: EdgeControlClient, runtime: VLLMRuntime, attest_on_
                 gpu_sample=gpu_sample,
             )
             capabilities = autopilot.capabilities_payload()
+            heat_governor_payload = (
+                dict(capabilities.get("heat_governor"))
+                if isinstance(capabilities.get("heat_governor"), dict)
+                else {}
+            )
+            target_power_raw = capabilities.get("target_gpu_utilization_pct")
+            target_power_pct = 100 if target_power_raw is None else int(target_power_raw)
+            power_limits = power_limit_controller.power_limits(now_monotonic=loop_time)
+            desired_power_limit_watts = power_limit_for_target(target_power_pct, power_limits)
+            if desired_power_limit_watts is not None:
+                heat_governor_payload["desired_power_limit_watts"] = desired_power_limit_watts
+                capabilities["heat_governor"] = heat_governor_payload
+                capabilities["gpu_power_limit_watts"] = desired_power_limit_watts
+                if power_limit_controller.apply(desired_power_limit_watts, now_monotonic=loop_time):
+                    LOGGER.info("heat governor set GPU power limit to %sW", desired_power_limit_watts)
+            if power_limit_controller.last_error:
+                capabilities["gpu_power_limit_error"] = power_limit_controller.last_error
+            governor_paused = bool(capabilities.get("heat_governor_paused"))
+            governor_pause_reason = (
+                str(capabilities.get("heat_governor_pause_reason") or "")
+                or str(heat_governor_payload.get("pause_reason") or "")
+                or None
+            )
+            if governor_paused and (leased_assignments or ready_assignments):
+                returned_results = return_local_queue_for_heat_pause(
+                    control,
+                    leased_assignments,
+                    ready_assignments,
+                    queue_depth=max(queue_depth, local_queue_depth),
+                    pause_reason=governor_pause_reason,
+                )
+                LOGGER.info(
+                    "heat governor returned %s staged assignments before pause reason=%s",
+                    len(returned_results),
+                    governor_pause_reason or "heat_governor_paused",
+                )
+                local_queue_depth = local_work_reservoir_depth(
+                    leased_assignments,
+                    ready_assignments,
+                    active_prefetch_workers,
+                )
+                observable_queue_depth = max(queue_depth, local_queue_depth)
             worker_limit = max_worker_assignments_from_capabilities(capabilities)
+            microbatch_assignment_limit = max_microbatch_assignments_from_capabilities(capabilities)
             local_queue_limit = max_local_queue_assignments_from_capabilities(capabilities)
+            connectivity = control_plane_connectivity_snapshot(control)
+            reservoir_target = recommended_local_reservoir_target(
+                worker_limit=worker_limit,
+                local_queue_limit=local_queue_limit,
+                connectivity=connectivity,
+            )
             throughput_logger.observe_loop(
                 active_assignments=active_assignments,
                 worker_limit=worker_limit,
                 queue_depth=observable_queue_depth,
+                prefetch_queue_depth=len(ready_assignments) + len(active_prefetch_workers),
                 gpu_sample=gpu_sample,
                 now_monotonic=loop_time,
             )
@@ -1427,8 +2111,8 @@ def run_worker_loop(control: EdgeControlClient, runtime: VLLMRuntime, attest_on_
                 queue_depth=local_queue_depth,
                 control=control,
                 heartbeat_state=heartbeat_state,
-                status="active",
-                active_assignments=active_assignments,
+                status="paused" if governor_paused else "active",
+                active_assignments=active_running_assignments,
                 capabilities=capabilities,
                 runtime=control.node_runtime_payload(),
                 now_monotonic=loop_time,
@@ -1437,65 +2121,161 @@ def run_worker_loop(control: EdgeControlClient, runtime: VLLMRuntime, attest_on_
             local_assignment_ids = [
                 assignment_id
                 for assignment_id in (
-                    list(active_workers.keys())
+                    list(active_assignment_bundle_ids.keys())
+                    + list(active_prefetch_workers.keys())
                     + [
                         str(getattr(assignment, "assignment_id", "") or "")
-                        for assignment in pending_assignments
+                        for assignment in leased_assignments
+                    ]
+                    + [
+                        str(getattr(assignment, "assignment_id", "") or "")
+                        for assignment in ready_assignments
                     ]
                 )
                 if assignment_id
             ]
-            local_claimed_assignments = len(local_assignment_ids)
-            pull_budget = max(0, local_queue_limit - local_claimed_assignments)
-            assignments = control.pull_assignments(
-                pull_budget,
-                active_assignment_ids=local_assignment_ids,
+            lease_keepalive_state = maybe_touch_assignment_leases(
+                control,
+                lease_keepalive_state,
+                local_assignment_ids,
+                now_monotonic=loop_time,
             )
-            queue_depth = control_plane_queue_depth(control)
+            if governor_paused:
+                LOGGER.debug("heat governor pause active; skipping assignment pull and dispatch")
+                time.sleep(
+                    0.25 if active_bundle_workers or active_prefetch_workers else control.settings.poll_interval_seconds
+                )
+                continue
+            # Keep the local reservoir independent from active runtime
+            # concurrency so network fetch, decrypt, and validation stay ahead
+            # of the GPU.
+            pull_budget = max(0, reservoir_target - local_queue_depth)
+            assignments: list[object] = []
+            if pull_budget > 0:
+                try:
+                    assignments = control.pull_assignments(
+                        pull_budget,
+                        active_assignment_ids=local_assignment_ids,
+                    )
+                    queue_depth = control_plane_queue_depth(control)
+                    connectivity = control_plane_connectivity_snapshot(control)
+                except Exception as error:
+                    if control.is_transient_network_error(error):
+                        LOGGER.warning("control plane connectivity degraded temporarily; pull failed: %s", error)
+                        connectivity = control_plane_connectivity_snapshot(control)
+                        assignments = []
+                    else:
+                        raise
             pending_assignment_ids = {
-                str(getattr(assignment, "assignment_id", "") or "") for assignment in pending_assignments
+                str(getattr(assignment, "assignment_id", "") or "")
+                for assignment in leased_assignments + ready_assignments
             }
+            pending_assignment_ids.update(active_prefetch_workers.keys())
             for assignment in assignments[:pull_budget]:
-                if assignment.assignment_id in active_workers or assignment.assignment_id in pending_assignment_ids:
+                if (
+                    assignment.assignment_id in active_assignment_bundle_ids
+                    or assignment.assignment_id in pending_assignment_ids
+                ):
                     LOGGER.debug("assignment %s is already running locally; skipping duplicate pull", assignment.assignment_id)
                     continue
-                pending_assignments.append(assignment)
+                leased_assignments.append(assignment)
                 pending_assignment_ids.add(assignment.assignment_id)
                 pulled_assignment = True
 
-            dispatch_slots = max(0, worker_limit - len(active_workers))
-            dispatch_queue_depth = max(queue_depth, len(pending_assignments))
-            for bundle in select_assignment_bundles_for_dispatch(
-                pending_assignments,
-                available_slots=dispatch_slots,
-            ):
-                if not bundle:
-                    continue
-                worker = threading.Thread(
-                    target=run_assignment_bundle_worker,
-                    args=(control, runtime, bundle),
-                    kwargs={
-                        "queue_depth": max(1, dispatch_queue_depth),
-                        "completion_queue": completion_queue,
-                    },
-                    name=f"assignment-bundle-{getattr(bundle[0], 'assignment_id', 'unknown')}",
-                    daemon=True,
-                )
-                for assignment in bundle:
-                    active_workers[assignment.assignment_id] = worker
-                worker.start()
+            prefetch_assignments_for_local_queue(
+                leased_assignments,
+                desired_ready_assignments=max(1, reservoir_target),
+                max_prefetch_workers=recommended_prefetch_worker_limit(
+                    worker_limit=worker_limit,
+                    max_microbatch_assignments=microbatch_assignment_limit,
+                    local_queue_limit=reservoir_target,
+                ),
+                ready_assignments=ready_assignments,
+                active_prefetch_workers=active_prefetch_workers,
+                prefetch_completion_queue=prefetch_completion_queue,
+                control=control,
+            )
+
+            dispatch_slots = max(0, worker_limit - len(active_bundle_workers))
+            dispatch_queue_depth = max(
+                queue_depth,
+                local_work_reservoir_depth(
+                    leased_assignments,
+                    ready_assignments,
+                    active_prefetch_workers,
+                ),
+            )
+            connectivity = control_plane_connectivity_snapshot(control)
+            if control_plane_dispatch_allowed(connectivity):
+                for bundle in select_assignment_bundles_for_dispatch(
+                    ready_assignments,
+                    available_slots=dispatch_slots,
+                    max_microbatch_assignments=microbatch_assignment_limit,
+                ):
+                    if not bundle:
+                        continue
+                    worker = threading.Thread(
+                        target=run_assignment_bundle_worker,
+                        args=(control, runtime, bundle),
+                        kwargs={
+                            "queue_depth": max(1, dispatch_queue_depth),
+                            "completion_queue": completion_queue,
+                        },
+                        name=f"assignment-bundle-{getattr(bundle[0], 'assignment_id', 'unknown')}",
+                        daemon=True,
+                    )
+                    bundle_id = str(getattr(bundle[0], "assignment_id", "") or f"bundle-{time.monotonic_ns()}")
+                    active_bundle_workers[bundle_id] = ActiveBundleWorker(
+                        thread=worker,
+                        assignment_ids={
+                            str(getattr(assignment, "assignment_id", "unknown")) for assignment in bundle
+                        },
+                    )
+                    for assignment in bundle:
+                        active_assignment_bundle_ids[str(getattr(assignment, "assignment_id", "unknown"))] = bundle_id
+                    worker.start()
+                    LOGGER.info(
+                        "claimed assignment bundle size=%s ids=%s",
+                        len(bundle),
+                        ",".join(str(getattr(assignment, "assignment_id", "unknown")) for assignment in bundle),
+                    )
+                    dispatch_slots = max(0, dispatch_slots - 1)
+            elif ready_assignments:
                 LOGGER.info(
-                    "claimed assignment bundle size=%s ids=%s",
-                    len(bundle),
-                    ",".join(str(getattr(assignment, "assignment_id", "unknown")) for assignment in bundle),
+                    "holding %s ready assignments until control-plane grace reconnects",
+                    len(ready_assignments),
                 )
-                dispatch_slots = max(0, dispatch_slots - len(bundle))
-            if not active_workers and not pending_assignments and not pulled_assignment:
-                if max(queue_depth, len(pending_assignments)) > 0:
-                    autopilot.observe_idle(queue_depth=max(queue_depth, len(pending_assignments)), active_assignments=0)
+            if (
+                not active_bundle_workers
+                and not active_prefetch_workers
+                and not leased_assignments
+                and not ready_assignments
+                and not pulled_assignment
+            ):
+                if max(
+                    queue_depth,
+                    local_work_reservoir_depth(
+                        leased_assignments,
+                        ready_assignments,
+                        active_prefetch_workers,
+                    ),
+                ) > 0:
+                    autopilot.observe_idle(
+                        queue_depth=max(
+                            queue_depth,
+                            local_work_reservoir_depth(
+                                leased_assignments,
+                                ready_assignments,
+                                active_prefetch_workers,
+                            ),
+                        ),
+                        active_assignments=0,
+                    )
                 time.sleep(control.settings.poll_interval_seconds)
                 continue
-            time.sleep(0.25 if active_workers else control.settings.poll_interval_seconds)
+            time.sleep(
+                0.25 if active_bundle_workers or active_prefetch_workers else control.settings.poll_interval_seconds
+            )
         except Exception as error:  # pragma: no cover - long-running loop
             if control.is_auth_error(error):
                 LOGGER.warning(
@@ -1513,7 +2293,7 @@ def run_worker_loop(control: EdgeControlClient, runtime: VLLMRuntime, attest_on_
                 ) from error
             if control.is_transient_network_error(error):
                 LOGGER.warning("control plane connectivity degraded temporarily: %s", error)
-                time.sleep(control.settings.poll_interval_seconds)
+                time.sleep(recommended_control_plane_retry_delay_seconds(control))
                 continue
             LOGGER.exception("node agent loop failed")
             time.sleep(control.settings.poll_interval_seconds)
@@ -1521,6 +2301,7 @@ def run_worker_loop(control: EdgeControlClient, runtime: VLLMRuntime, attest_on_
 
 def command_bootstrap() -> int:
     settings = NodeAgentSettings()
+    validate_startup_settings(settings)
     control = EdgeControlClient(settings)
     bootstrap_node(control, interactive=True)
     return 0
@@ -1528,6 +2309,7 @@ def command_bootstrap() -> int:
 
 def command_run() -> int:
     settings = NodeAgentSettings()
+    validate_startup_settings(settings)
     control = EdgeControlClient(settings)
     runtime = VLLMRuntime(
         resolved_inference_base_url_for_settings(settings),
@@ -1539,6 +2321,7 @@ def command_run() -> int:
 
 def command_default() -> int:
     settings = NodeAgentSettings()
+    validate_startup_settings(settings)
     control = EdgeControlClient(settings)
     runtime = VLLMRuntime(
         resolved_inference_base_url_for_settings(settings),

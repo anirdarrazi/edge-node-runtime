@@ -1,5 +1,6 @@
 import logging
 from types import SimpleNamespace
+import threading
 import time
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -47,6 +48,7 @@ class FakeControl:
         self.recovery_notes = []
         self.auth_fail_on_heartbeat = False
         self.progress_updates = []
+        self.touched_assignments = []
         self.failures = []
         self.completions = []
         self.attestation_state = {
@@ -107,6 +109,9 @@ class FakeControl:
     def report_progress(self, assignment_id: str, progress):
         self.progress_updates.append((assignment_id, progress))
 
+    def touch_assignments(self, assignment_ids):
+        self.touched_assignments.append(list(assignment_ids))
+
     def complete_assignment(self, assignment_id: str, results, runtime_receipt=None):
         self.completions.append((assignment_id, results, runtime_receipt))
 
@@ -123,6 +128,15 @@ class FakeControl:
     def is_auth_error(self, error: Exception) -> bool:
         return isinstance(error, httpx.HTTPStatusError) and error.response.status_code == 401
 
+    def is_transient_network_error(self, error: Exception) -> bool:
+        if isinstance(error, main_module.ArtifactFlowError):
+            return error.retryable
+        if isinstance(error, httpx.TransportError):
+            return True
+        if isinstance(error, httpx.HTTPStatusError):
+            return error.response.status_code in {408, 409, 425, 429} or error.response.status_code >= 500
+        return False
+
     def load_attestation_state(self):
         return self.attestation_state
 
@@ -134,6 +148,7 @@ def test_command_bootstrap_runs_claim_bootstrap(monkeypatch: pytest.MonkeyPatch)
         "NodeAgentSettings",
         lambda: SimpleNamespace(inference_base_url="http://localhost:8000", vllm_base_url="http://localhost:8000"),
     )
+    monkeypatch.setattr(main_module, "validate_startup_settings", lambda _settings: None)
     monkeypatch.setattr(main_module, "EdgeControlClient", lambda _settings: control)
 
     result = main_module.main(["bootstrap"])
@@ -148,6 +163,7 @@ def test_command_default_bootstraps_when_credentials_are_missing(monkeypatch: py
     control = FakeControl(has_credentials=False)
 
     monkeypatch.setattr(main_module, "NodeAgentSettings", lambda: settings)
+    monkeypatch.setattr(main_module, "validate_startup_settings", lambda _settings: None)
     monkeypatch.setattr(main_module, "EdgeControlClient", lambda _settings: control)
     monkeypatch.setattr(main_module, "VLLMRuntime", lambda _base_url, **_kwargs: object())
 
@@ -168,6 +184,33 @@ def test_run_worker_loop_clears_credentials_after_auth_failure():
     assert control.clear_calls == 1
     assert control.recovery_notes
     assert "Open the setup UI and run Quick Start" in control.recovery_notes[-1]
+
+
+def test_recommended_local_reservoir_target_expands_during_degraded_mode():
+    assert (
+        main_module.recommended_local_reservoir_target(
+            worker_limit=2,
+            local_queue_limit=64,
+            connectivity={},
+        )
+        == 16
+    )
+    assert (
+        main_module.recommended_local_reservoir_target(
+            worker_limit=2,
+            local_queue_limit=64,
+            connectivity={"status": "degraded"},
+        )
+        == 32
+    )
+    assert (
+        main_module.recommended_local_reservoir_target(
+            worker_limit=2,
+            local_queue_limit=4,
+            connectivity={"status": "degraded"},
+        )
+        == 4
+    )
 
 
 def test_run_worker_loop_reports_assignment_failure():
@@ -258,6 +301,16 @@ def test_validate_assignment_policy_rejects_vram_gap_beyond_tolerance():
         main_module.validate_assignment_policy(control, policy_assignment(required_vram_gb=12.0))
 
 
+def test_classify_assignment_failure_detects_gpu_oom():
+    error = RuntimeError("CUDA out of memory while allocating attention cache")
+
+    code, message, retryable = main_module.classify_assignment_failure(error)
+
+    assert code == "gpu_oom"
+    assert "out of memory" in message.lower()
+    assert retryable is True
+
+
 def test_worker_limit_uses_embedding_specific_capacity():
     assert (
         max_worker_assignments_from_capabilities(
@@ -298,6 +351,157 @@ def test_local_queue_limit_uses_prefetch_depth():
     )
 
 
+def test_local_queue_limit_prefers_explicit_local_queue_depth():
+    assert (
+        max_local_queue_assignments_from_capabilities(
+            {
+                "max_concurrent_assignments": 1,
+                "max_concurrent_assignments_embeddings": 2,
+                "max_microbatch_assignments_embeddings": 8,
+                "max_pull_bundle_assignments": 16,
+                "max_local_queue_assignments": 24,
+            }
+        )
+        == 24
+    )
+
+
+def test_prefetch_assignments_for_local_queue_starts_parallel_reservoir_workers():
+    fetch_release = threading.Event()
+
+    class AssignmentControl(FakeControl):
+        def fetch_artifact(self, assignment):
+            assert fetch_release.wait(1.0)
+            return {
+                "items": [
+                    {
+                        "batch_item_id": f"item_{assignment.assignment_id}",
+                        "customer_item_id": f"cust_{assignment.assignment_id}",
+                        "operation": "embeddings",
+                        "model": "BAAI/bge-large-en-v1.5",
+                        "input": {"text": assignment.assignment_id},
+                    }
+                ]
+            }
+
+    def assignment(assignment_id: str):
+        return SimpleNamespace(
+            assignment_id=assignment_id,
+            execution_id=f"pexec_{assignment_id}",
+            assignment_nonce=f"nonce_{assignment_id}",
+            item_count=1,
+            operation="embeddings",
+            model="BAAI/bge-large-en-v1.5",
+            privacy_tier="standard",
+            node_trust_requirement="untrusted_allowed",
+            result_guarantee="community_best_effort",
+            allowed_regions=["global"],
+            required_vram_gb=1.0,
+            required_context_tokens=512,
+            token_budget={"total_tokens": 8},
+            microbatch_key="embeddings|BAAI/bge-large-en-v1.5|standard",
+        )
+
+    control = AssignmentControl()
+    leased = [assignment(f"assign_prefetch_{index}") for index in range(16)]
+    ready = []
+    active_prefetch_workers = {}
+    prefetch_completion_queue = main_module.Queue()
+
+    main_module.prefetch_assignments_for_local_queue(
+        leased,
+        desired_ready_assignments=16,
+        max_prefetch_workers=6,
+        ready_assignments=ready,
+        active_prefetch_workers=active_prefetch_workers,
+        prefetch_completion_queue=prefetch_completion_queue,
+        control=control,
+    )
+
+    assert len(leased) == 10
+    assert len(active_prefetch_workers) == 6
+    assert ready == []
+
+    fetch_release.set()
+    deadline = time.time() + 2.0
+    while any(worker.is_alive() for worker in active_prefetch_workers.values()) and time.time() < deadline:
+        time.sleep(0.01)
+
+    results = main_module.drain_prefetched_assignments_for_local_queue(
+        control,
+        ready,
+        active_prefetch_workers=active_prefetch_workers,
+        prefetch_completion_queue=prefetch_completion_queue,
+        queue_depth=16,
+    )
+
+    assert results == []
+    assert active_prefetch_workers == {}
+    assert len(ready) == 6
+    assert sorted(prepared.assignment_id for prepared in ready) == [
+        f"assign_prefetch_{index}" for index in range(6)
+    ]
+
+
+def test_drain_prefetched_assignments_reports_failures():
+    class AssignmentControl(FakeControl):
+        def fetch_artifact(self, _assignment):
+            raise ValueError("invalid payload")
+
+    assignment = SimpleNamespace(
+        assignment_id="assign_prefetch_fail",
+        execution_id="pexec_prefetch_fail",
+        assignment_nonce="nonce_prefetch_fail",
+        item_count=1,
+        operation="embeddings",
+        model="BAAI/bge-large-en-v1.5",
+        privacy_tier="standard",
+        node_trust_requirement="untrusted_allowed",
+        result_guarantee="community_best_effort",
+        allowed_regions=["global"],
+        required_vram_gb=1.0,
+        required_context_tokens=512,
+        token_budget={"total_tokens": 8},
+        microbatch_key="embeddings|BAAI/bge-large-en-v1.5|standard",
+    )
+    control = AssignmentControl()
+    leased = [assignment]
+    ready = []
+    active_prefetch_workers = {}
+    prefetch_completion_queue = main_module.Queue()
+
+    main_module.prefetch_assignments_for_local_queue(
+        leased,
+        desired_ready_assignments=1,
+        max_prefetch_workers=1,
+        ready_assignments=ready,
+        active_prefetch_workers=active_prefetch_workers,
+        prefetch_completion_queue=prefetch_completion_queue,
+        control=control,
+    )
+
+    deadline = time.time() + 2.0
+    while any(worker.is_alive() for worker in active_prefetch_workers.values()) and time.time() < deadline:
+        time.sleep(0.01)
+
+    results = main_module.drain_prefetched_assignments_for_local_queue(
+        control,
+        ready,
+        active_prefetch_workers=active_prefetch_workers,
+        prefetch_completion_queue=prefetch_completion_queue,
+        queue_depth=1,
+    )
+
+    assert ready == []
+    assert len(results) == 1
+    assert results[0].assignment_id == "assign_prefetch_fail"
+    assert results[0].code == "invalid_assignment_payload"
+    assert results[0].retryable is False
+    assert control.failures == [
+        ("assign_prefetch_fail", "invalid_assignment_payload", "invalid payload", False)
+    ]
+
+
 def test_select_assignment_bundles_for_dispatch_prefers_largest_compatible_group():
     assignments = [
         SimpleNamespace(assignment_id="assign_single", operation="responses", microbatch_key=None),
@@ -306,15 +510,35 @@ def test_select_assignment_bundles_for_dispatch_prefers_largest_compatible_group
         SimpleNamespace(assignment_id="assign_embed_3", operation="embeddings", microbatch_key="embed|B"),
     ]
 
-    bundles = main_module.select_assignment_bundles_for_dispatch(assignments, available_slots=2)
+    bundles = main_module.select_assignment_bundles_for_dispatch(
+        assignments,
+        available_slots=2,
+        max_microbatch_assignments=2,
+    )
 
     assert [[assignment.assignment_id for assignment in bundle] for bundle in bundles] == [
         ["assign_embed_1", "assign_embed_2"],
+        ["assign_embed_3"],
     ]
-    assert [assignment.assignment_id for assignment in assignments] == [
-        "assign_single",
-        "assign_embed_3",
+    assert [assignment.assignment_id for assignment in assignments] == ["assign_single"]
+
+
+def test_select_assignment_bundles_can_fill_one_worker_slot_with_large_microbatch():
+    assignments = [
+        SimpleNamespace(assignment_id=f"assign_embed_{index}", operation="embeddings", microbatch_key="embed|A")
+        for index in range(4)
     ]
+
+    bundles = main_module.select_assignment_bundles_for_dispatch(
+        assignments,
+        available_slots=1,
+        max_microbatch_assignments=8,
+    )
+
+    assert [[assignment.assignment_id for assignment in bundle] for bundle in bundles] == [
+        ["assign_embed_0", "assign_embed_1", "assign_embed_2", "assign_embed_3"],
+    ]
+    assert assignments == []
 
 
 def test_process_assignment_bundle_microbatches_compatible_embeddings():
@@ -416,6 +640,7 @@ def test_node_throughput_logger_logs_embedding_and_response_metrics(caplog: pyte
             active_assignments=3,
             worker_limit=4,
             queue_depth=8,
+            prefetch_queue_depth=5,
             gpu_sample=main_module.GPUTelemetrySample(
                 utilization_percent=82.0,
                 memory_utilization_percent=64.0,
@@ -429,6 +654,7 @@ def test_node_throughput_logger_logs_embedding_and_response_metrics(caplog: pyte
             active_assignments=4,
             worker_limit=4,
             queue_depth=6,
+            prefetch_queue_depth=4,
             gpu_sample=main_module.GPUTelemetrySample(
                 utilization_percent=94.0,
                 memory_utilization_percent=71.0,
@@ -485,7 +711,9 @@ def test_node_throughput_logger_logs_embedding_and_response_metrics(caplog: pyte
         and "gpu_util_avg=88.0%" in message
         and "gpu_mem_avg=67.5%" in message
         and "gpu_power_avg=222.5W" in message
+        and "prefetch_queue_avg=4.50" in message
         and "queued_idle_s=0.00" in message
+        and "microbatch_avg=1.50" in message
         for message in messages
     )
     assert any(
@@ -501,6 +729,89 @@ def test_node_throughput_logger_logs_embedding_and_response_metrics(caplog: pyte
         and "avg_microbatch_assignments=1.00" in message
         for message in messages
     )
+
+
+def test_node_throughput_logger_warns_when_queued_work_is_idle(caplog: pytest.LogCaptureFixture):
+    throughput_logger = main_module.NodeThroughputLogger(interval_seconds=30.0)
+    start_time = time.monotonic()
+
+    with caplog.at_level(logging.WARNING, logger="autonomousc-node-agent"):
+        throughput_logger.observe_loop(
+            active_assignments=0,
+            worker_limit=4,
+            queue_depth=6,
+            prefetch_queue_depth=0,
+            gpu_sample=main_module.GPUTelemetrySample(
+                utilization_percent=4.0,
+                memory_utilization_percent=21.0,
+                power_watts=55.0,
+                temperature_c=48.0,
+                source="nvml",
+            ),
+            now_monotonic=start_time,
+        )
+        throughput_logger.observe_loop(
+            active_assignments=0,
+            worker_limit=4,
+            queue_depth=6,
+            prefetch_queue_depth=0,
+            gpu_sample=main_module.GPUTelemetrySample(
+                utilization_percent=6.0,
+                memory_utilization_percent=22.0,
+                power_watts=57.0,
+                temperature_c=49.0,
+                source="nvml",
+            ),
+            now_monotonic=start_time + 20.0,
+        )
+        throughput_logger.maybe_log(now_monotonic=start_time + 31.0)
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("condition=queued_capable_idle_or_low_util" in message for message in messages)
+
+
+def test_validate_startup_settings_rejects_invalid_region(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(main_module.socket, "getaddrinfo", lambda *_args, **_kwargs: [object()])
+    settings = main_module.NodeAgentSettings(
+        edge_control_url="https://edge.autonomousc.com",
+        node_region="global",
+        vllm_model="BAAI/bge-large-en-v1.5",
+        supported_models="BAAI/bge-large-en-v1.5",
+        max_context_tokens=512,
+    )
+
+    with pytest.raises(RuntimeError, match="NODE_REGION='global'"):
+        main_module.validate_startup_settings(settings)
+
+
+def test_validate_startup_settings_rejects_unsafe_embedding_context(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(main_module.socket, "getaddrinfo", lambda *_args, **_kwargs: [object()])
+    settings = main_module.NodeAgentSettings(
+        edge_control_url="https://edge.autonomousc.com",
+        node_region="eu-se-1",
+        vllm_model="BAAI/bge-large-en-v1.5",
+        supported_models="BAAI/bge-large-en-v1.5",
+        max_context_tokens=32768,
+    )
+
+    with pytest.raises(RuntimeError, match="MAX_CONTEXT_TOKENS=32768"):
+        main_module.validate_startup_settings(settings)
+
+
+def test_validate_startup_settings_rejects_capability_ads_runtime_cannot_serve(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(main_module.socket, "getaddrinfo", lambda *_args, **_kwargs: [object()])
+    settings = main_module.NodeAgentSettings(
+        edge_control_url="https://edge.autonomousc.com",
+        node_region="eu-se-1",
+        runtime_profile="home_llama_cpp_gguf",
+        inference_engine="llama_cpp",
+        vllm_model="meta-llama/Llama-3.1-8B-Instruct",
+        supported_models="meta-llama/Llama-3.1-8B-Instruct,BAAI/bge-large-en-v1.5",
+        max_context_tokens=32768,
+    )
+
+    with pytest.raises(RuntimeError, match="cannot actually serve"):
+        main_module.validate_startup_settings(settings)
 
 
 def test_gpu_telemetry_sampler_parses_nvidia_smi(monkeypatch: pytest.MonkeyPatch):
@@ -604,6 +915,7 @@ def test_run_worker_loop_prefetches_local_queue_and_drains_it_in_microbatches(
             }
 
     monkeypatch.setattr(main_module, "max_worker_assignments_from_capabilities", lambda _capabilities: 2)
+    monkeypatch.setattr(main_module, "max_microbatch_assignments_from_capabilities", lambda _capabilities: 4)
     monkeypatch.setattr(main_module, "max_local_queue_assignments_from_capabilities", lambda _capabilities: 4)
     monkeypatch.setattr(main_module.time, "sleep", lambda _seconds: None)
 
@@ -614,16 +926,132 @@ def test_run_worker_loop_prefetches_local_queue_and_drains_it_in_microbatches(
         main_module.run_worker_loop(control, runtime, attest_on_start=False)
 
     assert control.pull_limits[0] == 4
-    assert runtime.calls == [
-        ["assign_prefetch_0", "assign_prefetch_1"],
-        ["assign_prefetch_2", "assign_prefetch_3"],
-    ]
+    assert runtime.calls == [["assign_prefetch_0", "assign_prefetch_1", "assign_prefetch_2", "assign_prefetch_3"]]
     assert [completion[0] for completion in control.completions] == [
         "assign_prefetch_0",
         "assign_prefetch_1",
         "assign_prefetch_2",
         "assign_prefetch_3",
     ]
+
+
+def test_run_worker_loop_prefetches_next_batch_while_microbatch_is_active(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    second_batch_prefetched = threading.Event()
+
+    class AssignmentControl(FakeControl):
+        def __init__(self) -> None:
+            super().__init__(has_credentials=True)
+            self.pull_limits = []
+            self.batch_index = 0
+            self.second_prefetch_count = 0
+
+        def heartbeat(self, *args, **kwargs):
+            return None
+
+        def pull_assignments(self, limit: int, active_assignment_ids=None):
+            self.pull_limits.append((limit, list(active_assignment_ids or [])))
+            if len(self.completions) >= 4 and second_batch_prefetched.is_set():
+                raise KeyboardInterrupt()
+            if limit <= 0:
+                return []
+            if self.batch_index >= 2:
+                return []
+            prefix = "assign_active" if self.batch_index == 0 else "assign_next"
+            self.batch_index += 1
+            return [
+                SimpleNamespace(
+                    assignment_id=f"{prefix}_{index}",
+                    execution_id=f"pexec_{prefix}_{index}",
+                    assignment_nonce=f"nonce_{prefix}_{index}",
+                    item_count=1,
+                    operation="embeddings",
+                    model="BAAI/bge-large-en-v1.5",
+                    privacy_tier="standard",
+                    node_trust_requirement="untrusted_allowed",
+                    result_guarantee="community_best_effort",
+                    allowed_regions=["global"],
+                    required_vram_gb=1.0,
+                    required_context_tokens=512,
+                    token_budget={"total_tokens": 8},
+                    microbatch_key=None,
+                )
+                for index in range(4)
+            ]
+
+        def fetch_artifact(self, assignment):
+            if str(assignment.assignment_id).startswith("assign_next_"):
+                self.second_prefetch_count += 1
+                if self.second_prefetch_count >= 4:
+                    second_batch_prefetched.set()
+            return {
+                "items": [
+                    {
+                        "batch_item_id": f"item_{assignment.assignment_id}",
+                        "customer_item_id": f"cust_{assignment.assignment_id}",
+                        "operation": "embeddings",
+                        "model": "BAAI/bge-large-en-v1.5",
+                        "input": {"text": assignment.assignment_id},
+                    }
+                ]
+            }
+
+    class RuntimeStub:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def execute_microbatch(self, operation, model, assignment_items):
+            assignment_ids = [assignment_id for assignment_id, _items in assignment_items]
+            self.calls.append(assignment_ids)
+            if assignment_ids and assignment_ids[0].startswith("assign_active_"):
+                assert second_batch_prefetched.wait(2.0)
+            return {
+                assignment_id: [
+                    {
+                        "batch_item_id": items[0]["batch_item_id"],
+                        "customer_item_id": items[0]["customer_item_id"],
+                        "provider": "autonomousc_edge",
+                        "provider_model": model,
+                        "status": "completed",
+                        "usage": {"input_texts": 1, "total_tokens": 1},
+                        "cost": {
+                            "provider_cost": {"amount": "0.0001", "currency": "usd"},
+                            "customer_charge": {"amount": "0.0002", "currency": "usd"},
+                            "platform_margin": {"amount": "0.0001", "currency": "usd"},
+                        },
+                        "output": {"data": [{"embedding": [1.0]}]},
+                        "completed_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                ]
+                for assignment_id, items in assignment_items
+            }
+
+    monkeypatch.setattr(main_module, "max_worker_assignments_from_capabilities", lambda _capabilities: 1)
+    monkeypatch.setattr(main_module, "max_microbatch_assignments_from_capabilities", lambda _capabilities: 4)
+    monkeypatch.setattr(main_module, "max_local_queue_assignments_from_capabilities", lambda _capabilities: 4)
+    monkeypatch.setattr(main_module.time, "sleep", lambda _seconds: None)
+
+    control = AssignmentControl()
+    runtime = RuntimeStub()
+
+    with pytest.raises(KeyboardInterrupt):
+        main_module.run_worker_loop(control, runtime, attest_on_start=False)
+
+    assert second_batch_prefetched.is_set()
+    assert runtime.calls[0] == [
+        "assign_active_0",
+        "assign_active_1",
+        "assign_active_2",
+        "assign_active_3",
+    ]
+    assert any(limit == 4 for limit, _active_ids in control.pull_limits[1:])
+    second_pull = next(
+        active_ids
+        for limit, active_ids in control.pull_limits[1:]
+        if limit == 4
+    )
+    assert "assign_active_0" in second_pull
 
 
 def test_run_worker_loop_marks_nonretryable_completion_failures_as_failed():
@@ -706,6 +1134,218 @@ def test_run_worker_loop_marks_nonretryable_completion_failures_as_failed():
         )
     ]
     assert control.progress_updates[-1][1]["state"] == "failed"
+
+
+def test_complete_assignment_with_retry_retries_retryable_artifact_flow_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class AssignmentControl(FakeControl):
+        def __init__(self) -> None:
+            super().__init__(has_credentials=True)
+            self.attempts = 0
+
+        def complete_assignment(self, assignment_id: str, results, runtime_receipt=None):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise main_module.ArtifactFlowError(
+                    "result_artifact_upload_network_error",
+                    "temporary failure in name resolution",
+                    retryable=True,
+                )
+            super().complete_assignment(assignment_id, results, runtime_receipt=runtime_receipt)
+
+    monkeypatch.setattr(main_module.time, "sleep", lambda _seconds: None)
+    control = AssignmentControl()
+
+    main_module.complete_assignment_with_retry(
+        control,
+        "assign_retry_artifact",
+        [{"batch_item_id": "item_1"}],
+        {"assignment_nonce": "nonce_1"},
+        max_attempts=2,
+    )
+
+    assert control.attempts == 2
+    assert control.completions == [
+        (
+            "assign_retry_artifact",
+            [{"batch_item_id": "item_1"}],
+            {"assignment_nonce": "nonce_1"},
+        )
+    ]
+
+
+def test_report_assignment_failure_classifies_transient_reporting_errors(
+    caplog: pytest.LogCaptureFixture,
+):
+    class AssignmentControl(FakeControl):
+        def fail_assignment(self, assignment_id: str, code: str, message: str, retryable: bool = True):
+            raise httpx.ConnectError("temporary failure in name resolution")
+
+    control = AssignmentControl()
+    assignment = SimpleNamespace(
+        assignment_id="assign_report_dns",
+        operation="embeddings",
+        model="BAAI/bge-large-en-v1.5",
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = main_module.report_assignment_failure(
+            control,
+            assignment,
+            ValueError("invalid payload"),
+            item_count=1,
+            queue_depth=3,
+        )
+
+    assert result.kind == "failure"
+    assert result.code == "invalid_assignment_payload"
+    assert result.retryable is False
+    assert control.progress_updates[-1][1]["state"] == "failed"
+    assert any("connectivity is degraded" in record.getMessage() for record in caplog.records)
+
+
+def test_run_worker_loop_treats_heartbeat_dns_failure_as_transient(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    class AssignmentControl(FakeControl):
+        def __init__(self) -> None:
+            super().__init__(has_credentials=True)
+            self.heartbeat_calls = 0
+
+        def heartbeat(self, *args, **kwargs):
+            self.heartbeat_calls += 1
+            if self.heartbeat_calls == 1:
+                raise httpx.ConnectError("temporary failure in name resolution")
+            raise KeyboardInterrupt()
+
+        def pull_assignments(self, _limit: int, active_assignment_ids=None):
+            return []
+
+    monkeypatch.setattr(main_module.time, "sleep", lambda _seconds: None)
+    control = AssignmentControl()
+
+    with caplog.at_level(logging.WARNING, logger="autonomousc-node-agent"):
+        with pytest.raises(KeyboardInterrupt):
+            main_module.run_worker_loop(control, object(), attest_on_start=False)
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert control.heartbeat_calls == 2
+    assert any("control plane connectivity degraded temporarily" in message for message in messages)
+    assert not any("node agent loop failed" in message for message in messages)
+
+
+def test_run_worker_loop_treats_pull_dns_failure_as_transient(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    class AssignmentControl(FakeControl):
+        def __init__(self) -> None:
+            super().__init__(has_credentials=True)
+            self.pull_calls = 0
+
+        def heartbeat(self, *args, **kwargs):
+            return None
+
+        def pull_assignments(self, _limit: int, active_assignment_ids=None):
+            self.pull_calls += 1
+            if self.pull_calls == 1:
+                raise httpx.ConnectError("temporary failure in name resolution")
+            raise KeyboardInterrupt()
+
+    monkeypatch.setattr(main_module.time, "sleep", lambda _seconds: None)
+    control = AssignmentControl()
+
+    with caplog.at_level(logging.WARNING, logger="autonomousc-node-agent"):
+        with pytest.raises(KeyboardInterrupt):
+            main_module.run_worker_loop(control, object(), attest_on_start=False)
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert control.pull_calls == 2
+    assert any("control plane connectivity degraded temporarily" in message for message in messages)
+    assert not any("node agent loop failed" in message for message in messages)
+
+
+def test_run_worker_loop_does_not_pull_when_heat_governor_is_paused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    class PausedControl(FakeControl):
+        def __init__(self) -> None:
+            super().__init__(has_credentials=True)
+            self.settings.heat_governor_mode = "0"
+            self.settings.heat_governor_state_path = str(tmp_path / "heat-governor-state.json")
+            self.pull_calls = 0
+
+        def heartbeat(self, *args, **kwargs):
+            return None
+
+        def pull_assignments(self, _limit: int, active_assignment_ids=None):
+            self.pull_calls += 1
+            return []
+
+    def stop_after_pause_sleep(_seconds: float) -> None:
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(main_module.time, "sleep", stop_after_pause_sleep)
+    control = PausedControl()
+
+    with pytest.raises(KeyboardInterrupt):
+        main_module.run_worker_loop(control, object(), attest_on_start=False)
+
+    assert control.pull_calls == 0
+
+
+def test_heat_pause_returns_staged_assignments_retryably():
+    control = FakeControl(has_credentials=True)
+    leased = [
+        SimpleNamespace(
+            assignment_id="assign_leased",
+            item_count=1,
+            operation="responses",
+            model="meta-llama/Llama-3.1-8B-Instruct",
+        )
+    ]
+    ready = [
+        main_module.PreparedAssignment(
+            assignment=SimpleNamespace(
+                assignment_id="assign_ready",
+                item_count=2,
+                operation="embeddings",
+                model="BAAI/bge-large-en-v1.5",
+            ),
+            items=[],
+            item_count=2,
+            prefetched_at_monotonic=100.0,
+        )
+    ]
+
+    results = main_module.return_local_queue_for_heat_pause(
+        control,
+        leased,
+        ready,
+        queue_depth=2,
+        pause_reason="owner_heat_target_zero",
+    )
+
+    assert leased == []
+    assert ready == []
+    assert [result.assignment_id for result in results] == ["assign_ready", "assign_leased"]
+    assert all(result.code == "owner_heat_pause" and result.retryable for result in results)
+    assert control.failures == [
+        (
+            "assign_ready",
+            "owner_heat_pause",
+            "Owner heat target paused this node before the assignment started. The assignment can be retried after the owner resumes heat output.",
+            True,
+        ),
+        (
+            "assign_leased",
+            "owner_heat_pause",
+            "Owner heat target paused this node before the assignment started. The assignment can be retried after the owner resumes heat output.",
+            True,
+        ),
+    ]
 
 
 def test_run_worker_loop_keeps_assignments_fresh_while_runtime_is_busy(monkeypatch: pytest.MonkeyPatch):
@@ -867,6 +1507,42 @@ def test_maybe_send_heartbeat_ignores_volatile_gpu_telemetry_for_metadata_flush(
     )
 
     assert len(control.heartbeat_calls) == 1
+
+
+def test_maybe_touch_assignment_leases_throttles_and_flushes_assignment_set_changes():
+    control = FakeControl(has_credentials=True)
+    state = main_module.LeaseKeepaliveState()
+
+    state = main_module.maybe_touch_assignment_leases(
+        control,
+        state,
+        ["assign_b", "assign_a", "assign_a"],
+        now_monotonic=100.0,
+    )
+    state = main_module.maybe_touch_assignment_leases(
+        control,
+        state,
+        ["assign_a", "assign_b"],
+        now_monotonic=110.0,
+    )
+    state = main_module.maybe_touch_assignment_leases(
+        control,
+        state,
+        ["assign_a", "assign_b", "assign_c"],
+        now_monotonic=111.0,
+    )
+    state = main_module.maybe_touch_assignment_leases(
+        control,
+        state,
+        ["assign_a", "assign_b", "assign_c"],
+        now_monotonic=141.0,
+    )
+
+    assert control.touched_assignments == [
+        ["assign_a", "assign_b"],
+        ["assign_a", "assign_b", "assign_c"],
+        ["assign_a", "assign_b", "assign_c"],
+    ]
 
 
 def test_validate_assignment_rejects_restricted_work_without_hardware_attestation():
