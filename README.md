@@ -68,6 +68,8 @@ Windows PowerShell:
 .\build-manager-image.ps1
 ```
 
+The regular runtime images now preseed the public bootstrap-model cache into the image layer by default so a fresh Vast boot can reuse local model files instead of redownloading them after startup. Override or disable that during build with `PRELOAD_HF_MODELS`, for example `PRELOAD_HF_MODELS=BAAI/bge-large-en-v1.5 bash build-single-image.sh` or `PRELOAD_HF_MODELS= bash build-manager-image.sh`.
+
 Build and push the public `latest` image:
 
 ```bash

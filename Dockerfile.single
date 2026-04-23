@@ -6,15 +6,19 @@ WORKDIR /app
 COPY pyproject.toml /app/pyproject.toml
 COPY src /app/src
 
+ENV HF_HOME=/root/.cache/huggingface
+ARG PRELOAD_HF_MODELS=BAAI/bge-large-en-v1.5
+ENV AUTONOMOUSC_PRELOADED_HF_MODELS=${PRELOAD_HF_MODELS}
+
 RUN ln -sf /usr/bin/python3 /usr/local/bin/python \
     && python3 -m pip install --no-cache-dir --upgrade pip \
-    && python3 -m pip install --no-cache-dir .
+    && python3 -m pip install --no-cache-dir . \
+    && python3 -m node_agent.cache_seed --cache-dir "$HF_HOME" --models "$AUTONOMOUSC_PRELOADED_HF_MODELS"
 
 ENV INFERENCE_BASE_URL=http://127.0.0.1:8000
 ENV VLLM_BASE_URL=http://127.0.0.1:8000
 ENV VLLM_HOST=0.0.0.0
 ENV VLLM_PORT=8000
-ENV HF_HOME=/root/.cache/huggingface
 ENV CREDENTIALS_PATH=/var/lib/autonomousc/credentials/node-credentials.json
 ENV ATTESTATION_STATE_PATH=/var/lib/autonomousc/credentials/attestation-state.json
 ENV RECOVERY_NOTE_PATH=/var/lib/autonomousc/credentials/recovery-note.txt
