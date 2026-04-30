@@ -54,6 +54,9 @@ class NodeAgentSettings(BaseSettings):
     runtime_image: str | None = None
     vllm_image: str | None = None
     vllm_base_url: str | None = None
+    vllm_startup_timeout_seconds: int = 600
+    vllm_extra_args: str = ""
+    vllm_memory_profiler_estimate_cudagraphs: bool = False
     vllm_model: str = DEFAULT_RESPONSE_MODEL
     owner_target_model: str | None = None
     owner_target_supported_models: str | None = None

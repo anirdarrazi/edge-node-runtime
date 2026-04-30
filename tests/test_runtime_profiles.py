@@ -3,10 +3,12 @@ from node_agent.runtime_profiles import (
     ARTIFACT_MANIFEST_AUDITED_SAFETENSORS,
     ARTIFACT_MANIFEST_GGUF,
     DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_GEMMA_4_E4B_MODEL,
     DEFAULT_PUBLIC_SMOKE_TEST_API_PATH,
     HOME_EMBEDDINGS_LLAMA_CPP_PROFILE,
     HOME_LLAMA_CPP_GGUF_PROFILE,
     PARTNER_VLLM_TRUSTED_PROFILE,
+    RTX_5060_TI_16GB_GEMMA4_E4B_PROFILE,
     VAST_VLLM_SAFETENSORS_PROFILE,
     default_public_smoke_test_model,
     resolve_runtime_profile,
@@ -118,3 +120,38 @@ def test_vast_and_partner_profiles_split_elastic_from_trusted_vllm() -> None:
     }
     assert partner.supports_trusted_assignments is True
     assert partner.routing_lane == "trusted_exact_partner"
+
+
+def test_rtx_5060_ti_gemma_profile_targets_vast_responses() -> None:
+    profile = resolve_runtime_profile(
+        RTX_5060_TI_16GB_GEMMA4_E4B_PROFILE,
+        configured_engine=None,
+        configured_deployment_target=None,
+        runtime_backend=SINGLE_CONTAINER_RUNTIME_BACKEND,
+    )
+
+    assert profile.id == RTX_5060_TI_16GB_GEMMA4_E4B_PROFILE
+    assert profile.inference_engine == "vllm"
+    assert profile.deployment_target == "vast_ai"
+    assert profile.model_format == "safetensors"
+    assert profile.default_model == DEFAULT_GEMMA_4_E4B_MODEL
+    assert profile.supported_models == (DEFAULT_GEMMA_4_E4B_MODEL,)
+    assert profile.supported_apis == ("responses",)
+    assert profile.smoke_test_model == DEFAULT_GEMMA_4_E4B_MODEL
+    assert profile.smoke_test_api_path == "/v1/responses"
+    assert profile.vast_launch is not None
+    assert profile.vast_launch.min_disk_gb == 80
+    assert profile.vast_launch.preferred_smoke_test_model == DEFAULT_GEMMA_4_E4B_MODEL
+    assert profile.vast_launch.smoke_test_api_path == "/v1/responses"
+
+
+def test_auto_vast_gemma_model_resolves_5060_ti_profile() -> None:
+    profile = resolve_runtime_profile(
+        "auto",
+        configured_engine="vllm",
+        configured_deployment_target="vast_ai",
+        runtime_backend=SINGLE_CONTAINER_RUNTIME_BACKEND,
+        model=DEFAULT_GEMMA_4_E4B_MODEL,
+    )
+
+    assert profile.id == RTX_5060_TI_16GB_GEMMA4_E4B_PROFILE

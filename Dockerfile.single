@@ -1,4 +1,4 @@
-ARG VLLM_BASE_IMAGE=vllm/vllm-openai@sha256:d9a5c1c1614c959fde8d2a4d68449db184572528a6055afdd0caf1e66fb51504
+ARG VLLM_BASE_IMAGE=vllm/vllm-openai@sha256:8e86cb93b724092cd4dc892fb129a6c5538613b38a5cd34e40aab9e6aea72b03
 FROM ${VLLM_BASE_IMAGE}
 
 WORKDIR /app
@@ -26,5 +26,6 @@ ENV AUTOPILOT_STATE_PATH=/var/lib/autonomousc/scratch/autopilot-state.json
 
 VOLUME ["/root/.cache/huggingface", "/var/lib/autonomousc/credentials", "/var/lib/autonomousc/scratch"]
 EXPOSE 8000
+EXPOSE 8011
 
 ENTRYPOINT ["node-agent-single-container"]

@@ -126,6 +126,9 @@ RUNTIME_TUPLE_ENV_KEYS = (
     "RUNTIME_IMAGE",
     "INFERENCE_BASE_URL",
     "VLLM_BASE_URL",
+    "VLLM_STARTUP_TIMEOUT_SECONDS",
+    "VLLM_EXTRA_ARGS",
+    "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS",
     "MAX_CONTEXT_TOKENS",
     "MAX_BATCH_TOKENS",
     "MAX_CONCURRENT_ASSIGNMENTS",
@@ -1999,7 +2002,8 @@ class NodeRuntimeService:
         memory_gb = coerce_float(gpu.get("memory_gb"))
         if memory_gb is None:
             memory_gb = coerce_float(config.get("gpu_memory_gb"))
-        preset = nvidia_support_preset(memory_gb)
+        gpu_name = str(gpu.get("name") or config.get("gpu_name") or "this NVIDIA GPU").strip()
+        preset = nvidia_support_preset(memory_gb, gpu_name)
         if preset is None:
             return None
 
@@ -2011,14 +2015,12 @@ class NodeRuntimeService:
         if not current_model or current_model in set(preset.supported_models):
             return None
 
-        desired_profile = recommended_setup_profile(memory_gb)
-        desired_concurrency = profile_concurrency(desired_profile, memory_gb)
-        desired_supported_models = recommended_supported_models(memory_gb)
+        desired_profile = recommended_setup_profile(memory_gb, gpu_name)
+        desired_concurrency = profile_concurrency(desired_profile, memory_gb, gpu_name)
+        desired_supported_models = recommended_supported_models(memory_gb, gpu_name)
         desired_thermal_headroom = str(
             profile_thermal_headroom(desired_profile, NodeAgentSettings().thermal_headroom)
         )
-
-        gpu_name = str(gpu.get("name") or config.get("gpu_name") or "this NVIDIA GPU").strip()
         return {
             "issue_code": "startup_model_too_large",
             "issue_detail": (
@@ -2031,6 +2033,21 @@ class NodeRuntimeService:
             "target_profile": desired_profile,
             "target_concurrency": desired_concurrency,
             "target_thermal_headroom": desired_thermal_headroom,
+            "target_max_context_tokens": (
+                str(preset.max_context_tokens)
+                if preset.max_context_tokens is not None
+                else str(NodeAgentSettings().max_context_tokens)
+            ),
+            "target_vllm_startup_timeout_seconds": (
+                str(preset.vllm_startup_timeout_seconds)
+                if preset.vllm_startup_timeout_seconds is not None
+                else str(NodeAgentSettings().vllm_startup_timeout_seconds)
+            ),
+            "target_vllm_extra_args": preset.vllm_extra_args or NodeAgentSettings().vllm_extra_args,
+            "target_vllm_memory_profiler_estimate_cudagraphs": preset.runtime_env_defaults().get(
+                "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS",
+                "false",
+            ),
             "target_preset_label": preset.label,
             "target_capacity_label": preset.capacity_label,
         }
@@ -5505,14 +5522,27 @@ class NodeRuntimeService:
         target_profile = str(plan.get("target_profile") or "").strip()
         target_concurrency = str(plan.get("target_concurrency") or "").strip()
         target_thermal_headroom = str(plan.get("target_thermal_headroom") or "").strip()
+        target_max_context_tokens = str(plan.get("target_max_context_tokens") or "").strip()
+        target_vllm_startup_timeout_seconds = str(plan.get("target_vllm_startup_timeout_seconds") or "").strip()
+        target_vllm_extra_args = str(plan.get("target_vllm_extra_args") or "").strip()
+        target_vllm_memory_profiler_estimate_cudagraphs = str(
+            plan.get("target_vllm_memory_profiler_estimate_cudagraphs") or ""
+        ).strip()
 
         changed = False
         for key, value in (
             ("VLLM_MODEL", target_model),
             ("SUPPORTED_MODELS", target_supported_models),
             ("SETUP_PROFILE", target_profile),
+            ("MAX_CONTEXT_TOKENS", target_max_context_tokens),
             ("MAX_CONCURRENT_ASSIGNMENTS", target_concurrency),
             ("THERMAL_HEADROOM", target_thermal_headroom),
+            ("VLLM_STARTUP_TIMEOUT_SECONDS", target_vllm_startup_timeout_seconds),
+            ("VLLM_EXTRA_ARGS", target_vllm_extra_args),
+            (
+                "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS",
+                target_vllm_memory_profiler_estimate_cudagraphs,
+            ),
         ):
             if value and next_env.get(key) != value:
                 next_env[key] = value

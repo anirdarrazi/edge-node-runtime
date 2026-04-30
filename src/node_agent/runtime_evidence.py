@@ -45,6 +45,13 @@ def _startup_args(settings: object) -> dict[str, Any]:
         "max_batch_tokens": getattr(settings, "max_batch_tokens", None),
         "max_concurrent_assignments": getattr(settings, "max_concurrent_assignments", None),
         "inference_base_url": getattr(settings, "resolved_inference_base_url", None),
+        "vllm_startup_timeout_seconds": getattr(settings, "vllm_startup_timeout_seconds", None),
+        "vllm_extra_args": getattr(settings, "vllm_extra_args", None),
+        "vllm_memory_profiler_estimate_cudagraphs": getattr(
+            settings,
+            "vllm_memory_profiler_estimate_cudagraphs",
+            None,
+        ),
     }
     if getattr(settings, "resolved_inference_engine", None) == LLAMA_CPP_INFERENCE_ENGINE:
         return {

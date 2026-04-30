@@ -10,6 +10,7 @@ from .runtime_backend import MANAGER_RUNTIME_BACKEND, SINGLE_CONTAINER_RUNTIME_B
 AUTO_RUNTIME_PROFILE = "auto"
 HOME_LLAMA_CPP_GGUF_PROFILE = "home_llama_cpp_gguf"
 VAST_VLLM_SAFETENSORS_PROFILE = "vast_vllm_safetensors"
+RTX_5060_TI_16GB_GEMMA4_E4B_PROFILE = "rtx_5060_ti_16gb_gemma4_e4b"
 PARTNER_VLLM_TRUSTED_PROFILE = "partner_vllm_trusted"
 HOME_EMBEDDINGS_LLAMA_CPP_PROFILE = "home_embeddings_llama_cpp"
 
@@ -71,6 +72,7 @@ SUPPORTED_API_EMBEDDINGS = "embeddings"
 EMBEDDING_POOLING_CLS = "cls"
 DEFAULT_RESPONSE_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-large-en-v1.5"
+DEFAULT_GEMMA_4_E4B_MODEL = "google/gemma-4-E4B-it"
 DEFAULT_PUBLIC_SMOKE_TEST_MODEL = DEFAULT_EMBEDDING_MODEL
 DEFAULT_PUBLIC_SMOKE_TEST_API_PATH = "/v1/embeddings"
 DEFAULT_LLAMA_CPP_IMAGE = "ghcr.io/ggml-org/llama.cpp:server-cuda"
@@ -281,12 +283,42 @@ RUNTIME_PROFILES: dict[str, RuntimeProfile] = {
         burst_lifecycle=VAST_BURST_LIFECYCLE,
         burst_cost_ceiling_usd=DEFAULT_VAST_BURST_COST_CEILING_USD,
         default_model=DEFAULT_RESPONSE_MODEL,
-        supported_models=(DEFAULT_RESPONSE_MODEL, DEFAULT_EMBEDDING_MODEL),
+        supported_models=(DEFAULT_RESPONSE_MODEL, DEFAULT_GEMMA_4_E4B_MODEL, DEFAULT_EMBEDDING_MODEL),
         vast_launch=VastLaunchProfile(
             runtype="args",
             min_disk_gb=80,
             preferred_smoke_test_model=DEFAULT_EMBEDDING_MODEL,
             smoke_test_api_path="/v1/embeddings",
+            safe_price_ceiling_usd=DEFAULT_VAST_BURST_COST_CEILING_USD,
+        ),
+    ),
+    RTX_5060_TI_16GB_GEMMA4_E4B_PROFILE: RuntimeProfile(
+        id=RTX_5060_TI_16GB_GEMMA4_E4B_PROFILE,
+        label="RTX 5060 Ti 16GB Gemma 4 E4B",
+        inference_engine=VLLM_INFERENCE_ENGINE,
+        deployment_target=VAST_AI_DEPLOYMENT_TARGET,
+        model_format=MODEL_FORMAT_SAFETENSORS,
+        image=DEFAULT_VLLM_IMAGE,
+        readiness_path="/v1/models",
+        supported_apis=(SUPPORTED_API_RESPONSES,),
+        trust_policy=TRUST_POLICY_ELASTIC_UNTRUSTED,
+        pricing_tier=PRICING_TIER_ELASTIC_MARKET,
+        artifact_manifest_type=ARTIFACT_MANIFEST_AUDITED_SAFETENSORS,
+        capacity_class=CAPACITY_CLASS_ELASTIC_BURST,
+        routing_lane=ROUTING_LANE_ELASTIC_EXACT_VAST,
+        max_privacy_tier="restricted",
+        exact_model_guarantee=True,
+        quantized_output_disclosure_required=False,
+        trusted_eligibility=TRUSTED_ELIGIBILITY_RUNTIME_AND_MODEL_DIGEST_MATCH,
+        burst_lifecycle=VAST_BURST_LIFECYCLE,
+        burst_cost_ceiling_usd=DEFAULT_VAST_BURST_COST_CEILING_USD,
+        default_model=DEFAULT_GEMMA_4_E4B_MODEL,
+        supported_models=(DEFAULT_GEMMA_4_E4B_MODEL,),
+        vast_launch=VastLaunchProfile(
+            runtype="args",
+            min_disk_gb=80,
+            preferred_smoke_test_model=DEFAULT_GEMMA_4_E4B_MODEL,
+            smoke_test_api_path="/v1/responses",
             safe_price_ceiling_usd=DEFAULT_VAST_BURST_COST_CEILING_USD,
         ),
     ),
@@ -311,7 +343,7 @@ RUNTIME_PROFILES: dict[str, RuntimeProfile] = {
         burst_lifecycle=(),
         burst_cost_ceiling_usd=None,
         default_model=DEFAULT_RESPONSE_MODEL,
-        supported_models=(DEFAULT_RESPONSE_MODEL, DEFAULT_EMBEDDING_MODEL),
+        supported_models=(DEFAULT_RESPONSE_MODEL, DEFAULT_GEMMA_4_E4B_MODEL, DEFAULT_EMBEDDING_MODEL),
     ),
     HOME_EMBEDDINGS_LLAMA_CPP_PROFILE: RuntimeProfile(
         id=HOME_EMBEDDINGS_LLAMA_CPP_PROFILE,
@@ -449,6 +481,8 @@ def _profile_id_for_legacy_runtime(engine: str, target: str, model: str | None) 
             return HOME_EMBEDDINGS_LLAMA_CPP_PROFILE
         return HOME_LLAMA_CPP_GGUF_PROFILE
     if target == VAST_AI_DEPLOYMENT_TARGET:
+        if model == DEFAULT_GEMMA_4_E4B_MODEL:
+            return RTX_5060_TI_16GB_GEMMA4_E4B_PROFILE
         return VAST_VLLM_SAFETENSORS_PROFILE
     return PARTNER_VLLM_TRUSTED_PROFILE
 
@@ -644,6 +678,7 @@ __all__ = [
     "CAPACITY_CLASS_TRUSTED_PARTNER",
     "DEFAULT_VAST_BURST_COST_CEILING_USD",
     "DEFAULT_EMBEDDING_MODEL",
+    "DEFAULT_GEMMA_4_E4B_MODEL",
     "DEFAULT_LLAMA_CPP_IMAGE",
     "DEFAULT_PUBLIC_SMOKE_TEST_API_PATH",
     "DEFAULT_PUBLIC_SMOKE_TEST_MODEL",
@@ -666,6 +701,7 @@ __all__ = [
     "ROUTING_LANE_ELASTIC_EXACT_VAST",
     "ROUTING_LANE_TRUSTED_EXACT_PARTNER",
     "ROUTING_LANE_POLICIES",
+    "RTX_5060_TI_16GB_GEMMA4_E4B_PROFILE",
     "RUNTIME_PROFILES",
     "RoutingLanePolicy",
     "RuntimeProfile",

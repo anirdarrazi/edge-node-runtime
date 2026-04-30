@@ -70,6 +70,29 @@ Windows PowerShell:
 
 The regular runtime images now preseed the public bootstrap-model cache into the image layer by default so a fresh Vast boot can reuse local model files instead of redownloading them after startup. Override or disable that during build with `PRELOAD_HF_MODELS`, for example `PRELOAD_HF_MODELS=BAAI/bge-large-en-v1.5 bash build-single-image.sh` or `PRELOAD_HF_MODELS= bash build-manager-image.sh`.
 
+### Vast.ai RTX 5060 Ti Gemma profile
+
+The provider profile for the market-data fallback node is `rtx_5060_ti_16gb_gemma4_e4b`. It is a Vast.ai `vllm` profile for one RTX 5060 Ti 16GB node serving `google/gemma-4-E4B-it` through the `/v1/responses` API.
+
+Advanced-mode environment values:
+
+```env
+RUNTIME_PROFILE=rtx_5060_ti_16gb_gemma4_e4b
+DEPLOYMENT_TARGET=vast_ai
+INFERENCE_ENGINE=vllm
+RUNTIME_IMAGE=anirdarrazi/autonomousc-ai-edge-runtime:single-cuda-latest
+CAPACITY_CLASS=elastic_burst
+TEMPORARY_NODE=true
+BURST_PROVIDER=vast_ai
+GPU_NAME=RTX 5060 Ti
+GPU_MEMORY_GB=16
+MAX_CONCURRENT_ASSIGNMENTS=1
+VLLM_MODEL=google/gemma-4-E4B-it
+SUPPORTED_MODELS=google/gemma-4-E4B-it
+```
+
+The control plane catalogs this profile as exact-model, audited-safetensors, `restricted`-eligible, and `elastic_exact_vast`. The Vast smoke defaults use 16 GB minimum/preferred VRAM and 32k context for Gemma E4B.
+
 Build and push the public `latest` image:
 
 ```bash

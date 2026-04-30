@@ -37,7 +37,9 @@ from .fault_injection import DEFAULT_FAULT_INJECTION_STATE_NAME, FaultInjectionC
 from .gguf_artifacts import find_gguf_artifact
 from .inference_engine import (
     AUTO_RUNTIME_PROFILE,
+    DEFAULT_GEMMA_4_E4B_MODEL,
     LLAMA_CPP_INFERENCE_ENGINE,
+    VAST_VLLM_SAFETENSORS_PROFILE,
     default_runtime_profile,
     deployment_target_label,
     inference_engine_label,
@@ -116,6 +118,9 @@ ENV_ORDER = [
     "BURST_LEASE_PHASE",
     "BURST_COST_CEILING_USD",
     "VLLM_BASE_URL",
+    "VLLM_STARTUP_TIMEOUT_SECONDS",
+    "VLLM_EXTRA_ARGS",
+    "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS",
     "GPU_NAME",
     "GPU_MEMORY_GB",
     "MAX_CONTEXT_TOKENS",
@@ -183,6 +188,14 @@ MODEL_CACHE_MIN_BUDGET_GB = 24.0
 MODEL_CACHE_MAX_BUDGET_GB = 768.0
 DEFAULT_VLLM_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-large-en-v1.5"
+RTX_5060_TI_16GB_VLLM_EXTRA_ARGS = (
+    "--quantization fp8 "
+    "--kv-cache-dtype fp8 "
+    "--gpu-memory-utilization 0.913 "
+    "--max-num-seqs 12 "
+    "--generation-config vllm "
+    "--skip-mm-profiling"
+)
 RUNTIME_SETTINGS_VERSION = 1
 INSTALLER_STATE_VERSION = 1
 INSTALLER_FLOW = [
@@ -275,13 +288,25 @@ class NvidiaSupportPreset:
     summary: str
     community_detail: str
     premium_detail: str
+    gpu_name_substrings: tuple[str, ...] = ()
+    max_context_tokens: int | None = None
+    vllm_startup_timeout_seconds: int | None = None
+    vllm_extra_args: str = ""
+    runtime_env: tuple[tuple[str, str], ...] = ()
 
-    def matches(self, memory_gb: float) -> bool:
+    def matches(self, memory_gb: float, gpu_name: str | None = None) -> bool:
         if memory_gb < self.min_vram_gb:
             return False
-        if self.max_vram_gb is None:
-            return True
-        return memory_gb <= self.max_vram_gb
+        if self.max_vram_gb is not None and memory_gb > self.max_vram_gb:
+            return False
+        if self.gpu_name_substrings:
+            normalized_gpu_name = normalize_gpu_name(gpu_name)
+            if not normalized_gpu_name:
+                return False
+            for token in self.gpu_name_substrings:
+                if token not in normalized_gpu_name:
+                    return False
+        return True
 
     def concurrency_for_profile(self, profile: str) -> str:
         if profile == "quiet":
@@ -292,6 +317,23 @@ class NvidiaSupportPreset:
 
     def supported_models_csv(self) -> str:
         return ",".join(self.supported_models)
+
+    def runtime_env_defaults(self) -> dict[str, str]:
+        values: dict[str, str] = {}
+        if self.max_context_tokens is not None:
+            values["MAX_CONTEXT_TOKENS"] = str(self.max_context_tokens)
+        if self.vllm_startup_timeout_seconds is not None:
+            values["VLLM_STARTUP_TIMEOUT_SECONDS"] = str(self.vllm_startup_timeout_seconds)
+        if self.vllm_extra_args.strip():
+            values["VLLM_EXTRA_ARGS"] = self.vllm_extra_args.strip()
+        for key, value in self.runtime_env:
+            if key and str(value).strip():
+                values[key] = str(value).strip()
+        return values
+
+
+def normalize_gpu_name(value: str | None) -> str:
+    return " ".join(str(value or "").strip().lower().split())
 
 
 NVIDIA_SUPPORT_PRESETS = (
@@ -316,6 +358,33 @@ NVIDIA_SUPPORT_PRESETS = (
         premium_detail=(
             "This NVIDIA class stays on the smallest embeddings/community preset today. Premium jobs stay unavailable on this machine."
         ),
+    ),
+    NvidiaSupportPreset(
+        key="rtx_5060_ti_16gb_gemma4_e4b",
+        label="RTX 5060 Ti 16 GB",
+        min_vram_gb=15.0,
+        max_vram_gb=17.9,
+        capacity_label="Gemma 4 E4B FP8 32k",
+        startup_model=DEFAULT_GEMMA_4_E4B_MODEL,
+        supported_models=(DEFAULT_GEMMA_4_E4B_MODEL,),
+        recommended_profile="performance",
+        quiet_concurrency="12",
+        balanced_concurrency="24",
+        performance_concurrency="40",
+        summary=(
+            "RTX 5060 Ti 16 GB uses the tuned Gemma 4 E4B FP8 32k preset with graph-memory profiling enabled."
+        ),
+        community_detail=(
+            "Community capacity stays enabled on the Gemma 4 E4B FP8 32k preset today. Premium routing stays unavailable until larger or approved hardware is selected."
+        ),
+        premium_detail=(
+            "This RTX 5060 Ti preset is tuned for community Gemma 4 E4B FP8 32k serving today. Premium routing stays unavailable on this machine."
+        ),
+        gpu_name_substrings=("5060", "ti"),
+        max_context_tokens=32768,
+        vllm_startup_timeout_seconds=900,
+        vllm_extra_args=RTX_5060_TI_16GB_VLLM_EXTRA_ARGS,
+        runtime_env=(("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", "1"),),
     ),
     NvidiaSupportPreset(
         key="community_embeddings",
@@ -735,27 +804,27 @@ def infer_node_region() -> tuple[str, str]:
     return "eu-se-1", "Recommended from the local timezone."
 
 
-def nvidia_support_preset(memory_gb: float | None) -> NvidiaSupportPreset | None:
+def nvidia_support_preset(memory_gb: float | None, gpu_name: str | None = None) -> NvidiaSupportPreset | None:
     if memory_gb is None:
         return None
     for preset in NVIDIA_SUPPORT_PRESETS:
-        if preset.matches(memory_gb):
+        if preset.matches(memory_gb, gpu_name):
             return preset
     return NVIDIA_SUPPORT_PRESETS[0]
 
 
-def recommended_startup_model(memory_gb: float | None) -> str:
-    preset = nvidia_support_preset(memory_gb)
+def recommended_startup_model(memory_gb: float | None, gpu_name: str | None = None) -> str:
+    preset = nvidia_support_preset(memory_gb, gpu_name)
     if preset is not None:
         return preset.startup_model
     return DEFAULT_VLLM_MODEL
 
 
-def recommended_supported_models(memory_gb: float | None) -> str:
-    preset = nvidia_support_preset(memory_gb)
+def recommended_supported_models(memory_gb: float | None, gpu_name: str | None = None) -> str:
+    preset = nvidia_support_preset(memory_gb, gpu_name)
     if preset is not None:
         return preset.supported_models_csv()
-    if recommended_startup_model(memory_gb) == DEFAULT_EMBEDDING_MODEL:
+    if recommended_startup_model(memory_gb, gpu_name) == DEFAULT_EMBEDDING_MODEL:
         return DEFAULT_EMBEDDING_MODEL
     return f"{DEFAULT_VLLM_MODEL},{DEFAULT_EMBEDDING_MODEL}"
 
@@ -950,8 +1019,12 @@ def recommended_restricted_capable(attestation_provider: str) -> bool:
     return attestation_provider == "hardware"
 
 
-def premium_eligibility(memory_gb: float | None, attestation_provider: str) -> dict[str, str | bool]:
-    preset = nvidia_support_preset(memory_gb)
+def premium_eligibility(
+    memory_gb: float | None,
+    attestation_provider: str,
+    gpu_name: str | None = None,
+) -> dict[str, str | bool]:
+    preset = nvidia_support_preset(memory_gb, gpu_name)
     if preset is not None:
         if attestation_provider != "hardware":
             return {
@@ -983,7 +1056,7 @@ def premium_eligibility(memory_gb: float | None, attestation_provider: str) -> d
                 "This machine is ready for community capacity now. Premium capacity is unavailable on this machine right now."
             ),
         }
-    if memory_gb is None or recommended_startup_model(memory_gb) != DEFAULT_VLLM_MODEL:
+    if memory_gb is None or recommended_startup_model(memory_gb, gpu_name) != DEFAULT_VLLM_MODEL:
         return {
             "premium_eligible": False,
             "premium_eligibility_status": "premium_unavailable",
@@ -1033,12 +1106,12 @@ def optional_env_value(value: Any) -> str:
     return "" if value is None else str(value)
 
 
-def suggest_concurrency(memory_gb: float | None) -> str:
-    return profile_concurrency(recommended_setup_profile(memory_gb), memory_gb)
+def suggest_concurrency(memory_gb: float | None, gpu_name: str | None = None) -> str:
+    return profile_concurrency(recommended_setup_profile(memory_gb, gpu_name), memory_gb, gpu_name)
 
 
-def recommended_setup_profile(memory_gb: float | None) -> str:
-    preset = nvidia_support_preset(memory_gb)
+def recommended_setup_profile(memory_gb: float | None, gpu_name: str | None = None) -> str:
+    preset = nvidia_support_preset(memory_gb, gpu_name)
     if preset is not None:
         return preset.recommended_profile
     if memory_gb is None or memory_gb < 16:
@@ -1048,14 +1121,17 @@ def recommended_setup_profile(memory_gb: float | None) -> str:
     return "balanced"
 
 
-def normalize_setup_profile(profile: str | None, memory_gb: float | None) -> str:
+def normalize_setup_profile(profile: str | None, memory_gb: float | None, gpu_name: str | None = None) -> str:
     normalized = (profile or "").strip().lower()
     if normalized in PROFILE_LABELS:
         return normalized
-    return recommended_setup_profile(memory_gb)
+    return recommended_setup_profile(memory_gb, gpu_name)
 
 
-def profile_concurrency(profile: str, memory_gb: float | None) -> str:
+def profile_concurrency(profile: str, memory_gb: float | None, gpu_name: str | None = None) -> str:
+    preset = nvidia_support_preset(memory_gb, gpu_name)
+    if preset is not None:
+        return preset.concurrency_for_profile(profile)
     if profile == "quiet":
         if memory_gb is not None and memory_gb >= 48:
             return "2"
@@ -2396,6 +2472,7 @@ class GuidedInstaller:
             "VLLM_PORT",
             "VLLM_STARTUP_TIMEOUT_SECONDS",
             "VLLM_EXTRA_ARGS",
+            "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS",
             "GPU_NAME",
             "GPU_MEMORY_GB",
             "MAX_CONTEXT_TOKENS",
@@ -2530,6 +2607,19 @@ class GuidedInstaller:
                 str(config.get("inference_base_url", "")),
                 defaults.resolved_inference_base_url,
             ),
+            "VLLM_STARTUP_TIMEOUT_SECONDS": str(
+                _safe_int(config.get("vllm_startup_timeout_seconds"), defaults.vllm_startup_timeout_seconds)
+            ),
+            "VLLM_EXTRA_ARGS": first_nonempty(str(config.get("vllm_extra_args", "")), defaults.vllm_extra_args),
+            "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS": stringify_bool(
+                coerce_bool(
+                    config.get(
+                        "vllm_memory_profiler_estimate_cudagraphs",
+                        defaults.vllm_memory_profiler_estimate_cudagraphs,
+                    ),
+                    defaults.vllm_memory_profiler_estimate_cudagraphs,
+                )
+            ),
             "GPU_NAME": first_nonempty(str(config.get("gpu_name", "")), defaults.gpu_name),
             "GPU_MEMORY_GB": str(_safe_float(config.get("gpu_memory_gb"), defaults.gpu_memory_gb)),
             "MAX_CONTEXT_TOKENS": str(_safe_int(config.get("max_context_tokens"), defaults.max_context_tokens)),
@@ -2614,11 +2704,14 @@ class GuidedInstaller:
         runtime_backend = normalize_runtime_backend(
             first_nonempty(env_values.get(RUNTIME_BACKEND_ENV), self.current_runtime_backend())
         )
+        gpu_memory_gb = _safe_float(env_values.get("GPU_MEMORY_GB"), defaults.gpu_memory_gb)
+        gpu_name = env_values.get("GPU_NAME", defaults.gpu_name)
         return {
             "version": RUNTIME_SETTINGS_VERSION,
             "config": {
                 "runtime_backend": runtime_backend,
-                "setup_profile": env_values.get("SETUP_PROFILE") or recommended_setup_profile(defaults.gpu_memory_gb),
+                "setup_profile": env_values.get("SETUP_PROFILE")
+                or recommended_setup_profile(gpu_memory_gb, gpu_name),
                 "edge_control_url": env_values.get("EDGE_CONTROL_URL", defaults.edge_control_url),
                 "edge_control_fallback_urls": env_values.get("EDGE_CONTROL_FALLBACK_URLS", ""),
                 "operator_token": env_values.get("OPERATOR_TOKEN", ""),
@@ -2660,8 +2753,17 @@ class GuidedInstaller:
                     "VLLM_BASE_URL",
                     env_values.get("INFERENCE_BASE_URL", defaults.resolved_inference_base_url),
                 ),
+                "vllm_startup_timeout_seconds": _safe_int(
+                    env_values.get("VLLM_STARTUP_TIMEOUT_SECONDS"),
+                    defaults.vllm_startup_timeout_seconds,
+                ),
+                "vllm_extra_args": env_values.get("VLLM_EXTRA_ARGS", defaults.vllm_extra_args),
+                "vllm_memory_profiler_estimate_cudagraphs": coerce_bool(
+                    env_values.get("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS"),
+                    defaults.vllm_memory_profiler_estimate_cudagraphs,
+                ),
                 "gpu_name": env_values.get("GPU_NAME", defaults.gpu_name),
-                "gpu_memory_gb": _safe_float(env_values.get("GPU_MEMORY_GB"), defaults.gpu_memory_gb),
+                "gpu_memory_gb": gpu_memory_gb,
                 "max_context_tokens": _safe_int(env_values.get("MAX_CONTEXT_TOKENS"), defaults.max_context_tokens),
                 "max_batch_tokens": _safe_int(env_values.get("MAX_BATCH_TOKENS"), defaults.max_batch_tokens),
                 "max_concurrent_assignments": _safe_int(
@@ -2799,9 +2901,9 @@ class GuidedInstaller:
         gpu_name = resolve_gpu_name(None, gpu.get("name"), configured_gpu_name)
         gpu_memory_gb = resolve_gpu_memory(None, gpu.get("memory_gb"), configured_gpu_memory)
         numeric_gpu_memory = _safe_float(gpu_memory_gb, default_settings.gpu_memory_gb)
-        support_preset = nvidia_support_preset(numeric_gpu_memory)
-        inferred_startup_model = recommended_startup_model(numeric_gpu_memory)
-        inferred_supported_models = recommended_supported_models(numeric_gpu_memory)
+        support_preset = nvidia_support_preset(numeric_gpu_memory, gpu_name)
+        inferred_startup_model = recommended_startup_model(numeric_gpu_memory, gpu_name)
+        inferred_supported_models = recommended_supported_models(numeric_gpu_memory, gpu_name)
         inferred_trust_tier = recommended_trust_tier(attestation_provider)
         inferred_restricted_capable = recommended_restricted_capable(attestation_provider)
         runtime_backend = self.current_runtime_backend()
@@ -2920,11 +3022,12 @@ class GuidedInstaller:
         profile = normalize_setup_profile(
             persisted.get("SETUP_PROFILE") or source.get("SETUP_PROFILE"),
             numeric_gpu_memory,
+            gpu_name,
         )
-        recommended_profile = recommended_setup_profile(numeric_gpu_memory)
+        recommended_profile = recommended_setup_profile(numeric_gpu_memory, gpu_name)
         concurrency = first_nonempty(
             persisted.get("MAX_CONCURRENT_ASSIGNMENTS"),
-            profile_concurrency(profile, numeric_gpu_memory),
+            profile_concurrency(profile, numeric_gpu_memory, gpu_name),
         )
         target_gpu_utilization_pct = first_nonempty(
             persisted.get("TARGET_GPU_UTILIZATION_PCT"),
@@ -2958,7 +3061,7 @@ class GuidedInstaller:
                 persisted.get("MODEL_CACHE_RESERVE_FREE_GB"),
             ),
         )
-        premium = premium_eligibility(numeric_gpu_memory, attestation_provider)
+        premium = premium_eligibility(numeric_gpu_memory, attestation_provider, gpu_name)
 
         return {
             "edge_control_url": first_nonempty(source.get("EDGE_CONTROL_URL"), default_settings.edge_control_url),
@@ -3032,12 +3135,35 @@ class GuidedInstaller:
                 persisted.get("INFERENCE_BASE_URL"),
                 default_settings.resolved_inference_base_url,
             ),
+            "vllm_startup_timeout_seconds": _safe_int(
+                first_nonempty(
+                    source.get("VLLM_STARTUP_TIMEOUT_SECONDS"),
+                    persisted.get("VLLM_STARTUP_TIMEOUT_SECONDS"),
+                ),
+                default_settings.vllm_startup_timeout_seconds,
+            ),
+            "vllm_extra_args": first_nonempty(
+                source.get("VLLM_EXTRA_ARGS"),
+                persisted.get("VLLM_EXTRA_ARGS"),
+                default_settings.vllm_extra_args,
+            ),
+            "vllm_memory_profiler_estimate_cudagraphs": coerce_bool(
+                first_nonempty(
+                    source.get("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS"),
+                    persisted.get("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS"),
+                ),
+                default_settings.vllm_memory_profiler_estimate_cudagraphs,
+            ),
             "vllm_model": current_startup_model,
             "supported_models": current_supported_models,
             "owner_target_model": owner_target_model,
             "owner_target_supported_models": owner_target_supported_models,
             "bootstrap_pending_upgrade": bootstrap_pending_upgrade,
             "startup_model_fallback": startup_model_fallback,
+            "max_context_tokens": _safe_int(
+                first_nonempty(source.get("MAX_CONTEXT_TOKENS"), persisted.get("MAX_CONTEXT_TOKENS")),
+                default_settings.max_context_tokens,
+            ),
             "max_concurrent_assignments": first_nonempty(
                 source.get("MAX_CONCURRENT_ASSIGNMENTS"),
                 concurrency,
@@ -3169,7 +3295,32 @@ class GuidedInstaller:
             "region_reason": region_reason,
             "recommended_model": inferred_startup_model,
             "recommended_supported_models": inferred_supported_models,
-            "recommended_max_concurrent_assignments": profile_concurrency(recommended_profile, numeric_gpu_memory),
+            "recommended_max_context_tokens": (
+                support_preset.max_context_tokens
+                if support_preset is not None and support_preset.max_context_tokens is not None
+                else default_settings.max_context_tokens
+            ),
+            "recommended_vllm_startup_timeout_seconds": (
+                support_preset.vllm_startup_timeout_seconds
+                if support_preset is not None and support_preset.vllm_startup_timeout_seconds is not None
+                else default_settings.vllm_startup_timeout_seconds
+            ),
+            "recommended_vllm_extra_args": (
+                support_preset.vllm_extra_args
+                if support_preset is not None
+                else default_settings.vllm_extra_args
+            ),
+            "recommended_vllm_memory_profiler_estimate_cudagraphs": (
+                support_preset.runtime_env_defaults().get("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", "").lower()
+                == "true"
+                if support_preset is not None
+                else default_settings.vllm_memory_profiler_estimate_cudagraphs
+            ),
+            "recommended_max_concurrent_assignments": profile_concurrency(
+                recommended_profile,
+                numeric_gpu_memory,
+                gpu_name,
+            ),
             "recommended_target_gpu_utilization_pct": default_settings.target_gpu_utilization_pct,
             "recommended_min_gpu_memory_headroom_pct": default_settings.min_gpu_memory_headroom_pct,
             "recommended_thermal_headroom": profile_thermal_headroom(
@@ -5442,17 +5593,11 @@ class GuidedInstaller:
             self.command_runner,
             self.runtime_dir,
         )
-        profile = normalize_setup_profile(
-            str(config.get("setup_profile", "") or (persisted.get("SETUP_PROFILE", "") if operator_mode else "")),
-            detected_gpu.get("memory_gb"),
-        )
-        advanced_defaults_only = quickstart_mode and not operator_mode
-        use_profile_defaults = quickstart_mode or bool(
-            str(config.get("setup_profile", "")).strip()
-        )
-
         config_gpu_name = str(config.get("gpu_name", "")).strip() or None
         config_gpu_memory = str(config.get("gpu_memory_gb", "")).strip() or None
+        requested_setup_profile = str(
+            config.get("setup_profile", "") or (persisted.get("SETUP_PROFILE", "") if operator_mode else "")
+        )
         configured_gpu_name = first_nonempty(current.get("GPU_NAME"), defaults.gpu_name)
         configured_gpu_memory = _safe_float(
             first_nonempty(persisted.get("GPU_MEMORY_GB"), current.get("GPU_MEMORY_GB")),
@@ -5465,10 +5610,33 @@ class GuidedInstaller:
             configured_gpu_memory,
         )
         numeric_gpu_memory = _safe_float(gpu_memory, defaults.gpu_memory_gb)
-
-        default_concurrency = profile_concurrency(profile, numeric_gpu_memory)
+        profile = normalize_setup_profile(requested_setup_profile, numeric_gpu_memory, gpu_name)
+        advanced_defaults_only = quickstart_mode and not operator_mode
+        use_profile_defaults = quickstart_mode or bool(str(config.get("setup_profile", "")).strip())
+        support_preset = nvidia_support_preset(numeric_gpu_memory, gpu_name)
+        preset_runtime_env = support_preset.runtime_env_defaults() if support_preset is not None else {}
+        default_concurrency = profile_concurrency(profile, numeric_gpu_memory, gpu_name)
         default_batch_tokens = profile_batch_tokens(profile, defaults.max_batch_tokens)
         default_thermal_headroom = profile_thermal_headroom(profile, defaults.thermal_headroom)
+        default_max_context_tokens = str(
+            support_preset.max_context_tokens
+            if support_preset is not None and support_preset.max_context_tokens is not None
+            else defaults.max_context_tokens
+        )
+        default_vllm_startup_timeout_seconds = str(
+            support_preset.vllm_startup_timeout_seconds
+            if support_preset is not None and support_preset.vllm_startup_timeout_seconds is not None
+            else defaults.vllm_startup_timeout_seconds
+        )
+        default_vllm_extra_args = (
+            support_preset.vllm_extra_args
+            if support_preset is not None and support_preset.vllm_extra_args
+            else defaults.vllm_extra_args
+        )
+        default_vllm_memory_profiler_estimate_cudagraphs = preset_runtime_env.get(
+            "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS",
+            stringify_bool(defaults.vllm_memory_profiler_estimate_cudagraphs),
+        )
         configured_deployment_target = (
             first_nonempty(str(config.get("deployment_target", "")), persisted.get("DEPLOYMENT_TARGET"))
             if operator_mode
@@ -5494,7 +5662,7 @@ class GuidedInstaller:
             configured_engine=configured_inference_engine,
             configured_deployment_target=configured_deployment_target,
             runtime_backend=selected_runtime_backend,
-            model=configured_startup_model or recommended_startup_model(numeric_gpu_memory),
+            model=configured_startup_model or recommended_startup_model(numeric_gpu_memory, gpu_name),
         )
         deployment_target = runtime_profile.deployment_target
         inference_engine = runtime_profile.inference_engine
@@ -5505,11 +5673,11 @@ class GuidedInstaller:
                 current.get("HF_TOKEN"),
             )
         )
-        base_startup_model = runtime_profile.default_model or recommended_startup_model(numeric_gpu_memory)
+        base_startup_model = runtime_profile.default_model or recommended_startup_model(numeric_gpu_memory, gpu_name)
         base_supported_models = (
             ",".join(runtime_profile.supported_models)
             if configured_runtime_profile
-            else recommended_supported_models(numeric_gpu_memory)
+            else recommended_supported_models(numeric_gpu_memory, gpu_name)
         )
         startup_plan = resolve_startup_model_plan(
             base_startup_model,
@@ -5725,7 +5893,44 @@ class GuidedInstaller:
             ),
             "GPU_NAME": gpu_name,
             "GPU_MEMORY_GB": gpu_memory,
-            "MAX_CONTEXT_TOKENS": current.get("MAX_CONTEXT_TOKENS", str(defaults.max_context_tokens)),
+            "MAX_CONTEXT_TOKENS": (
+                default_max_context_tokens
+                if advanced_defaults_only
+                else first_nonempty(
+                    str(config.get("max_context_tokens", "")),
+                    None if use_profile_defaults else persisted.get("MAX_CONTEXT_TOKENS"),
+                    default_max_context_tokens,
+                )
+            ),
+            "VLLM_STARTUP_TIMEOUT_SECONDS": (
+                default_vllm_startup_timeout_seconds
+                if advanced_defaults_only
+                else first_nonempty(
+                    str(config.get("vllm_startup_timeout_seconds", "")),
+                    None if use_profile_defaults else persisted.get("VLLM_STARTUP_TIMEOUT_SECONDS"),
+                    default_vllm_startup_timeout_seconds,
+                )
+            ),
+            "VLLM_EXTRA_ARGS": (
+                default_vllm_extra_args
+                if advanced_defaults_only
+                else first_nonempty(
+                    str(config.get("vllm_extra_args", "")),
+                    None if use_profile_defaults else persisted.get("VLLM_EXTRA_ARGS"),
+                    default_vllm_extra_args,
+                )
+            ),
+            "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS": (
+                default_vllm_memory_profiler_estimate_cudagraphs
+                if advanced_defaults_only
+                else first_nonempty(
+                    stringify_bool(coerce_bool(config.get("vllm_memory_profiler_estimate_cudagraphs")))
+                    if "vllm_memory_profiler_estimate_cudagraphs" in config
+                    else "",
+                    None if use_profile_defaults else persisted.get("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS"),
+                    default_vllm_memory_profiler_estimate_cudagraphs,
+                )
+            ),
             "MAX_BATCH_TOKENS": (
                 default_batch_tokens
                 if advanced_defaults_only
@@ -5970,7 +6175,7 @@ class GuidedInstaller:
 
         gpu_name = str(detected.get("name") or env_values.get("GPU_NAME") or "NVIDIA GPU")
         gpu_memory_gb = _safe_float(detected.get("memory_gb") or env_values.get("GPU_MEMORY_GB"), 0.0)
-        preset = nvidia_support_preset(gpu_memory_gb)
+        preset = nvidia_support_preset(gpu_memory_gb, gpu_name)
         preset_label = preset.label if preset is not None else "automatic NVIDIA defaults"
         preset_track = preset.capacity_label if preset is not None else "safe defaults"
         self.update_stage_progress(

@@ -916,6 +916,17 @@ def test_runtime_service_populates_owner_bundle_when_runtime_dir_is_overridden(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv(layout_module.RUNTIME_DIR_ENV, str(tmp_path))
+    monkeypatch.setattr(
+        service_module,
+        "inspect_package_signature",
+        lambda: {
+            "verified": True,
+            "kind": "appliance_package",
+            "detail": "Signed package verification is isolated in this test.",
+            "version": "2026.04.10.1",
+            "channel": "stable",
+        },
+    )
 
     service = service_module.NodeRuntimeService(command_runner=base_runner_factory([]))
 
@@ -1016,6 +1027,13 @@ def test_configure_heat_governor_persists_live_owner_target(tmp_path: Path, monk
     commands: list[list[str]] = []
 
     monkeypatch.setattr(installer_module.shutil, "which", lambda name: "docker" if name == "docker" else "nvidia-smi")
+    real_build_heat_governor_plan = service_module.build_heat_governor_plan
+
+    def build_heat_governor_plan_at_noon(*args, **kwargs):
+        kwargs.setdefault("now_local", datetime(2026, 4, 12, 12, 0, 0, tzinfo=timezone.utc))
+        return real_build_heat_governor_plan(*args, **kwargs)
+
+    monkeypatch.setattr(service_module, "build_heat_governor_plan", build_heat_governor_plan_at_noon)
 
     service = service_module.NodeRuntimeService(
         runtime_dir=tmp_path,
@@ -3047,7 +3065,7 @@ def test_repair_runtime_downgrades_oversized_model_for_small_nvidia(
 
     assert repaired_env["VLLM_MODEL"] == "BAAI/bge-large-en-v1.5"
     assert repaired_env["SUPPORTED_MODELS"] == "BAAI/bge-large-en-v1.5"
-    assert repaired_env["MAX_CONCURRENT_ASSIGNMENTS"] == "1"
+    assert repaired_env["MAX_CONCURRENT_ASSIGNMENTS"] == "4"
     assert service.self_heal_state.last_action == "downgrade_startup_model"
     assert payload["self_healing"]["headline"]
     assert any(

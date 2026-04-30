@@ -31,9 +31,44 @@ DEFAULT_STARTUP_STATUS_FILENAME = "startup-status.json"
 DEFAULT_STARTUP_STATUS_HOST = "0.0.0.0"
 DEFAULT_STARTUP_STATUS_PORT = 8011
 DEFAULT_STARTUP_STATUS_ENDPOINT_PATH = "/startup-status"
+DEFAULT_STARTUP_EMBEDDINGS_PATH = "/v1/embeddings"
+DEFAULT_STARTUP_RESPONSES_PATH = "/v1/responses"
+DEFAULT_STARTUP_CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
+DEFAULT_STARTUP_EMBEDDINGS_INPUT = ["startup readiness probe"]
+DEFAULT_STARTUP_RESPONSES_INPUT = "Reply with the single word ready."
 KNOWN_SAFE_MAX_MODEL_LEN: dict[str, int] = {
-    DEFAULT_PUBLIC_BOOTSTRAP_MODEL: 512,
+    DEFAULT_PUBLIC_BOOTSTRAP_MODEL.lower(): 512,
+    "google/gemma-4-e4b-it": 32768,
+    "google/gemma-4-26b-a4b-it": 8192,
+    "aeyeops/gemma-4-26b-a4b-it-fp8": 8192,
 }
+KNOWN_SAFE_STARTUP_TIMEOUT_SECONDS: dict[str, int] = {
+    "google/gemma-4-e4b-it": 900,
+    "google/gemma-4-26b-a4b-it": 900,
+    "google/gemma-4-31b-it": 2400,
+    "aeyeops/gemma-4-26b-a4b-it-fp8": 900,
+}
+VLLM_PROCESS_ENV_EXCLUDE = (
+    "VLLM_MODEL",
+    "VLLM_HOST",
+    "VLLM_PORT",
+    "VLLM_BASE_URL",
+    "INFERENCE_BASE_URL",
+    "VLLM_SERVER_COMMAND",
+    "VLLM_EXTRA_ARGS",
+    "NODE_AGENT_COMMAND",
+    "START_NODE_AGENT",
+    "START_VLLM",
+    "RUN_MODE",
+    "SUPPORTED_MODELS",
+    "OWNER_TARGET_MODEL",
+    "OWNER_TARGET_SUPPORTED_MODELS",
+)
+
+
+def trimmed_output(value: str | None) -> str | None:
+    text = str(value or "").strip()
+    return text or None
 
 
 def env_bool(name: str, default: bool) -> bool:
@@ -121,9 +156,22 @@ def nonnegative_int_from_mapping(env: Mapping[str, str], name: str, default: int
     return value if value >= 0 else default
 
 
+def normalized_model_lookup_key(model: str | None) -> str:
+    normalized = str(model or "").strip().lower()
+    if "gemma-4-26b-a4b-it" in normalized:
+        return "google/gemma-4-26b-a4b-it"
+    if "gemma-4-e4b-it" in normalized:
+        return "google/gemma-4-e4b-it"
+    return normalized
+
+
 def known_safe_max_model_len(model: str | None) -> int | None:
-    normalized = str(model or "").strip()
-    value = KNOWN_SAFE_MAX_MODEL_LEN.get(normalized)
+    value = KNOWN_SAFE_MAX_MODEL_LEN.get(normalized_model_lookup_key(model))
+    return value if isinstance(value, int) and value > 0 else None
+
+
+def known_safe_startup_timeout_seconds(model: str | None) -> int | None:
+    value = KNOWN_SAFE_STARTUP_TIMEOUT_SECONDS.get(normalized_model_lookup_key(model))
     return value if isinstance(value, int) and value > 0 else None
 
 
@@ -134,6 +182,54 @@ def normalized_max_context_tokens(model: str | None, configured_max_context_toke
     if safe_limit is None:
         return configured_max_context_tokens
     return min(configured_max_context_tokens, safe_limit)
+
+
+def sanitized_vllm_process_env(env_values: Mapping[str, str]) -> dict[str, str]:
+    merged = dict(os.environ)
+    merged.update(dict(env_values))
+    for key in VLLM_PROCESS_ENV_EXCLUDE:
+        merged.pop(key, None)
+    return merged
+
+
+def startup_failure_kind(message: str | None, recent_output: str | None = None) -> str | None:
+    haystack = f"{message or ''}\n{recent_output or ''}".lower()
+    if any(token in haystack for token in ("cuda out of memory", "not enough gpu memory", "outofmemoryerror", "out of memory")):
+        return "gpu_memory_oom"
+    if (
+        "keyerror:" in haystack
+        and ("experts.0.down_proj.weight" in haystack or "params_dict[name]" in haystack)
+    ):
+        return "checkpoint_incompatible"
+    if "unsupported display driver / cuda driver combination" in haystack:
+        return "cuda_driver_mismatch"
+    if "engine core initialization failed" in haystack:
+        return "engine_core_start_failed"
+    return None
+
+
+def startup_failure_detail(
+    config: "SingleContainerConfig",
+    failure_kind: str | None,
+    recent_output: str | None = None,
+) -> str | None:
+    detail: str | None = None
+    if failure_kind == "gpu_memory_oom":
+        detail = (
+            f"Not enough GPU memory to warm {config.vllm_model} on this host. "
+            "The model-load path ran out of memory before readiness. "
+            "Lower MAX_CONTEXT_TOKENS, use a larger-VRAM host, or add tensor parallelism."
+        )
+    elif failure_kind == "checkpoint_incompatible":
+        detail = (
+            f"The checkpoint for {config.vllm_model} does not match the Gemma4 weight layout "
+            "expected by the current vLLM loader. "
+            "This is a checkpoint/runtime compatibility problem, not just a slow warmup. "
+            "Try a different checkpoint build for this model family or use a runtime with confirmed support for it."
+        )
+    if detail and recent_output:
+        detail = f"{detail} Recent vLLM output:\n{recent_output}"
+    return detail
 
 
 @dataclass(frozen=True)
@@ -175,7 +271,11 @@ class SingleContainerConfig:
                 vllm_model,
                 env_int_from_mapping(values, "MAX_CONTEXT_TOKENS", 32768),
             ),
-            vllm_startup_timeout_seconds=env_int_from_mapping(values, "VLLM_STARTUP_TIMEOUT_SECONDS", 600),
+            vllm_startup_timeout_seconds=(
+                env_int_from_mapping(values, "VLLM_STARTUP_TIMEOUT_SECONDS", 600)
+                if str(values.get("VLLM_STARTUP_TIMEOUT_SECONDS") or "").strip()
+                else (known_safe_startup_timeout_seconds(vllm_model) or 600)
+            ),
             vllm_server_command=tuple(
                 split_command(read("VLLM_SERVER_COMMAND"))
                 or [sys.executable, "-m", "vllm.entrypoints.openai.api_server"]
@@ -229,6 +329,112 @@ def build_vllm_command(config: SingleContainerConfig) -> list[str]:
     if effective_max_context_tokens > 0 and not has_cli_flag(command, "--max-model-len"):
         command.extend(["--max-model-len", str(effective_max_context_tokens)])
     return command
+
+
+def startup_runtime_detail(
+    config: SingleContainerConfig,
+    *,
+    startup_stage: str,
+    last_ready_error: str | None = None,
+    recent_vllm_output: str | None = None,
+    vllm_process_exit_code: int | None = None,
+    failed_service: str | None = None,
+    failure_kind: str | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "startup_stage": startup_stage,
+        "local_inference_url": config.local_inference_url,
+        "effective_max_context_tokens": config.max_context_tokens,
+        "vllm_command": build_vllm_command(config),
+    }
+    recent_output = trimmed_output(recent_vllm_output)
+    if last_ready_error:
+        payload["last_ready_error"] = last_ready_error
+    if recent_output:
+        payload["recent_vllm_output"] = recent_output
+    if vllm_process_exit_code is not None:
+        payload["vllm_process_exit_code"] = int(vllm_process_exit_code)
+    if failed_service:
+        payload["failed_service"] = failed_service
+    if failure_kind:
+        payload["failure_kind"] = failure_kind
+    return payload
+
+
+def startup_probe_kind_for_model(model: str | None) -> str:
+    normalized = str(model or "").strip()
+    if normalized == DEFAULT_PUBLIC_BOOTSTRAP_MODEL:
+        return "embeddings"
+    return "responses"
+
+
+def run_local_inference_probe(config: SingleContainerConfig, *, timeout_seconds: float = 10.0) -> dict[str, Any]:
+    base_url = config.local_inference_url
+    probe_kind = startup_probe_kind_for_model(config.vllm_model)
+    if probe_kind == "embeddings":
+        response = httpx.post(
+            f"{base_url}{DEFAULT_STARTUP_EMBEDDINGS_PATH}",
+            json={"model": config.vllm_model, "input": DEFAULT_STARTUP_EMBEDDINGS_INPUT},
+            timeout=timeout_seconds,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        embedding_length = 0
+        data = payload.get("data")
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            embedding = data[0].get("embedding")
+            if isinstance(embedding, list):
+                embedding_length = len(embedding)
+        if embedding_length <= 0:
+            raise RuntimeError(
+                f"The startup embeddings probe succeeded with HTTP {response.status_code}, but no embedding vector was returned."
+            )
+        return {
+            "probe_api": "embeddings",
+            "probe_path": DEFAULT_STARTUP_EMBEDDINGS_PATH,
+            "probe_status": int(response.status_code),
+            "embedding_length": embedding_length,
+        }
+
+    response = httpx.post(
+        f"{base_url}{DEFAULT_STARTUP_RESPONSES_PATH}",
+        json={"model": config.vllm_model, "input": DEFAULT_STARTUP_RESPONSES_INPUT},
+        timeout=timeout_seconds,
+    )
+    try:
+        response.raise_for_status()
+        payload = response.json()
+        return {
+            "probe_api": "responses",
+            "probe_path": DEFAULT_STARTUP_RESPONSES_PATH,
+            "probe_status": int(response.status_code),
+            "output_present": bool(trimmed_output(json.dumps(payload) if isinstance(payload, dict) else "")),
+        }
+    except httpx.HTTPStatusError as error:
+        if error.response.status_code not in {400, 404, 405, 422}:
+            raise
+
+    fallback = httpx.post(
+        f"{base_url}{DEFAULT_STARTUP_CHAT_COMPLETIONS_PATH}",
+        json={
+            "model": config.vllm_model,
+            "messages": [{"role": "user", "content": DEFAULT_STARTUP_RESPONSES_INPUT}],
+            "max_tokens": 8,
+        },
+        timeout=timeout_seconds,
+    )
+    fallback.raise_for_status()
+    payload = fallback.json()
+    choices = payload.get("choices")
+    if not (isinstance(choices, list) and choices and isinstance(choices[0], dict)):
+        raise RuntimeError(
+            f"The startup chat-completions probe succeeded with HTTP {fallback.status_code}, but no choices were returned."
+        )
+    return {
+        "probe_api": "chat_completions_fallback",
+        "probe_path": DEFAULT_STARTUP_CHAT_COMPLETIONS_PATH,
+        "probe_status": int(fallback.status_code),
+    }
 
 
 def has_cli_flag(command: Sequence[str], flag: str) -> bool:
@@ -469,6 +675,8 @@ class StartupStatusPublisher:
         self.server: ThreadingHTTPServer | None = None
         self.server_thread: threading.Thread | None = None
         self.server_error: str | None = None
+        self.self_check_error: str | None = None
+        self.self_check_ok: bool | None = None
 
     @property
     def local_url(self) -> str | None:
@@ -483,7 +691,18 @@ class StartupStatusPublisher:
             payload["status_url"] = self.local_url
             if self.server_error:
                 payload["status_url_error"] = self.server_error
+            if self.self_check_ok is not None:
+                payload["status_url_self_check_ok"] = self.self_check_ok
+            if self.self_check_error:
+                payload["status_url_self_check_error"] = self.self_check_error
             return payload
+
+    def _write_payload_locked(self, payload: dict[str, Any]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = self.path.with_name(f"{self.path.name}.tmp")
+        temp_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        temp_path.replace(self.path)
+        self.payload = payload
 
     def publish(
         self,
@@ -509,12 +728,9 @@ class StartupStatusPublisher:
         if self.server_error:
             payload["status_url_error"] = self.server_error
         with self.lock:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            temp_path = self.path.with_name(f"{self.path.name}.tmp")
-            temp_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-            temp_path.replace(self.path)
-            self.payload = payload
+            self._write_payload_locked(payload)
         self.ensure_server()
+        self.refresh_self_check()
         return self.snapshot()
 
     def ensure_server(self) -> None:
@@ -561,6 +777,38 @@ class StartupStatusPublisher:
             self.server_thread = threading.Thread(target=_serve, name="startup-status-server", daemon=True)
             self.server_thread.start()
 
+    def refresh_self_check(self) -> None:
+        url = self.local_url
+        if self.port <= 0 or not url or self.server is None:
+            return
+        last_error = None
+        for _ in range(5):
+            try:
+                response = httpx.get(url, timeout=1.0)
+                if response.status_code == HTTPStatus.OK:
+                    with self.lock:
+                        self.self_check_ok = True
+                        self.self_check_error = None
+                        if self.payload:
+                            payload = dict(self.payload)
+                            payload["status_url_self_check_ok"] = True
+                            payload.pop("status_url_self_check_error", None)
+                            self._write_payload_locked(payload)
+                    return
+                last_error = f"Startup-status self-check returned HTTP {response.status_code}."
+            except httpx.HTTPError as error:
+                last_error = str(error) or "Startup-status self-check failed."
+            time.sleep(0.1)
+        with self.lock:
+            self.self_check_ok = False
+            self.self_check_error = last_error
+            if self.payload:
+                payload = dict(self.payload)
+                payload["status_url_self_check_ok"] = False
+                if last_error:
+                    payload["status_url_self_check_error"] = last_error
+                self._write_payload_locked(payload)
+
     def close(self) -> None:
         with self.lock:
             server = self.server
@@ -575,7 +823,7 @@ class StartupStatusPublisher:
 
 
 class ProcessOutputRelay:
-    def __init__(self, *, max_lines: int = 40) -> None:
+    def __init__(self, *, max_lines: int = 120) -> None:
         self.max_lines = max_lines
         self.lines: deque[str] = deque(maxlen=max_lines)
         self.lock = threading.Lock()
@@ -610,19 +858,28 @@ def wait_for_inference_runtime_ready(
     *,
     output_tail: Callable[[], str] | None = None,
     fault_state_path: Path | None = None,
+    progress_callback: Callable[[str, str | None, int | None], None] | None = None,
 ) -> None:
     faults = FaultInjectionController(fault_state_path or fault_injection_state_path_from_mapping())
     deadline = time.monotonic() + max(1, config.vllm_startup_timeout_seconds)
     url = f"{config.local_inference_url}/v1/models"
     last_error = "The local inference runtime is still starting."
     while time.monotonic() < deadline:
+        recent_output = trimmed_output(output_tail() if output_tail is not None else None)
         if faults.consume("warm_gpu_oom"):
+            if progress_callback is not None:
+                progress_callback(last_error, recent_output, None)
             raise RuntimeError(
                 f"CUDA out of memory while warming {config.vllm_model}. "
                 "The live fault drill forced a GPU OOM before the runtime became ready."
             )
         if process is not None and process.poll() is not None:
-            recent_output = output_tail().strip() if output_tail is not None else ""
+            if progress_callback is not None:
+                progress_callback(last_error, recent_output, process.returncode)
+            failure_kind = startup_failure_kind(last_error, recent_output)
+            detail = startup_failure_detail(config, failure_kind, recent_output)
+            if detail:
+                raise RuntimeError(detail)
             if recent_output:
                 raise RuntimeError(
                     "The local inference runtime exited before it became ready "
@@ -634,13 +891,40 @@ def wait_for_inference_runtime_ready(
         try:
             response = httpx.get(url, timeout=5.0)
             if response.status_code < 500:
-                print(f"The local inference runtime is ready at {url}.", flush=True)
-                return
-            last_error = f"The local inference runtime returned HTTP {response.status_code}."
+                payload = response.json()
+                if isinstance(payload, dict):
+                    try:
+                        probe_result = run_local_inference_probe(config, timeout_seconds=5.0)
+                        print(
+                            "The local inference runtime is ready at "
+                            f"{url} after {probe_result['probe_api']} succeeded on {probe_result['probe_path']}.",
+                            flush=True,
+                        )
+                        return
+                    except (httpx.HTTPError, RuntimeError, ValueError) as error:
+                        last_error = str(error) or "The startup inference probe is still waiting for the runtime."
+                else:
+                    last_error = f"{url} returned non-JSON content."
+            else:
+                last_error = f"The local inference runtime returned HTTP {response.status_code}."
         except httpx.HTTPError as error:
             last_error = str(error) or last_error
+        if progress_callback is not None:
+            progress_callback(last_error, recent_output, None)
         print(f"Waiting for the local inference runtime model {config.vllm_model} to warm: {last_error}", flush=True)
         time.sleep(5)
+    recent_output = trimmed_output(output_tail() if output_tail is not None else None)
+    if progress_callback is not None:
+        progress_callback(last_error, recent_output, process.returncode if process is not None else None)
+    failure_kind = startup_failure_kind(last_error, recent_output)
+    detail = startup_failure_detail(config, failure_kind, recent_output)
+    if detail:
+        raise RuntimeError(detail)
+    if recent_output:
+        raise RuntimeError(
+            "The local inference runtime did not become ready in time: "
+            f"{last_error}. Recent vLLM output:\n{recent_output}"
+        )
     raise RuntimeError(f"The local inference runtime did not become ready in time: {last_error}")
 
 
@@ -837,7 +1121,7 @@ class EmbeddedRuntimeSupervisor:
         self.vllm_process = subprocess.Popen(
             command,
             text=True,
-            env=dict(process_env),
+            env=sanitized_vllm_process_env(process_env),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             bufsize=1,
@@ -861,7 +1145,12 @@ class EmbeddedRuntimeSupervisor:
         validate_gated_model_access(process_env, config.vllm_model)
         effective_start_vllm = start_vllm and config.start_vllm
         effective_start_node = start_node and config.start_node_agent
-        self.publish_startup_status(env_values, status="warming", config=config)
+        self.publish_startup_status(
+            env_values,
+            status="warming",
+            config=config,
+            extra=startup_runtime_detail(config, startup_stage="launching_vllm"),
+        )
 
         try:
             with self.lock:
@@ -873,26 +1162,61 @@ class EmbeddedRuntimeSupervisor:
                 vllm_process = self.vllm_process
 
             if effective_start_vllm:
+                def _publish_progress(last_ready_error: str, recent_vllm_output: str | None, exit_code: int | None) -> None:
+                    self.publish_startup_status(
+                        env_values,
+                        status="warming",
+                        config=config,
+                        extra=startup_runtime_detail(
+                            config,
+                            startup_stage="warming_model",
+                            last_ready_error=last_ready_error,
+                            recent_vllm_output=recent_vllm_output,
+                            vllm_process_exit_code=exit_code,
+                        ),
+                    )
+
                 wait_for_inference_runtime_ready(
                     config,
                     vllm_process,
                     output_tail=self.vllm_output_relay.tail_text if self.vllm_output_relay is not None else None,
                     fault_state_path=fault_injection_state_path_from_mapping(process_env),
+                    progress_callback=_publish_progress,
                 )
 
             with self.lock:
                 self.sync_processes()
                 if effective_start_node and not self.process_running(self.node_process):
+                    self.publish_startup_status(
+                        env_values,
+                        status="warming",
+                        config=config,
+                        extra=startup_runtime_detail(config, startup_stage="starting_node_agent"),
+                    )
                     command = list(config.node_agent_command)
                     self.log(f"Starting node agent in this container: {' '.join(shlex.quote(part) for part in command)}")
                     self.node_process = subprocess.Popen(command, text=True, env=process_env)
-            self.publish_startup_status(env_values, status="ready", config=config)
+            self.publish_startup_status(
+                env_values,
+                status="ready",
+                config=config,
+                extra=startup_runtime_detail(config, startup_stage="ready"),
+            )
         except Exception as error:
+            recent_vllm_output = self.vllm_output_relay.tail_text() if self.vllm_output_relay is not None else None
+            failure_kind = startup_failure_kind(str(error), recent_vllm_output)
             self.publish_startup_status(
                 env_values,
                 status="failed",
                 config=config,
                 failure_reason=str(error),
+                extra=startup_runtime_detail(
+                    config,
+                    startup_stage="failed",
+                    recent_vllm_output=recent_vllm_output,
+                    vllm_process_exit_code=self.vllm_process.returncode if self.vllm_process is not None and self.vllm_process.poll() is not None else None,
+                    failure_kind=failure_kind,
+                ),
             )
             raise
 
@@ -904,7 +1228,12 @@ class EmbeddedRuntimeSupervisor:
         if fallback_note:
             self.log(fallback_note)
         validate_gated_model_access(process_env, config.vllm_model)
-        self.publish_startup_status(env_values, status="warming", config=config)
+        self.publish_startup_status(
+            env_values,
+            status="warming",
+            config=config,
+            extra=startup_runtime_detail(config, startup_stage="launching_vllm"),
+        )
 
         try:
             with self.lock:
@@ -912,19 +1241,48 @@ class EmbeddedRuntimeSupervisor:
                 self.sync_processes()
                 vllm_process = self._start_vllm_locked(config=config, process_env=process_env)
 
+            def _publish_progress(last_ready_error: str, recent_vllm_output: str | None, exit_code: int | None) -> None:
+                self.publish_startup_status(
+                    env_values,
+                    status="warming",
+                    config=config,
+                    extra=startup_runtime_detail(
+                        config,
+                        startup_stage="warming_model",
+                        last_ready_error=last_ready_error,
+                        recent_vllm_output=recent_vllm_output,
+                        vllm_process_exit_code=exit_code,
+                    ),
+                )
+
             wait_for_inference_runtime_ready(
                 config,
                 vllm_process,
                 output_tail=self.vllm_output_relay.tail_text if self.vllm_output_relay is not None else None,
                 fault_state_path=fault_injection_state_path_from_mapping(process_env),
+                progress_callback=_publish_progress,
             )
-            self.publish_startup_status(env_values, status="ready", config=config)
+            self.publish_startup_status(
+                env_values,
+                status="ready",
+                config=config,
+                extra=startup_runtime_detail(config, startup_stage="ready"),
+            )
         except Exception as error:
+            recent_vllm_output = self.vllm_output_relay.tail_text() if self.vllm_output_relay is not None else None
+            failure_kind = startup_failure_kind(str(error), recent_vllm_output)
             self.publish_startup_status(
                 env_values,
                 status="failed",
                 config=config,
                 failure_reason=str(error),
+                extra=startup_runtime_detail(
+                    config,
+                    startup_stage="failed",
+                    recent_vllm_output=recent_vllm_output,
+                    vllm_process_exit_code=self.vllm_process.returncode if self.vllm_process is not None and self.vllm_process.poll() is not None else None,
+                    failure_kind=failure_kind,
+                ),
             )
             raise
 
@@ -944,7 +1302,12 @@ class EmbeddedRuntimeSupervisor:
             command = list(config.node_agent_command)
             self.log(f"Starting node agent in this container: {' '.join(shlex.quote(part) for part in command)}")
             self.node_process = subprocess.Popen(command, text=True, env=process_env)
-        self.publish_startup_status(env_values, status="ready", config=config)
+        self.publish_startup_status(
+            env_values,
+            status="ready",
+            config=config,
+            extra=startup_runtime_detail(config, startup_stage="ready"),
+        )
 
     def crash_vllm(self) -> None:
         with self.lock:
@@ -1032,6 +1395,7 @@ def main() -> int:
     vllm_process: subprocess.Popen[str] | None = None
     node_process: subprocess.Popen[str] | None = None
     vllm_output_relay: ProcessOutputRelay | None = None
+    vllm_process_env = sanitized_vllm_process_env(os.environ)
     startup_status = StartupStatusPublisher(
         config.startup_status_path,
         host=config.startup_status_host,
@@ -1066,7 +1430,7 @@ def main() -> int:
             signal.signal(sig, handle_signal)
 
     try:
-        publish_startup_status("warming")
+        publish_startup_status("warming", extra=startup_runtime_detail(config, startup_stage="launching_vllm"))
         if config.start_vllm:
             vllm_command = build_vllm_command(config)
             print(
@@ -1077,15 +1441,30 @@ def main() -> int:
             vllm_process = subprocess.Popen(
                 vllm_command,
                 text=True,
+                env=vllm_process_env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 bufsize=1,
             )
             vllm_output_relay.attach(vllm_process)
+
+            def publish_warming_progress(last_ready_error: str, recent_vllm_output: str | None, exit_code: int | None) -> None:
+                publish_startup_status(
+                    "warming",
+                    extra=startup_runtime_detail(
+                        config,
+                        startup_stage="warming_model",
+                        last_ready_error=last_ready_error,
+                        recent_vllm_output=recent_vllm_output,
+                        vllm_process_exit_code=exit_code,
+                    ),
+                )
+
             wait_for_inference_runtime_ready(
                 config,
                 vllm_process,
                 output_tail=vllm_output_relay.tail_text if vllm_output_relay is not None else None,
+                progress_callback=publish_warming_progress,
             )
         else:
             print(
@@ -1094,6 +1473,7 @@ def main() -> int:
             )
 
         if config.start_node_agent:
+            publish_startup_status("warming", extra=startup_runtime_detail(config, startup_stage="starting_node_agent"))
             node_command = list(config.node_agent_command)
             print(f"Starting node agent in this container: {' '.join(shlex.quote(part) for part in node_command)}", flush=True)
             node_process = subprocess.Popen(node_command, text=True)
@@ -1103,7 +1483,7 @@ def main() -> int:
                 flush=True,
             )
 
-        publish_startup_status("ready")
+        publish_startup_status("ready", extra=startup_runtime_detail(config, startup_stage="ready"))
 
         running = [process for process in (vllm_process, node_process) if process is not None]
         if not running:
@@ -1115,12 +1495,33 @@ def main() -> int:
         publish_startup_status(
             "failed",
             failure_reason=f"{exited_service} exited with status {exited.returncode}.",
-            extra={"failed_service": exited_service},
+            extra=startup_runtime_detail(
+                config,
+                startup_stage="failed",
+                recent_vllm_output=vllm_output_relay.tail_text() if vllm_output_relay is not None else None,
+                vllm_process_exit_code=vllm_process.returncode if vllm_process is not None and vllm_process.poll() is not None else None,
+                failed_service=exited_service,
+                failure_kind=startup_failure_kind(
+                    f"{exited_service} exited with status {exited.returncode}.",
+                    vllm_output_relay.tail_text() if vllm_output_relay is not None else None,
+                ),
+            ),
         )
         print(f"Process exited with status {exited.returncode}; stopping the single-container runtime.", flush=True)
         return int(exited.returncode or 0)
     except Exception as error:
-        publish_startup_status("failed", failure_reason=str(error))
+        recent_vllm_output = vllm_output_relay.tail_text() if vllm_output_relay is not None else None
+        publish_startup_status(
+            "failed",
+            failure_reason=str(error),
+            extra=startup_runtime_detail(
+                config,
+                startup_stage="failed",
+                recent_vllm_output=recent_vllm_output,
+                vllm_process_exit_code=vllm_process.returncode if vllm_process is not None and vllm_process.poll() is not None else None,
+                failure_kind=startup_failure_kind(str(error), recent_vllm_output),
+            ),
+        )
         raise
     finally:
         terminate_process(node_process)

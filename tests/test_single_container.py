@@ -79,6 +79,40 @@ def test_config_from_env_supports_serve_only_mode(monkeypatch) -> None:
     assert config.start_node_agent is False
 
 
+def test_config_from_env_applies_safe_context_limit_to_known_gemma_alias(monkeypatch) -> None:
+    monkeypatch.setenv("VLLM_MODEL", "aeyeops/gemma-4-26b-a4b-it-fp8")
+    monkeypatch.setenv("MAX_CONTEXT_TOKENS", "32768")
+
+    config = single_container.SingleContainerConfig.from_env()
+
+    assert config.max_context_tokens == 8192
+    assert config.vllm_startup_timeout_seconds == 900
+
+
+def test_sanitized_vllm_process_env_omits_runtime_control_variables(monkeypatch) -> None:
+    monkeypatch.setenv("PATH", "test-path")
+
+    env = single_container.sanitized_vllm_process_env(
+        {
+            "VLLM_MODEL": "google/gemma-4-26b-a4b-it",
+            "VLLM_HOST": "0.0.0.0",
+            "VLLM_PORT": "8000",
+            "VLLM_BASE_URL": "http://127.0.0.1:8000",
+            "INFERENCE_BASE_URL": "http://127.0.0.1:8000",
+            "HF_HOME": "/tmp/hf-cache",
+            "HUGGING_FACE_HUB_TOKEN": "hf_secret",
+        }
+    )
+
+    assert "VLLM_MODEL" not in env
+    assert "VLLM_HOST" not in env
+    assert "VLLM_PORT" not in env
+    assert "VLLM_BASE_URL" not in env
+    assert "INFERENCE_BASE_URL" not in env
+    assert env["HF_HOME"] == "/tmp/hf-cache"
+    assert env["HUGGING_FACE_HUB_TOKEN"] == "hf_secret"
+
+
 def test_build_vllm_command_does_not_duplicate_explicit_max_model_len() -> None:
     config = single_container.SingleContainerConfig(
         vllm_model="meta-llama/Llama-3.1-8B-Instruct",
@@ -356,8 +390,10 @@ def test_startup_status_publisher_writes_file_and_serves_endpoint(tmp_path) -> N
         assert saved["status"] == "ready"
         assert saved["current_model"] == "BAAI/bge-large-en-v1.5"
         assert saved["warm_source"] == "local_cache"
+        assert saved["status_url_self_check_ok"] is True
         assert response.status_code == 200
         assert response.json()["warm_source"] == "local_cache"
+        assert response.json()["status_url_self_check_ok"] is True
     finally:
         publisher.close()
 
@@ -376,7 +412,17 @@ def test_embedded_runtime_snapshot_includes_machine_readable_startup_status(tmp_
 
     env_values = supervisor.env_values()
     config = supervisor.config(env_values)
-    supervisor.publish_startup_status(env_values, status="warming", config=config)
+    supervisor.publish_startup_status(
+        env_values,
+        status="warming",
+        config=config,
+        extra=single_container.startup_runtime_detail(
+            config,
+            startup_stage="warming_model",
+            last_ready_error="still loading",
+            recent_vllm_output="Loading safetensors shard 1/2",
+        ),
+    )
 
     snapshot = supervisor.snapshot()
     startup_status = snapshot["startup_status"]
@@ -385,6 +431,10 @@ def test_embedded_runtime_snapshot_includes_machine_readable_startup_status(tmp_
     assert startup_status["current_model"] == "BAAI/bge-large-en-v1.5"
     assert startup_status["warm_source"] == "offline_appliance_bundle"
     assert startup_status["status_path"] == str(tmp_path / "scratch" / "startup-status.json")
+    assert startup_status["startup_stage"] == "warming_model"
+    assert startup_status["last_ready_error"] == "still loading"
+    assert startup_status["recent_vllm_output"] == "Loading safetensors shard 1/2"
+    assert startup_status["effective_max_context_tokens"] == 512
 
 
 def test_wait_for_inference_runtime_ready_respects_warm_gpu_oom_fault(monkeypatch, tmp_path) -> None:
@@ -604,6 +654,220 @@ def test_wait_for_vllm_includes_recent_output_when_process_exits() -> None:
         assert "CUDA out of memory" in detail
     else:  # pragma: no cover
         raise AssertionError("wait_for_inference_runtime_ready should include recent process output")
+
+
+def test_wait_for_vllm_classifies_gpu_memory_oom_more_clearly() -> None:
+    class FailedProcess:
+        returncode = 1
+
+        def poll(self):
+            return self.returncode
+
+    config = single_container.SingleContainerConfig(
+        vllm_model="google/gemma-4-26b-a4b-it",
+        vllm_startup_timeout_seconds=1,
+    )
+
+    try:
+        single_container.wait_for_inference_runtime_ready(
+            config,
+            FailedProcess(),  # type: ignore[arg-type]
+            output_tail=lambda: "Failed to load model - not enough GPU memory. CUDA out of memory.",
+        )
+    except RuntimeError as error:
+        detail = str(error)
+        assert "Not enough GPU memory to warm google/gemma-4-26b-a4b-it on this host" in detail
+        assert "Lower MAX_CONTEXT_TOKENS" in detail
+    else:  # pragma: no cover
+        raise AssertionError("GPU OOM should be classified more clearly")
+
+
+def test_wait_for_vllm_classifies_checkpoint_incompatibility_more_clearly() -> None:
+    class FailedProcess:
+        returncode = 1
+
+        def poll(self):
+            return self.returncode
+
+    config = single_container.SingleContainerConfig(
+        vllm_model="Firworks/gemma-4-26B-A4B-it-fp8",
+        vllm_startup_timeout_seconds=1,
+    )
+
+    try:
+        single_container.wait_for_inference_runtime_ready(
+            config,
+            FailedProcess(),  # type: ignore[arg-type]
+            output_tail=lambda: (
+                "Engine core initialization failed.\n"
+                "KeyError: 'layers.0.experts.0.down_proj.weight'"
+            ),
+        )
+    except RuntimeError as error:
+        detail = str(error)
+        assert "does not match the Gemma4 weight layout expected by the current vLLM loader" in detail
+        assert "checkpoint/runtime compatibility problem" in detail
+        assert "Recent vLLM output" in detail
+    else:  # pragma: no cover
+        raise AssertionError("Checkpoint incompatibility should be classified more clearly")
+
+
+def test_wait_for_inference_runtime_ready_reports_progress_and_timeout_output(monkeypatch) -> None:
+    monotonic_values = iter([0.0, 0.5, 2.0])
+    monkeypatch.setattr(single_container.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(single_container.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        single_container.httpx,
+        "get",
+        lambda *args, **kwargs: (_ for _ in ()).throw(single_container.httpx.ConnectError("connection refused")),
+    )
+
+    class RunningProcess:
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+    updates: list[tuple[str, str | None, int | None]] = []
+    config = single_container.SingleContainerConfig(
+        vllm_model="Qwen/Qwen2.5-1.5B-Instruct",
+        vllm_startup_timeout_seconds=1,
+    )
+
+    try:
+        single_container.wait_for_inference_runtime_ready(
+            config,
+            RunningProcess(),  # type: ignore[arg-type]
+            output_tail=lambda: "Tokenizer loaded\nStill warming weights",
+            progress_callback=lambda last_error, recent_output, exit_code: updates.append(
+                (last_error, recent_output, exit_code)
+            ),
+        )
+    except RuntimeError as error:
+        detail = str(error)
+        assert "did not become ready in time" in detail
+        assert "Recent vLLM output" in detail
+        assert "Still warming weights" in detail
+    else:  # pragma: no cover
+        raise AssertionError("wait_for_inference_runtime_ready should fail on repeated connect errors")
+
+    assert updates
+    assert "connection refused" in updates[0][0]
+    assert updates[-1][1] == "Tokenizer loaded\nStill warming weights"
+
+
+def test_run_local_inference_probe_uses_embeddings_for_bootstrap_model(monkeypatch) -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):
+            return {"data": [{"embedding": [0.1, 0.2, 0.3]}]}
+
+    def fake_post(url, json=None, timeout=None):
+        calls.append((url, dict(json or {})))
+        return FakeResponse()
+
+    monkeypatch.setattr(single_container.httpx, "post", fake_post)
+    config = single_container.SingleContainerConfig(vllm_model="BAAI/bge-large-en-v1.5")
+
+    result = single_container.run_local_inference_probe(config)
+
+    assert result["probe_api"] == "embeddings"
+    assert result["probe_path"] == "/v1/embeddings"
+    assert result["embedding_length"] == 3
+    assert calls == [
+        (
+            "http://127.0.0.1:8000/v1/embeddings",
+            {"model": "BAAI/bge-large-en-v1.5", "input": ["startup readiness probe"]},
+        )
+    ]
+
+
+def test_run_local_inference_probe_falls_back_to_chat_completions(monkeypatch) -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class Responses404:
+        status_code = 404
+
+        def raise_for_status(self) -> None:
+            request = None
+            response = type("ErrorResponse", (), {"status_code": 404})()
+            raise single_container.httpx.HTTPStatusError("not found", request=request, response=response)
+
+    class ChatResponse:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": "ready"}}]}
+
+    def fake_post(url, json=None, timeout=None):
+        calls.append((url, dict(json or {})))
+        if url.endswith("/v1/responses"):
+            return Responses404()
+        return ChatResponse()
+
+    monkeypatch.setattr(single_container.httpx, "post", fake_post)
+    config = single_container.SingleContainerConfig(vllm_model="Qwen/Qwen2.5-1.5B-Instruct")
+
+    result = single_container.run_local_inference_probe(config)
+
+    assert result["probe_api"] == "chat_completions_fallback"
+    assert result["probe_path"] == "/v1/chat/completions"
+    assert calls[0][0].endswith("/v1/responses")
+    assert calls[1][0].endswith("/v1/chat/completions")
+
+
+def test_wait_for_inference_runtime_ready_requires_probe_success(monkeypatch) -> None:
+    monotonic_values = iter([0.0, 0.2, 0.4, 0.6])
+    monkeypatch.setattr(single_container.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(single_container.time, "sleep", lambda _seconds: None)
+
+    class ModelsResponse:
+        status_code = 200
+
+        def json(self):
+            return {"data": [{"id": "Qwen/Qwen2.5-1.5B-Instruct"}]}
+
+    probe_calls = {"count": 0}
+
+    def fake_get(url, timeout=None):
+        return ModelsResponse()
+
+    def fake_probe(config, timeout_seconds=10.0):
+        probe_calls["count"] += 1
+        if probe_calls["count"] == 1:
+            raise RuntimeError("first local probe still warming")
+        return {"probe_api": "responses", "probe_path": "/v1/responses"}
+
+    monkeypatch.setattr(single_container.httpx, "get", fake_get)
+    monkeypatch.setattr(single_container, "run_local_inference_probe", fake_probe)
+
+    class RunningProcess:
+        returncode = None
+
+        def poll(self):
+            return None
+
+    config = single_container.SingleContainerConfig(
+        vllm_model="Qwen/Qwen2.5-1.5B-Instruct",
+        vllm_startup_timeout_seconds=1,
+    )
+
+    single_container.wait_for_inference_runtime_ready(
+        config,
+        RunningProcess(),  # type: ignore[arg-type]
+        output_tail=lambda: "weights warming",
+    )
+
+    assert probe_calls["count"] == 2
 
 
 def test_validate_gated_model_access_rejects_unauthorized_token(monkeypatch) -> None:

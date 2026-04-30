@@ -12,6 +12,7 @@ src/node_agent/appliance-package-manifest.pub
 src/node_agent/appliance_manifest.py
 src/node_agent/autopilot.py
 src/node_agent/autostart.py
+src/node_agent/cache_seed.py
 src/node_agent/concurrency.py
 src/node_agent/config.py
 src/node_agent/control_plane.py
@@ -55,9 +56,11 @@ src/node_agent/runtime_bundle/vector.toml
 tests/test_appliance_manifest.py
 tests/test_autopilot.py
 tests/test_autostart.py
+tests/test_cache_seed.py
 tests/test_config.py
 tests/test_control_plane.py
 tests/test_desktop_launcher.py
+tests/test_heat_governor.py
 tests/test_installer.py
 tests/test_main.py
 tests/test_model_artifacts.py
