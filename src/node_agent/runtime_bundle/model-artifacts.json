@@ -155,6 +155,69 @@
           }
         ]
       }
+    },
+    {
+      "model": "google/gemma-4-E4B-it",
+      "operation": "responses",
+      "source": "huggingface",
+      "repository": "google/gemma-4-E4B-it",
+      "revision": "c53e9d33178b12afbad4a48334d21e19b8c29761",
+      "model_manifest_digest": "sha256:4de22960b1b5dd64152612b877487d3840d970b99f9093ff8cda4093ca4d24cf",
+      "tokenizer_digest": "sha256:ce4a1d9adff76b49317ffaf5d2a5d7dd6d8871e701d1fae7d7344e645294dc9a",
+      "model_manifest": {
+        "artifact_kind": "huggingface_model_snapshot",
+        "operation": "responses",
+        "repository": "google/gemma-4-E4B-it",
+        "revision": "c53e9d33178b12afbad4a48334d21e19b8c29761",
+        "runtime_engine": "vllm",
+        "files": [
+          {
+            "path": "config.json",
+            "digest": "gitsha1:d68960fdcce766f2bfe41436325a8a483a74d125",
+            "size_bytes": 5145
+          },
+          {
+            "path": "generation_config.json",
+            "digest": "gitsha1:e605bb4523b1462ea9d9a3810b9e3ecf7ab7b1f6",
+            "size_bytes": 208
+          },
+          {
+            "path": "model.safetensors",
+            "digest": "sha256:cfbd3d2f1cd71bd471c37fe2bf8546d5028d41e5736f64e1ca6c6b8893125503",
+            "size_bytes": 15992595884
+          },
+          {
+            "path": "processor_config.json",
+            "digest": "gitsha1:5465974d23e1eca2c46c2809b26c997946ce0d90",
+            "size_bytes": 1689
+          }
+        ]
+      },
+      "tokenizer_manifest": {
+        "artifact_kind": "huggingface_tokenizer_snapshot",
+        "operation": "responses",
+        "repository": "google/gemma-4-E4B-it",
+        "revision": "c53e9d33178b12afbad4a48334d21e19b8c29761",
+        "runtime_engine": "vllm",
+        "files": [
+          {
+            "path": "chat_template.jinja",
+            "digest": "gitsha1:dc032e46e28e0d325b18d26da1279cdda3afa8d7",
+            "size_bytes": 16804
+          },
+          {
+            "path": "tokenizer.json",
+            "digest": "sha256:cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+            "size_bytes": 32169626
+          },
+          {
+            "path": "tokenizer_config.json",
+            "digest": "gitsha1:375b25dc8be85705251e41be1c25310d24932051",
+            "size_bytes": 2095
+          }
+        ]
+      },
+      "expected_context_tokens": 32768
     }
   ]
 }

@@ -23,7 +23,10 @@ from .fault_injection import DEFAULT_FAULT_INJECTION_STATE_NAME, FaultInjectionC
 
 DEFAULT_GATED_STARTUP_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 DEFAULT_PUBLIC_BOOTSTRAP_MODEL = "BAAI/bge-large-en-v1.5"
+RTX_5060_TI_16GB_GEMMA4_E4B_PROFILE = "rtx_5060_ti_16gb_gemma4_e4b"
+GEMMA_4_E4B_MODEL_LOOKUP_KEY = "google/gemma-4-e4b-it"
 MIN_VRAM_FOR_GATED_STARTUP_GB = 24.0
+MIN_VRAM_FOR_GEMMA_E4B_5060_PROFILE_GB = 15.5
 GATED_HF_REPOSITORY_PREFIXES = ("meta-llama/",)
 DEFAULT_RUN_MODE = "full"
 SERVE_ONLY_RUN_MODE = "serve_only"
@@ -498,6 +501,22 @@ def requires_gated_hugging_face_access(model: str | None) -> bool:
     return any(normalized.startswith(prefix) for prefix in GATED_HF_REPOSITORY_PREFIXES)
 
 
+def low_vram_bootstrap_fallback_applies(
+    values: Mapping[str, str],
+    current_model: str,
+    gpu_memory_gb: float,
+) -> bool:
+    profile = str(values.get("RUNTIME_PROFILE", "")).strip().lower().replace("-", "_")
+    model = str(current_model or "").strip().lower()
+    if (
+        profile == RTX_5060_TI_16GB_GEMMA4_E4B_PROFILE
+        and model == GEMMA_4_E4B_MODEL_LOOKUP_KEY
+        and gpu_memory_gb >= MIN_VRAM_FOR_GEMMA_E4B_5060_PROFILE_GB
+    ):
+        return False
+    return True
+
+
 def should_use_public_bootstrap(values: Mapping[str, str], current_model: str) -> tuple[bool, list[str]]:
     reasons: list[str] = []
     if requires_gated_hugging_face_access(current_model) and not hugging_face_token_configured(values):
@@ -505,7 +524,11 @@ def should_use_public_bootstrap(values: Mapping[str, str], current_model: str) -
             f"no Hugging Face token is configured for the gated startup model {current_model}"
         )
     gpu_memory_gb = env_float_from_mapping(values, "GPU_MEMORY_GB")
-    if gpu_memory_gb is not None and gpu_memory_gb < MIN_VRAM_FOR_GATED_STARTUP_GB:
+    if (
+        gpu_memory_gb is not None
+        and gpu_memory_gb < MIN_VRAM_FOR_GATED_STARTUP_GB
+        and low_vram_bootstrap_fallback_applies(values, current_model, gpu_memory_gb)
+    ):
         reasons.append(
             f"this machine reports only {gpu_memory_gb:.1f} GB VRAM, so the public embeddings bootstrap is safer"
         )

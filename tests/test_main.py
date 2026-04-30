@@ -774,14 +774,29 @@ def test_validate_startup_settings_rejects_invalid_region(monkeypatch: pytest.Mo
     monkeypatch.setattr(main_module.socket, "getaddrinfo", lambda *_args, **_kwargs: [object()])
     settings = main_module.NodeAgentSettings(
         edge_control_url="https://edge.autonomousc.com",
-        node_region="global",
+        node_region="stockholm",
         vllm_model="BAAI/bge-large-en-v1.5",
         supported_models="BAAI/bge-large-en-v1.5",
         max_context_tokens=512,
     )
 
-    with pytest.raises(RuntimeError, match="NODE_REGION='global'"):
+    with pytest.raises(RuntimeError, match="NODE_REGION='stockholm'"):
         main_module.validate_startup_settings(settings)
+
+
+def test_validate_startup_settings_accepts_global_marketplace_region(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(main_module.socket, "getaddrinfo", lambda *_args, **_kwargs: [object()])
+    settings = main_module.NodeAgentSettings(
+        edge_control_url="https://edge.autonomousc.com",
+        node_region="global",
+        runtime_profile="rtx_5060_ti_16gb_gemma4_e4b",
+        inference_engine="vllm",
+        vllm_model="google/gemma-4-E4B-it",
+        supported_models="google/gemma-4-E4B-it",
+        max_context_tokens=32768,
+    )
+
+    main_module.validate_startup_settings(settings)
 
 
 def test_validate_startup_settings_rejects_unsafe_embedding_context(monkeypatch: pytest.MonkeyPatch):

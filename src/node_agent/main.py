@@ -902,6 +902,8 @@ def model_supports_runtime_operation(model: str, operation: str, inference_engin
 
 def _looks_like_node_region(region: str) -> bool:
     normalized = normalize_region_token(region).replace("_", "-")
+    if normalized == "global":
+        return True
     parts = [part for part in normalized.split("-") if part]
     return len(parts) >= 3 and all(part.isalnum() for part in parts)
 
@@ -910,7 +912,8 @@ def validate_startup_settings(settings: NodeAgentSettings) -> None:
     errors: list[str] = []
     if not _looks_like_node_region(settings.node_region):
         errors.append(
-            f"NODE_REGION={settings.node_region!r} is invalid. Use a concrete region like 'eu-se-1' or 'us-ca-1'."
+            f"NODE_REGION={settings.node_region!r} is invalid. Use 'global' for marketplace capacity "
+            "or a concrete region like 'eu-se-1' or 'us-ca-1'."
         )
 
     supported_models = configured_supported_models(settings)

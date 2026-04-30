@@ -253,6 +253,29 @@ def test_embedded_runtime_uses_public_bootstrap_on_low_vram_even_with_token(tmp_
     assert values["OWNER_TARGET_SUPPORTED_MODELS"] == "meta-llama/Llama-3.1-8B-Instruct,BAAI/bge-large-en-v1.5"
 
 
+def test_embedded_runtime_keeps_5060_gemma_profile_on_16gb_vram(tmp_path) -> None:
+    supervisor = single_container.EmbeddedRuntimeSupervisor(
+        lambda: {
+            "RUNTIME_PROFILE": "rtx_5060_ti_16gb_gemma4_e4b",
+            "VLLM_MODEL": "google/gemma-4-E4B-it",
+            "SUPPORTED_MODELS": "google/gemma-4-E4B-it",
+            "GPU_MEMORY_GB": "16",
+            "MAX_CONTEXT_TOKENS": "32768",
+        },
+        cache_dir=tmp_path / "cache",
+        credentials_dir=tmp_path / "credentials",
+        scratch_dir=tmp_path / "scratch",
+    )
+
+    values = supervisor.env_values()
+
+    assert values["RUNTIME_PROFILE"] == "rtx_5060_ti_16gb_gemma4_e4b"
+    assert values["VLLM_MODEL"] == "google/gemma-4-E4B-it"
+    assert values["MAX_CONTEXT_TOKENS"] == "32768"
+    assert values["SUPPORTED_MODELS"] == "google/gemma-4-E4B-it"
+    assert "OWNER_TARGET_MODEL" not in values
+
+
 def test_embedded_runtime_supervisor_restarts_only_node_agent(monkeypatch, tmp_path) -> None:
     started: list[list[str]] = []
     terminated: list[list[str]] = []

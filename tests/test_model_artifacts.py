@@ -58,6 +58,17 @@ def test_model_artifact_lookup_returns_expected_release_descriptors() -> None:
     assert any(file.path == "tokenizer.json" for file in artifact.tokenizer_manifest.files)
 
 
+def test_gemma_e4b_model_artifact_is_bundled_for_vllm_responses() -> None:
+    artifact = find_model_artifact("google/gemma-4-E4B-it", "responses", runtime_engine="vllm")
+
+    assert artifact is not None
+    assert artifact.revision == "c53e9d33178b12afbad4a48334d21e19b8c29761"
+    assert artifact.model_manifest_digest.startswith("sha256:")
+    assert artifact.tokenizer_digest.startswith("sha256:")
+    assert any(file.path == "model.safetensors" for file in artifact.model_manifest.files)
+    assert any(file.path == "chat_template.jinja" for file in artifact.tokenizer_manifest.files)
+
+
 def test_runtime_metadata_resolution_prefers_bundled_release_manifest() -> None:
     settings = StubSettings()
     embeddings_artifact = find_model_artifact("BAAI/bge-large-en-v1.5", "embeddings")
