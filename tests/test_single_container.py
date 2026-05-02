@@ -211,6 +211,25 @@ def test_embedded_runtime_rewrites_home_defaults_for_single_container(tmp_path) 
     assert values["VLLM_BASE_URL"] == "http://127.0.0.1:8000"
 
 
+def test_embedded_runtime_preserves_explicit_persistent_node(tmp_path) -> None:
+    supervisor = single_container.EmbeddedRuntimeSupervisor(
+        lambda: {
+            "RUN_MODE": "full",
+            "NODE_ID": "node_test",
+            "NODE_KEY": "node_key_test",
+            "TEMPORARY_NODE": "false",
+        },
+        cache_dir=tmp_path / "cache",
+        credentials_dir=tmp_path / "credentials",
+        scratch_dir=tmp_path / "scratch",
+    )
+
+    values = supervisor.env_values()
+
+    assert values["RUN_MODE"] == "full"
+    assert values["TEMPORARY_NODE"] == "false"
+
+
 def test_embedded_runtime_keeps_gated_startup_when_token_is_configured(tmp_path) -> None:
     supervisor = single_container.EmbeddedRuntimeSupervisor(
         lambda: {
@@ -273,6 +292,26 @@ def test_embedded_runtime_keeps_5060_gemma_profile_on_16gb_vram(tmp_path) -> Non
     assert values["VLLM_MODEL"] == "google/gemma-4-E4B-it"
     assert values["MAX_CONTEXT_TOKENS"] == "32768"
     assert values["SUPPORTED_MODELS"] == "google/gemma-4-E4B-it"
+    assert "OWNER_TARGET_MODEL" not in values
+
+
+def test_embedded_runtime_can_disable_public_bootstrap_on_low_vram(tmp_path) -> None:
+    supervisor = single_container.EmbeddedRuntimeSupervisor(
+        lambda: {
+            "VLLM_MODEL": "meta-llama/Llama-3.1-8B-Instruct",
+            "SUPPORTED_MODELS": "meta-llama/Llama-3.1-8B-Instruct,BAAI/bge-large-en-v1.5",
+            "GPU_MEMORY_GB": "16",
+            "DISABLE_PUBLIC_BOOTSTRAP_FALLBACK": "true",
+        },
+        cache_dir=tmp_path / "cache",
+        credentials_dir=tmp_path / "credentials",
+        scratch_dir=tmp_path / "scratch",
+    )
+
+    values = supervisor.env_values()
+
+    assert values["VLLM_MODEL"] == "meta-llama/Llama-3.1-8B-Instruct"
+    assert values["SUPPORTED_MODELS"] == "meta-llama/Llama-3.1-8B-Instruct,BAAI/bge-large-en-v1.5"
     assert "OWNER_TARGET_MODEL" not in values
 
 

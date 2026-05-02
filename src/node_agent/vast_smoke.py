@@ -67,6 +67,18 @@ DEFAULT_RESPONSES_INPUT = "Reply with the single word ready."
 DEFAULT_BENCHMARK_REQUESTS = 0
 DEFAULT_BENCHMARK_CONCURRENCY = 1
 DEFAULT_BENCHMARK_PROFILE = "balanced"
+DEFAULT_DURABLE_NODE_REGION = "eu-se-1"
+DEFAULT_DURABLE_MAX_CONTEXT_TOKENS = 32768
+DEFAULT_DURABLE_MAX_BATCH_TOKENS = 32768
+DEFAULT_DURABLE_MAX_CONCURRENT_ASSIGNMENTS = 12
+DEFAULT_DURABLE_MAX_LOCAL_QUEUE_ASSIGNMENTS = 24
+DEFAULT_DURABLE_PULL_BUNDLE_SIZE = 40
+DEFAULT_DURABLE_RUNTIME_PROFILE = "rtx_5060_ti_16gb_gemma4_e4b"
+DEFAULT_DURABLE_GEMMA_E4B_VLLM_STARTUP_TIMEOUT_SECONDS = 1800
+DEFAULT_GEMMA_E4B_VLLM_EXTRA_ARGS = (
+    "--quantization fp8 --kv-cache-dtype fp8 --gpu-memory-utilization 0.913 "
+    "--max-num-seqs 12 --generation-config vllm --skip-mm-profiling"
+)
 DEFAULT_BENCHMARK_RESPONSES_INPUT = (
     "Write exactly 180 plain-text words about keeping GPU inference cheap on rented nodes. "
     "Do not use bullet points or markdown. Do not include a preamble or conclusion."
@@ -80,7 +92,7 @@ DEFAULT_VAST_SMOKE_MODEL_MAX_CONTEXT_TOKENS = {
 }
 DEFAULT_VAST_SMOKE_MODEL_MIN_VRAM_GB = {
     "meta-llama/llama-3.1-8b-instruct": 24.0,
-    "google/gemma-4-e4b-it": 16.0,
+    "google/gemma-4-e4b-it": 15.0,
     "google/gemma-4-26b-a4b-it": 70.0,
 }
 DEFAULT_VAST_SMOKE_MODEL_MIN_INET_DOWN_MBPS = {
@@ -136,6 +148,17 @@ class VastSmokeConfig:
     benchmark_concurrency: int = DEFAULT_BENCHMARK_CONCURRENCY
     benchmark_profile: str = DEFAULT_BENCHMARK_PROFILE
     vllm_extra_args: str = ""
+    durable_node: bool = False
+    edge_control_url: str = ""
+    node_id: str = ""
+    node_key: str = ""
+    node_region: str = DEFAULT_DURABLE_NODE_REGION
+    runtime_profile: str = DEFAULT_DURABLE_RUNTIME_PROFILE
+    max_batch_tokens: int = DEFAULT_DURABLE_MAX_BATCH_TOKENS
+    max_concurrent_assignments: int = DEFAULT_DURABLE_MAX_CONCURRENT_ASSIGNMENTS
+    max_local_queue_assignments: int = DEFAULT_DURABLE_MAX_LOCAL_QUEUE_ASSIGNMENTS
+    pull_bundle_size: int = DEFAULT_DURABLE_PULL_BUNDLE_SIZE
+    vllm_startup_timeout_seconds: int | None = None
 
     def __post_init__(self) -> None:
         normalized_api_kind = str(self.api_kind or "auto").strip().lower() or "auto"
@@ -162,6 +185,24 @@ class VastSmokeConfig:
         if normalized_benchmark_profile not in {"balanced", "input_heavy", "output_heavy"}:
             normalized_benchmark_profile = DEFAULT_BENCHMARK_PROFILE
         object.__setattr__(self, "benchmark_profile", normalized_benchmark_profile)
+        if self.durable_node:
+            if not str(self.edge_control_url or "").strip():
+                raise VastSmokeError("--edge-control-url or EDGE_CONTROL_URL is required for --durable-node.")
+            if not str(self.node_id or "").strip():
+                raise VastSmokeError("--node-id or NODE_ID is required for --durable-node.")
+            if not str(self.node_key or "").strip():
+                raise VastSmokeError("--node-key or NODE_KEY is required for --durable-node.")
+            if int(self.max_context_tokens) == 32768:
+                object.__setattr__(self, "max_context_tokens", DEFAULT_DURABLE_MAX_CONTEXT_TOKENS)
+            if normalized_model_lookup_key(self.model) == "google/gemma-4-e4b-it":
+                if not str(self.vllm_extra_args or "").strip():
+                    object.__setattr__(self, "vllm_extra_args", DEFAULT_GEMMA_E4B_VLLM_EXTRA_ARGS)
+                if self.vllm_startup_timeout_seconds is None or int(self.vllm_startup_timeout_seconds) <= 0:
+                    object.__setattr__(
+                        self,
+                        "vllm_startup_timeout_seconds",
+                        DEFAULT_DURABLE_GEMMA_E4B_VLLM_STARTUP_TIMEOUT_SECONDS,
+                    )
 
     @property
     def effective_max_context_tokens(self) -> int:
@@ -356,7 +397,6 @@ class VastAPI:
         payload = {
             "limit": max(1, int(config.offer_limit)),
             "type": "ondemand",
-            "verified": {"eq": True},
             "rentable": {"eq": True},
             "rented": {"eq": False},
             "num_gpus": {"eq": 1},
@@ -366,6 +406,8 @@ class VastAPI:
             "reliability": {"gte": float(config.min_reliability)},
             "inet_down": {"gte": float(config.min_inet_down_mbps)},
         }
+        if not model_requires_rtx_5060_ti_gemma_policy(config.model):
+            payload["verified"] = {"eq": True}
         response = self._request_with_retries("post", "/bundles/", json=payload)
         response.raise_for_status()
         body = response.json()
@@ -584,6 +626,48 @@ def offer_supports_minimum_cuda(offer: dict[str, Any], minimum_cuda_max_good: fl
     return _float_value(offer, "cuda_max_good") >= float(minimum_cuda_max_good)
 
 
+def model_requires_rtx_5060_ti_gemma_policy(model: str | None) -> bool:
+    return normalized_model_lookup_key(model) == "google/gemma-4-e4b-it"
+
+
+def _normalized_offer_gpu_name(offer: Mapping[str, Any]) -> str:
+    return " ".join(str(offer.get("gpu_name") or "").strip().lower().split())
+
+
+def offer_direct_port_capacity(offer: Mapping[str, Any]) -> int | None:
+    for key in ("direct_port_count", "direct_ports_count", "available_direct_ports", "open_port_count"):
+        if key in offer:
+            value = _int_value(dict(offer), key, default=-1)
+            return value if value >= 0 else 0
+    for key in ("direct_ports", "ports"):
+        value = offer.get(key)
+        if isinstance(value, (list, tuple, set, dict)):
+            return len(value)
+    return None
+
+
+def offer_supports_required_direct_ports(offer: Mapping[str, Any], required_count: int) -> bool:
+    capacity = offer_direct_port_capacity(offer)
+    if capacity is None:
+        return True
+    return capacity >= max(0, int(required_count))
+
+
+def offer_supports_rtx_5060_ti_gemma_policy(offer: dict[str, Any], *, model: str | None = None) -> bool:
+    if not model_requires_rtx_5060_ti_gemma_policy(model):
+        return True
+    gpu_name = _normalized_offer_gpu_name(offer)
+    gpu_ram_gb = _float_value(offer, "gpu_ram") / 1024.0
+    disk_space_gb = _float_value(offer, "disk_space")
+    if not ("5060" in gpu_name and "ti" in gpu_name):
+        return False
+    if gpu_ram_gb < 15.0 or gpu_ram_gb > 17.9:
+        return False
+    if "disk_space" in offer and disk_space_gb < DEFAULT_DISK_GB:
+        return False
+    return offer_supports_required_direct_ports(offer, 2)
+
+
 def choose_cheapest_offer(offers: list[dict[str, Any]], *, max_price: float, model: str | None = None) -> dict[str, Any]:
     return affordable_offers(offers, max_price=max_price, min_cuda_max_good=None, model=model)[0]
 
@@ -610,8 +694,17 @@ def affordable_offers(
             f"No suitable Vast offers were available at or below ${max_price:.2f}/hr "
             f"after requiring cuda_max_good >= {float(min_cuda_max_good):.1f}."
         )
+    runtime_supported = [
+        offer for offer in supported if offer_supports_rtx_5060_ti_gemma_policy(offer, model=model)
+    ]
+    if not runtime_supported:
+        raise VastSmokeError(
+            f"No suitable Vast offers were available at or below ${max_price:.2f}/hr "
+            "after requiring an RTX 5060 Ti 16GB host with enough disk and direct ports "
+            "for google/gemma-4-E4B-it."
+        )
     return sorted(
-        supported,
+        runtime_supported,
         key=lambda offer: offer_readiness_sort_key(offer, model=model),
     )
 
@@ -620,8 +713,6 @@ def build_launch_env(config: VastSmokeConfig) -> dict[str, str]:
     env = {
         "-p 8000:8000": "1",
         f"-p {DEFAULT_STARTUP_STATUS_PORT}:{DEFAULT_STARTUP_STATUS_PORT}": "1",
-        "RUN_MODE": "serve_only",
-        "START_NODE_AGENT": "false",
         "VLLM_MODEL": config.model,
         "SUPPORTED_MODELS": config.model,
         "MAX_CONTEXT_TOKENS": str(config.effective_max_context_tokens),
@@ -629,6 +720,56 @@ def build_launch_env(config: VastSmokeConfig) -> dict[str, str]:
         "STARTUP_STATUS_PORT": str(DEFAULT_STARTUP_STATUS_PORT),
         "STARTUP_STATUS_ENDPOINT_PATH": DEFAULT_STARTUP_STATUS_ENDPOINT_PATH,
     }
+    if config.durable_node:
+        env.update(
+            {
+                "RUN_MODE": "full",
+                "START_NODE_AGENT": "true",
+                "START_VLLM": "true",
+                "EDGE_CONTROL_URL": str(config.edge_control_url).strip(),
+                "NODE_ID": str(config.node_id).strip(),
+                "NODE_KEY": str(config.node_key).strip(),
+                "NODE_LABEL": config.label,
+                "NODE_REGION": str(config.node_region or DEFAULT_DURABLE_NODE_REGION).strip(),
+                "TRUST_TIER": "standard",
+                "RESTRICTED_CAPABLE": "false",
+                "ATTESTATION_PROVIDER": "simulated",
+                "RUNTIME_PROFILE": str(config.runtime_profile or DEFAULT_DURABLE_RUNTIME_PROFILE).strip(),
+                "DEPLOYMENT_TARGET": "vast_ai",
+                "INFERENCE_ENGINE": "vllm",
+                "RUNTIME_IMAGE": config.image,
+                "DOCKER_IMAGE": config.image,
+                "CAPACITY_CLASS": "elastic_burst",
+                "TEMPORARY_NODE": "false",
+                "DISABLE_PUBLIC_BOOTSTRAP_FALLBACK": "true",
+                "BURST_PROVIDER": "vast_ai",
+                "GPU_NAME": "RTX 5060 Ti",
+                "GPU_MEMORY_GB": "16",
+                "MAX_BATCH_TOKENS": str(max(1, int(config.max_batch_tokens))),
+                "MAX_CONCURRENT_ASSIGNMENTS": str(max(1, int(config.max_concurrent_assignments))),
+                "MAX_CONCURRENT_ASSIGNMENTS_CAP": str(max(1, int(config.max_concurrent_assignments))),
+                "MAX_LOCAL_QUEUE_ASSIGNMENTS": str(max(1, int(config.max_local_queue_assignments))),
+                "PULL_BUNDLE_SIZE": str(max(1, int(config.pull_bundle_size))),
+                "VLLM_STARTUP_TIMEOUT_SECONDS": str(
+                    max(1, int(config.vllm_startup_timeout_seconds or DEFAULT_DURABLE_GEMMA_E4B_VLLM_STARTUP_TIMEOUT_SECONDS))
+                ),
+                "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS": "1",
+                "HEAT_GOVERNOR_MODE": "100",
+                "TARGET_GPU_UTILIZATION_PCT": "100",
+                "THERMAL_HEADROOM": "0.95",
+                "OWNER_OBJECTIVE": "earnings_only",
+                "GPU_POWER_LIMIT_ENABLED": "false",
+                "MIN_GPU_MEMORY_HEADROOM_PCT": "5",
+                "ALLOW_HIGH_GPU_MEMORY_PRESSURE": "true",
+            }
+        )
+    else:
+        env.update(
+            {
+                "RUN_MODE": "serve_only",
+                "START_NODE_AGENT": "false",
+            }
+        )
     if config.hf_token:
         env["HUGGING_FACE_HUB_TOKEN"] = config.hf_token
     if str(config.vllm_extra_args or "").strip():
@@ -1447,8 +1588,15 @@ class VastSmokeRunner:
                 "image": config.image,
                 "api": config.api_kind,
                 "runtype": config.runtype,
-                "run_mode": "serve_only",
+                "run_mode": "full" if config.durable_node else "serve_only",
+                "durable_node": config.durable_node,
                 "max_context_tokens": config.effective_max_context_tokens,
+                "max_batch_tokens": config.max_batch_tokens if config.durable_node else None,
+                "max_concurrent_assignments": config.max_concurrent_assignments if config.durable_node else None,
+                "max_local_queue_assignments": config.max_local_queue_assignments if config.durable_node else None,
+                "pull_bundle_size": config.pull_bundle_size if config.durable_node else None,
+                "node_region": config.node_region if config.durable_node else None,
+                "runtime_profile": config.runtime_profile if config.durable_node else None,
                 "min_cuda_max_good": config.min_cuda_max_good,
                 "expected_api_path": config.smoke_test_api_path,
                 "readiness_path": DEFAULT_MODELS_PATH,
@@ -1635,7 +1783,9 @@ class VastSmokeRunner:
             report["error"] = str(error) or error.__class__.__name__
         finally:
             cleanup_error: str | None = None
-            if instance_id is not None:
+            if instance_id is not None and config.durable_node and report.get("status") == "ok":
+                report["cleanup"] = {"destroyed": False, "kept_alive": True, "instance_id": instance_id}
+            elif instance_id is not None:
                 try:
                     self.api.destroy_instance(instance_id)
                     report["cleanup"] = {"destroyed": True, "instance_id": instance_id}
@@ -1695,6 +1845,37 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--api", choices=("auto", "embeddings", "responses", "chat_completions"), default="auto", help="Smoke probe type to run after /v1/models succeeds.")
     parser.add_argument("--runtype", default=DEFAULT_VAST_LAUNCH_PROFILE.runtype, help="Vast runtype to use. Defaults to the runtime profile launch metadata.")
     parser.add_argument("--max-context-tokens", type=int, default=32768, help="Requested max context tokens before model-safe clamping.")
+    parser.add_argument("--durable-node", action="store_true", help="Launch full node-agent mode and keep the Vast instance alive after smoke success.")
+    parser.add_argument("--edge-control-url", default="", help="Control-plane URL for durable node mode. Defaults to EDGE_CONTROL_URL or AUTONOMOUSC_EDGE_BASE_URL.")
+    parser.add_argument("--node-id", default="", help="Pre-registered AUTONOMOUSc node id for durable node mode. Defaults to NODE_ID.")
+    parser.add_argument("--node-key", default="", help="Pre-registered AUTONOMOUSc node key for durable node mode. Defaults to NODE_KEY.")
+    parser.add_argument("--node-region", default=DEFAULT_DURABLE_NODE_REGION, help="Concrete scheduler region for durable node mode.")
+    parser.add_argument("--runtime-profile", default=DEFAULT_DURABLE_RUNTIME_PROFILE, help="Runtime profile advertised by durable node mode.")
+    parser.add_argument("--max-batch-tokens", type=int, default=DEFAULT_DURABLE_MAX_BATCH_TOKENS, help="Durable node assignment token budget cap.")
+    parser.add_argument(
+        "--max-concurrent-assignments",
+        type=int,
+        default=DEFAULT_DURABLE_MAX_CONCURRENT_ASSIGNMENTS,
+        help="Durable node advertised assignment concurrency.",
+    )
+    parser.add_argument(
+        "--max-local-queue-assignments",
+        type=int,
+        default=DEFAULT_DURABLE_MAX_LOCAL_QUEUE_ASSIGNMENTS,
+        help="Durable node local reservoir target for assignment prefetch.",
+    )
+    parser.add_argument(
+        "--pull-bundle-size",
+        type=int,
+        default=DEFAULT_DURABLE_PULL_BUNDLE_SIZE,
+        help="Durable node scheduler pull bundle target for keeping the GPU fed.",
+    )
+    parser.add_argument(
+        "--vllm-startup-timeout-seconds",
+        type=int,
+        default=0,
+        help="Local vLLM warmup timeout passed into the launched container. Durable Gemma defaults to 1800.",
+    )
     parser.add_argument(
         "--benchmark-requests",
         type=int,
@@ -1746,9 +1927,30 @@ def build_config_from_args(args: argparse.Namespace) -> VastSmokeConfig:
         os.getenv("HF_TOKEN"),
         _config_value(config_values, "hf_token", "hugging_face_hub_token"),
     )
+    durable_node = bool(getattr(args, "durable_node", False))
+    edge_control_url = first_nonempty(
+        str(getattr(args, "edge_control_url", "") or ""),
+        os.getenv("EDGE_CONTROL_URL"),
+        os.getenv("AUTONOMOUSC_EDGE_BASE_URL"),
+        _config_value(config_values, "edge_control_url", "autonomousc_edge_base_url"),
+    )
+    node_id = first_nonempty(
+        str(getattr(args, "node_id", "") or ""),
+        os.getenv("NODE_ID"),
+        _config_value(config_values, "node_id"),
+    )
+    node_key = first_nonempty(
+        str(getattr(args, "node_key", "") or ""),
+        os.getenv("NODE_KEY"),
+        _config_value(config_values, "node_key"),
+    )
+    vllm_extra_args = str(args.vllm_extra_args or "").strip()
+    model = str(args.model).strip() or DEFAULT_VAST_SMOKE_MODEL
+    if durable_node and not vllm_extra_args and normalized_model_lookup_key(model) == "google/gemma-4-e4b-it":
+        vllm_extra_args = DEFAULT_GEMMA_E4B_VLLM_EXTRA_ARGS
     return VastSmokeConfig(
         api_key=api_key,
-        model=str(args.model).strip() or DEFAULT_VAST_SMOKE_MODEL,
+        model=model,
         runtype=str(args.runtype).strip() or DEFAULT_VAST_LAUNCH_PROFILE.runtype,
         max_price=float(args.max_price),
         image=str(args.image).strip() or DEFAULT_VAST_SMOKE_IMAGE,
@@ -1771,7 +1973,31 @@ def build_config_from_args(args: argparse.Namespace) -> VastSmokeConfig:
         benchmark_requests=max(0, int(args.benchmark_requests)),
         benchmark_concurrency=max(1, int(args.benchmark_concurrency)),
         benchmark_profile=benchmark_profile_name(str(args.benchmark_profile or DEFAULT_BENCHMARK_PROFILE)),
-        vllm_extra_args=str(args.vllm_extra_args or "").strip(),
+        vllm_extra_args=vllm_extra_args,
+        durable_node=durable_node,
+        edge_control_url=edge_control_url,
+        node_id=node_id,
+        node_key=node_key,
+        node_region=str(getattr(args, "node_region", DEFAULT_DURABLE_NODE_REGION) or DEFAULT_DURABLE_NODE_REGION).strip(),
+        runtime_profile=str(getattr(args, "runtime_profile", DEFAULT_DURABLE_RUNTIME_PROFILE) or DEFAULT_DURABLE_RUNTIME_PROFILE).strip(),
+        max_batch_tokens=max(1, int(getattr(args, "max_batch_tokens", DEFAULT_DURABLE_MAX_BATCH_TOKENS))),
+        max_concurrent_assignments=max(
+            1,
+            int(getattr(args, "max_concurrent_assignments", DEFAULT_DURABLE_MAX_CONCURRENT_ASSIGNMENTS)),
+        ),
+        max_local_queue_assignments=max(
+            1,
+            int(getattr(args, "max_local_queue_assignments", DEFAULT_DURABLE_MAX_LOCAL_QUEUE_ASSIGNMENTS)),
+        ),
+        pull_bundle_size=max(
+            1,
+            int(getattr(args, "pull_bundle_size", DEFAULT_DURABLE_PULL_BUNDLE_SIZE)),
+        ),
+        vllm_startup_timeout_seconds=(
+            max(1, int(getattr(args, "vllm_startup_timeout_seconds", 0)))
+            if int(getattr(args, "vllm_startup_timeout_seconds", 0) or 0) > 0
+            else None
+        ),
     )
 
 

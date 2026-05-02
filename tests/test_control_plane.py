@@ -106,6 +106,8 @@ def build_settings(credentials_path: Path, operator_token: str | None):
         credentials_path=str(credentials_path),
         control_plane_state_path=str(credentials_path.parent / "control-plane-state.json"),
         operator_token=operator_token,
+        node_session_id="session_test_123",
+        boot_id="boot_test_123",
     )
 
 
@@ -283,6 +285,8 @@ def test_heartbeat_reports_current_model(monkeypatch: pytest.MonkeyPatch, tmp_pa
 
     path, payload = recording_client.calls[0]
     assert path == "/nodes/heartbeat"
+    assert payload["node_session_id"] == "session_test_123"
+    assert payload["boot_id"] == "boot_test_123"
     assert payload["runtime"]["current_model"] == "meta-llama/Llama-3.1-8B-Instruct"
     assert payload["capabilities"]["max_concurrent_assignments"] == settings.max_concurrent_assignments
     assert payload["capabilities"]["max_concurrent_assignments_embeddings"] == 4
@@ -402,6 +406,8 @@ def test_pull_assignments_sends_limit_and_active_ids(tmp_path: Path):
     assert client.last_control_plane_queue_depth == 7
     path, payload = pull_client.calls[0]
     assert path == "/nodes/assignments/pull"
+    assert payload["node_session_id"] == "session_test_123"
+    assert payload["boot_id"] == "boot_test_123"
     assert payload["limit"] == 2
     assert payload["active_assignment_ids"] == ["assign_running"]
 
@@ -918,6 +924,26 @@ def test_transport_retries_transient_connect_errors(monkeypatch: pytest.MonkeyPa
     assert retry_client.calls[0][1] == "/nodes/heartbeat"
 
 
+def test_transport_includes_control_plane_error_body(tmp_path: Path):
+    class ErrorBodyClient:
+        def request(self, method: str, path: str, **kwargs):
+            request = httpx.Request(method, f"http://localhost:8787{path}")
+            return httpx.Response(
+                400,
+                request=request,
+                json={"error": {"code": "invalid_request", "message": "capabilities.max_pull_bundle_assignments: Number must be greater than 0"}},
+            )
+
+    transport = EdgeControlTransport(build_settings(tmp_path / "credentials" / "node.json", operator_token="operator_token"))
+    transport.client = ErrorBodyClient()
+
+    with pytest.raises(httpx.HTTPStatusError) as error:
+        transport.post_json("/nodes/heartbeat", {"node_id": "node_123"})
+
+    assert "Response body:" in str(error.value)
+    assert "max_pull_bundle_assignments" in str(error.value)
+
+
 def test_transport_fault_injection_marks_dns_flap_as_degraded(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1134,6 +1160,8 @@ def test_complete_assignment_uploads_result_artifact_before_completion(
     assert upload_plan_path == "/nodes/assignments/assign_123/result-artifact/upload-url"
     assert upload_plan_payload["node_id"] == "node_123"
     assert upload_plan_payload["node_key"] == "key_123456789012345678901234"
+    assert upload_plan_payload["node_session_id"] == "session_test_123"
+    assert upload_plan_payload["boot_id"] == "boot_test_123"
     assert len(uploads) == 1
     upload_path, ciphertext, headers = uploads[0]
     assert upload_path.startswith(
@@ -1159,6 +1187,8 @@ def test_complete_assignment_uploads_result_artifact_before_completion(
             {
                 "node_id": "node_123",
                 "node_key": "key_123456789012345678901234",
+                "node_session_id": "session_test_123",
+                "boot_id": "boot_test_123",
                 "runtime_receipt": runtime_receipt,
                 "result_artifact": {
                     "result_artifact_key": "provider-executions/pexec_123/result-aabbcc.json.enc",
@@ -1363,6 +1393,8 @@ def test_complete_assignment_falls_back_to_worker_uploaded_artifact_when_direct_
     assert proxy_path == "/nodes/assignments/assign_123/result-artifact"
     assert headers["x-node-id"] == "node_123"
     assert headers["x-node-key"] == "key_123456789012345678901234"
+    assert headers["x-node-session-id"] == "session_test_123"
+    assert headers["x-boot-id"] == "boot_test_123"
     assert headers["x-artifact-ciphertext-sha256"] == hashlib.sha256(ciphertext).hexdigest()
     decrypted = decrypt_artifact(
         ciphertext,
@@ -1379,6 +1411,8 @@ def test_complete_assignment_falls_back_to_worker_uploaded_artifact_when_direct_
             {
                 "node_id": "node_123",
                 "node_key": "key_123456789012345678901234",
+                "node_session_id": "session_test_123",
+                "boot_id": "boot_test_123",
                 "runtime_receipt": runtime_receipt,
                 "result_artifact": {
                     "result_artifact_key": "provider-executions/pexec_123/result.json.enc",

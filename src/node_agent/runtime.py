@@ -121,13 +121,78 @@ class VLLMRuntime:
             )
         return output_by_assignment
 
+    @staticmethod
+    def _positive_int(value: Any) -> int | None:
+        try:
+            parsed = int(float(str(value).strip()))
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
+
+    @staticmethod
+    def _optional_number(value: Any) -> float | int | None:
+        if value is None:
+            return None
+        try:
+            parsed = float(str(value).strip())
+        except (TypeError, ValueError):
+            return None
+        return int(parsed) if parsed.is_integer() else parsed
+
+    @staticmethod
+    def _messages_from_response_input(item_input: Any) -> list[dict[str, Any]]:
+        if isinstance(item_input, dict):
+            messages = item_input.get("messages")
+            if isinstance(messages, list) and messages:
+                return [message for message in messages if isinstance(message, dict)]
+
+            raw_input = item_input.get("input", item_input)
+            if isinstance(raw_input, str):
+                return [{"role": "user", "content": raw_input}]
+            if (
+                isinstance(raw_input, list)
+                and raw_input
+                and all(isinstance(entry, dict) and "role" in entry and "content" in entry for entry in raw_input)
+            ):
+                return [entry for entry in raw_input if isinstance(entry, dict)]
+            return [{"role": "user", "content": str(raw_input)}]
+        if isinstance(item_input, str):
+            return [{"role": "user", "content": item_input}]
+        return [{"role": "user", "content": str(item_input)}]
+
+    def _chat_completion_request(self, model: str, item_input: Any) -> dict[str, Any]:
+        request: dict[str, Any] = {
+            "model": model,
+            "messages": self._messages_from_response_input(item_input),
+        }
+        if isinstance(item_input, dict):
+            max_tokens = (
+                self._positive_int(item_input.get("max_tokens"))
+                or self._positive_int(item_input.get("max_completion_tokens"))
+                or self._positive_int(item_input.get("max_output_tokens"))
+            )
+            if max_tokens is not None:
+                request["max_tokens"] = max_tokens
+            for source_key, target_key in (
+                ("temperature", "temperature"),
+                ("top_p", "top_p"),
+                ("frequency_penalty", "frequency_penalty"),
+                ("presence_penalty", "presence_penalty"),
+            ):
+                value = self._optional_number(item_input.get(source_key))
+                if value is not None:
+                    request[target_key] = value
+            if "stop" in item_input:
+                request["stop"] = item_input["stop"]
+            if isinstance(item_input.get("response_format"), dict):
+                request["response_format"] = item_input["response_format"]
+        return request
+
     def _response_result(self, model: str, item: dict[str, Any]) -> dict[str, Any]:
+        request = self._chat_completion_request(model, item["input"])
         response = self.client.post(
             "/v1/chat/completions",
-            json={
-                "model": model,
-                "messages": item["input"].get("messages", [{"role": "user", "content": str(item["input"])}]),
-            },
+            json=request,
         )
         response.raise_for_status()
         payload = response.json()

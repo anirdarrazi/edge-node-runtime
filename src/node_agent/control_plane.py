@@ -146,6 +146,7 @@ class EdgeControlClient:
             max_microbatch_assignments=embedding_microbatch_limit,
             override=getattr(self.settings, "max_local_queue_assignments", None),
         )
+        pull_bundle_limit = max(local_queue_limit, self.settings.pull_bundle_size)
         payload = {
             "supported_models": [model.strip() for model in self.settings.supported_models.split(",") if model.strip()],
             "operations": list(runtime_profile.supported_apis),
@@ -155,7 +156,7 @@ class EdgeControlClient:
             "max_batch_tokens": self.settings.max_batch_tokens,
             "max_concurrent_assignments": self.settings.max_concurrent_assignments,
             "max_local_queue_assignments": local_queue_limit,
-            "max_pull_bundle_assignments": local_queue_limit,
+            "max_pull_bundle_assignments": pull_bundle_limit,
             "heat_governor_mode": self.settings.heat_governor_mode,
             "thermal_headroom": self.settings.thermal_headroom,
             "heat_demand": self.settings.heat_demand,
@@ -306,6 +307,24 @@ class EdgeControlClient:
     def require_credentials(self) -> tuple[str, str]:
         return self.bootstrapper.require_credentials()
 
+    def _node_identity_payload(self) -> dict[str, Any]:
+        node_id, node_key = self.require_credentials()
+        return {
+            "node_id": node_id,
+            "node_key": node_key,
+            "node_session_id": self.settings.resolved_node_session_id,
+            "boot_id": self.settings.boot_id,
+        }
+
+    def _node_identity_headers(self) -> dict[str, str]:
+        identity = self._node_identity_payload()
+        return {
+            "x-node-id": str(identity["node_id"]),
+            "x-node-key": str(identity["node_key"]),
+            "x-node-session-id": str(identity["node_session_id"]),
+            "x-boot-id": str(identity["boot_id"]),
+        }
+
     def clear_credentials(self) -> None:
         self.credentials.clear_credentials()
 
@@ -399,8 +418,7 @@ class EdgeControlClient:
         include_runtime: bool = True,
     ) -> None:
         payload: dict[str, Any] = {
-            "node_id": self.settings.node_id,
-            "node_key": self.settings.node_key,
+            **self._node_identity_payload(),
             "status": status,
             "queue_depth": queue_depth,
             "active_assignments": active_assignments,
@@ -455,8 +473,7 @@ class EdgeControlClient:
         payload = self.transport.post_json(
             "/nodes/assignments/pull",
             {
-                "node_id": self.settings.node_id,
-                "node_key": self.settings.node_key,
+                **self._node_identity_payload(),
                 "limit": limit,
                 "active_assignment_ids": active_assignment_ids or [],
             },
@@ -475,15 +492,14 @@ class EdgeControlClient:
     def accept_assignment(self, assignment_id: str) -> None:
         self.transport.post_json(
             f"/nodes/assignments/{assignment_id}/accept",
-            {"node_id": self.settings.node_id, "node_key": self.settings.node_key},
+            self._node_identity_payload(),
         )
 
     def report_progress(self, assignment_id: str, progress: dict[str, Any]) -> None:
         self.transport.post_json(
             f"/nodes/assignments/{assignment_id}/progress",
             {
-                "node_id": self.settings.node_id,
-                "node_key": self.settings.node_key,
+                **self._node_identity_payload(),
                 "progress": progress,
             },
         )
@@ -495,8 +511,7 @@ class EdgeControlClient:
         self.transport.post_json(
             "/nodes/assignments/touch",
             {
-                "node_id": self.settings.node_id,
-                "node_key": self.settings.node_key,
+                **self._node_identity_payload(),
                 "assignment_ids": normalized_assignment_ids,
             },
         )
@@ -515,13 +530,9 @@ class EdgeControlClient:
         return remaining_seconds <= ARTIFACT_URL_REFRESH_THRESHOLD_SECONDS
 
     def refresh_input_artifact_url(self, assignment_id: str) -> dict[str, Any]:
-        node_id, node_key = self.require_credentials()
         return self.transport.post_json(
             f"/nodes/assignments/{assignment_id}/input-artifact-url",
-            {
-                "node_id": node_id,
-                "node_key": node_key,
-            },
+            self._node_identity_payload(),
         )
 
     def _request_result_artifact_upload_plan(
@@ -529,12 +540,10 @@ class EdgeControlClient:
         assignment_id: str,
         encrypted_artifact: dict[str, Any],
     ) -> dict[str, Any]:
-        node_id, node_key = self.require_credentials()
         return self.transport.post_json(
             f"/nodes/assignments/{assignment_id}/result-artifact/upload-url",
             {
-                "node_id": node_id,
-                "node_key": node_key,
+                **self._node_identity_payload(),
                 "ciphertext_sha256": encrypted_artifact["ciphertext_sha256"],
                 "plaintext_sha256": encrypted_artifact["plaintext_sha256"],
                 "content_length_bytes": len(encrypted_artifact["ciphertext"]),
@@ -679,7 +688,6 @@ class EdgeControlClient:
         item_results: list[dict[str, Any]],
         runtime_receipt: dict[str, Any] | None = None,
     ) -> None:
-        node_id, node_key = self.require_credentials()
         result_payload = {"item_results": item_results}
         encrypted_artifact = encrypt_artifact(result_payload)
         try:
@@ -692,8 +700,7 @@ class EdgeControlClient:
                 encrypted_artifact["ciphertext"],
                 headers={
                     "content-type": "application/octet-stream",
-                    "x-node-id": node_id,
-                    "x-node-key": node_key,
+                    **self._node_identity_headers(),
                     "x-artifact-ciphertext-sha256": encrypted_artifact["ciphertext_sha256"],
                     "x-artifact-plaintext-sha256": encrypted_artifact["plaintext_sha256"],
                     "x-artifact-key-b64": encrypted_artifact["encryption"]["key_b64"],
@@ -705,8 +712,7 @@ class EdgeControlClient:
         self.transport.post_json(
             f"/nodes/assignments/{assignment_id}/complete",
             {
-                "node_id": node_id,
-                "node_key": node_key,
+                **self._node_identity_payload(),
                 "runtime_receipt": runtime_receipt,
                 "result_artifact": result_artifact,
             },
@@ -716,8 +722,7 @@ class EdgeControlClient:
         self.transport.post_json(
             f"/nodes/assignments/{assignment_id}/fail",
             {
-                "node_id": self.settings.node_id,
-                "node_key": self.settings.node_key,
+                **self._node_identity_payload(),
                 "error": {"code": code, "message": message, "retryable": retryable},
             },
         )

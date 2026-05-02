@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -40,6 +41,8 @@ class NodeAgentSettings(BaseSettings):
     restricted_capable: bool = True
     node_id: str | None = None
     node_key: str | None = None
+    node_session_id: str | None = None
+    boot_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
     credentials_path: str = "/var/lib/autonomousc/credentials/node-credentials.json"
     attestation_state_path: str = "/var/lib/autonomousc/credentials/attestation-state.json"
     recovery_note_path: str = "/var/lib/autonomousc/credentials/recovery-note.txt"
@@ -83,6 +86,7 @@ class NodeAgentSettings(BaseSettings):
     max_context_tokens: int = 32768
     max_batch_tokens: int = 50000
     max_concurrent_assignments: int = 2
+    max_concurrent_assignments_cap: int | None = None
     max_concurrent_assignments_embeddings: int | None = None
     max_microbatch_assignments_embeddings: int | None = None
     max_local_queue_assignments: int | None = None
@@ -94,6 +98,7 @@ class NodeAgentSettings(BaseSettings):
     owner_objective: Literal["balanced", "earnings_only", "heat_first"] = "balanced"
     target_gpu_utilization_pct: int = 100
     min_gpu_memory_headroom_pct: float = 20.0
+    allow_high_gpu_memory_pressure: bool = False
     thermal_headroom: float = 0.8
     heat_demand: Literal["none", "low", "medium", "high"] = "none"
     room_temp_c: float | None = None
@@ -124,6 +129,7 @@ class NodeAgentSettings(BaseSettings):
         "operator_token",
         "node_id",
         "node_key",
+        "node_session_id",
         "edge_control_fallback_urls",
         "artifact_mirror_base_urls",
         "inference_base_url",
@@ -175,6 +181,13 @@ class NodeAgentSettings(BaseSettings):
         except (TypeError, ValueError):
             return 100
         return min(100, max(30, parsed))
+
+    @field_validator("boot_id", mode="before")
+    @classmethod
+    def _default_blank_boot_id(cls, value: Any) -> str:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return uuid.uuid4().hex
+        return str(value).strip()
 
     @field_validator("heat_governor_mode", mode="before")
     @classmethod
@@ -346,10 +359,16 @@ class NodeAgentSettings(BaseSettings):
     def supports_trusted_assignments(self) -> bool:
         return self.resolved_runtime_profile.supports_trusted_assignments
 
+    @property
+    def resolved_node_session_id(self) -> str:
+        configured = (self.node_session_id or "").strip()
+        return configured or self.boot_id
+
 
 class AssignmentEnvelope(BaseModel):
     assignment_id: str
     execution_id: str
+    node_session_id: str | None = None
     assignment_nonce: str
     operation: str
     model: str

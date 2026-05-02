@@ -41,6 +41,37 @@ def test_response_result_shape():
     assert result["usage"]["total_tokens"] == 15
 
 
+def test_response_result_maps_responses_generation_controls_to_chat_completions():
+    runtime = VLLMRuntime("http://localhost")
+    runtime.client = DummyClient()
+    runtime.execute(
+        "responses",
+        "google/gemma-4-E4B-it",
+        [
+            {
+                "batch_item_id": "item_1",
+                "customer_item_id": "cust_1",
+                "input": {
+                    "input": "Return exactly ok",
+                    "max_output_tokens": 12,
+                    "temperature": 0,
+                    "top_p": 0.8,
+                },
+            }
+        ],
+    )
+    assert runtime.client.calls[0] == (
+        "/v1/chat/completions",
+        {
+            "model": "google/gemma-4-E4B-it",
+            "messages": [{"role": "user", "content": "Return exactly ok"}],
+            "max_tokens": 12,
+            "temperature": 0,
+            "top_p": 0.8,
+        },
+    )
+
+
 def test_embedding_result_unwraps_texts_input_shape():
     runtime = VLLMRuntime("http://localhost")
     runtime.client = DummyClient()

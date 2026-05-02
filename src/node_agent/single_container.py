@@ -484,6 +484,16 @@ def force_when_blank_or(values: MutableMapping[str, str], name: str, default: st
         values[name] = default
 
 
+def should_preserve_explicit_persistent_node(values: Mapping[str, str]) -> bool:
+    if env_bool_from_mapping(values, "TEMPORARY_NODE", True):
+        return False
+    return (
+        normalize_run_mode(values.get("RUN_MODE")) == DEFAULT_RUN_MODE
+        and bool(str(values.get("NODE_ID") or "").strip())
+        and bool(str(values.get("NODE_KEY") or "").strip())
+    )
+
+
 def configured_hugging_face_token(values: Mapping[str, str]) -> str | None:
     for key in ("HUGGING_FACE_HUB_TOKEN", "HF_TOKEN"):
         token = str(values.get(key, "")).strip()
@@ -517,8 +527,18 @@ def low_vram_bootstrap_fallback_applies(
     return True
 
 
+def public_bootstrap_fallback_disabled(values: Mapping[str, str]) -> bool:
+    return env_bool_from_mapping(values, "DISABLE_PUBLIC_BOOTSTRAP_FALLBACK", False) or not env_bool_from_mapping(
+        values,
+        "ALLOW_PUBLIC_BOOTSTRAP_FALLBACK",
+        True,
+    )
+
+
 def should_use_public_bootstrap(values: Mapping[str, str], current_model: str) -> tuple[bool, list[str]]:
     reasons: list[str] = []
+    if public_bootstrap_fallback_disabled(values):
+        return False, reasons
     if requires_gated_hugging_face_access(current_model) and not hugging_face_token_configured(values):
         reasons.append(
             f"no Hugging Face token is configured for the gated startup model {current_model}"
@@ -580,7 +600,10 @@ def apply_single_container_runtime_defaults(
     force_when_blank_or(values, "DEPLOYMENT_TARGET", "vast_ai", {"auto", "home_edge"})
     force_when_blank_or(values, "INFERENCE_ENGINE", "vllm", {"auto", "llama_cpp"})
     force_when_blank_or(values, "CAPACITY_CLASS", "elastic_burst", {"home_heat", "generic"})
-    force_when_blank_or(values, "TEMPORARY_NODE", "true", {"false", "0", "no", "off"})
+    if should_preserve_explicit_persistent_node(values):
+        values["TEMPORARY_NODE"] = "false"
+    else:
+        force_when_blank_or(values, "TEMPORARY_NODE", "true", {"false", "0", "no", "off"})
     force_when_blank_or(values, "BURST_PROVIDER", "vast_ai", set())
     force_when_blank_or(values, "BURST_LEASE_PHASE", "accept_burst_work", set())
     force_when_blank_or(values, "BURST_COST_CEILING_USD", "0.25", set())

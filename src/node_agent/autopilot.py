@@ -38,6 +38,7 @@ MAX_TARGET_GPU_UTILIZATION_PCT = 100
 MIN_GPU_MEMORY_HEADROOM_PCT = 5.0
 MAX_GPU_MEMORY_HEADROOM_PCT = 60.0
 OOM_FAILURE_CODES = {"gpu_oom"}
+SOFT_CONCURRENCY_CONSTRAINTS = {"latency_spike"}
 LATENCY_SPIKE_FLOOR_SECONDS = 45.0
 LATENCY_SPIKE_RATIO = 1.8
 RECENT_MODEL_MIX_DECAY = 0.82
@@ -419,6 +420,15 @@ class AutopilotController:
         memory.updated_at = now_iso()
         return memory
 
+    def clear_soft_concurrency_ceiling(self, *, model: str) -> ModelConcurrencyMemory:
+        memory = self.concurrency_memory(model)
+        if memory.last_constraint in SOFT_CONCURRENCY_CONSTRAINTS:
+            memory.learned_ceiling = None
+            memory.last_constraint = None
+            memory.last_limit = None
+            memory.updated_at = now_iso()
+        return memory
+
     def record_successful_concurrency(self, *, model: str, concurrency: int) -> ModelConcurrencyMemory:
         memory = self.concurrency_memory(model)
         normalized_concurrency = max(1, int(concurrency))
@@ -564,14 +574,44 @@ class AutopilotController:
                 return 7
             return 10
         if gpu_memory_gb < 12:
-            return 1
-        if gpu_memory_gb < 16:
-            return 2
-        if gpu_memory_gb < 24:
-            return 3
-        if gpu_memory_gb < 48:
-            return 5
-        return 6
+            response_ceiling = 1
+        elif gpu_memory_gb < 16:
+            response_ceiling = 2
+        elif gpu_memory_gb < 24:
+            response_ceiling = 3
+        elif gpu_memory_gb < 48:
+            response_ceiling = 5
+        else:
+            response_ceiling = 6
+
+        runtime_profile = str(getattr(settings, "runtime_profile", "") or "").strip()
+        if (
+            runtime_profile == "rtx_5060_ti_16gb_gemma4_e4b"
+            and model.strip().lower() == "google/gemma-4-e4b-it"
+        ):
+            configured_target = max(
+                0,
+                settings_int(settings, "max_concurrent_assignments", 0),
+                settings_int(settings, "max_concurrent_assignments_cap", 0),
+            )
+            if configured_target > response_ceiling:
+                return configured_target
+        return response_ceiling
+
+    @staticmethod
+    def _explicit_profile_concurrency_target(model: str, settings: NodeAgentSettings) -> int | None:
+        runtime_profile = str(getattr(settings, "runtime_profile", "") or "").strip()
+        if (
+            runtime_profile != "rtx_5060_ti_16gb_gemma4_e4b"
+            or model.strip().lower() != "google/gemma-4-e4b-it"
+        ):
+            return None
+        configured_target = max(
+            0,
+            settings_int(settings, "max_concurrent_assignments", 0),
+            settings_int(settings, "max_concurrent_assignments_cap", 0),
+        )
+        return configured_target if configured_target > 0 else None
 
     def configured_target_gpu_utilization_pct(self) -> int:
         return int(
@@ -592,8 +632,15 @@ class AutopilotController:
     def configured_memory_utilization_ceiling_pct(self) -> float:
         return clamp(100.0 - self.configured_min_gpu_memory_headroom_pct(), 40.0, 95.0)
 
+    def configured_concurrency_cap(self) -> int | None:
+        raw_cap = settings_int(self.settings, "max_concurrent_assignments_cap", 0)
+        return max(1, raw_cap) if raw_cap > 0 else None
+
     def dynamic_concurrency_ceiling(self, *, model: str, target_gpu_utilization_pct: int | None = None) -> int:
         safe_ceiling = self._target_concurrency_ceiling_for_model(model, self.settings)
+        configured_cap = self.configured_concurrency_cap()
+        if configured_cap is not None:
+            safe_ceiling = min(safe_ceiling, configured_cap)
         target_gpu_utilization_pct = (
             self.configured_target_gpu_utilization_pct()
             if target_gpu_utilization_pct is None
@@ -750,12 +797,16 @@ class AutopilotController:
         self.heat_governor_plan = heat_governor_plan
         target_gpu_utilization_pct = heat_governor_plan.effective_target_pct
         memory_utilization_ceiling_pct = self.configured_memory_utilization_ceiling_pct()
+        allow_high_gpu_memory_pressure = bool(getattr(self.settings, "allow_high_gpu_memory_pressure", False))
         enough_samples = signals.completed_count + signals.failed_count >= 3
         failure_high = enough_samples and signals.failure_rate >= 0.25
-        pressure_high = (
-            gpu_memory_utilization_pct is not None
-            and gpu_memory_utilization_pct >= memory_utilization_ceiling_pct
-        ) or (pressure is not None and pressure >= 0.92)
+        pressure_high = (not allow_high_gpu_memory_pressure) and (
+            (
+                gpu_memory_utilization_pct is not None
+                and gpu_memory_utilization_pct >= memory_utilization_ceiling_pct
+            )
+            or (pressure is not None and pressure >= 0.92)
+        )
         pressure_critical = (
             gpu_memory_utilization_pct is not None
             and gpu_memory_utilization_pct >= min(99.0, memory_utilization_ceiling_pct + 8.0)
@@ -767,6 +818,7 @@ class AutopilotController:
             and last_latency >= max(LATENCY_SPIKE_FLOOR_SECONDS, latency * LATENCY_SPIKE_RATIO)
         )
         latency_high = latency is not None and latency >= 180
+        latency_pressure = latency_spike or latency_high
         thermal_cap_hit = (
             signals.gpu_temp_c is not None
             and signals.gpu_temp_c >= max(0.0, heat_governor_plan.gpu_temp_limit_c - 2.0)
@@ -779,18 +831,52 @@ class AutopilotController:
             signals.queue_depth >= 1
             or signals.active_assignments >= max(1, previous_recommendation.max_concurrent_assignments)
         )
-        stable = not oom_event and not failure_high and not pressure_high and not latency_high and not latency_spike and not thermal_cap_hit
         hardware_concurrency_ceiling = self._target_concurrency_ceiling_for_model(configured_model, self.settings)
         target_concurrency_ceiling = self.dynamic_concurrency_ceiling(
             model=configured_model,
             target_gpu_utilization_pct=target_gpu_utilization_pct,
         )
         memory = self.concurrency_memory(configured_model)
+        gpu_near_or_above_target = (
+            gpu_utilization_pct is not None
+            and gpu_utilization_pct >= max(0.0, target_gpu_utilization_pct - 8.0)
+        )
+        queued_parallel_pressure = (
+            signals.active_assignments >= 2
+            and signals.queue_depth >= max(2, current_concurrency)
+        )
+        latency_contention = (
+            latency_pressure
+            and current_concurrency > 1
+            and (
+                gpu_near_or_above_target
+                or pressure_high
+                or pressure_critical
+                or (queued_parallel_pressure and gpu_utilization_pct is None)
+            )
+        )
+        if (
+            memory.learned_ceiling is not None
+            and memory.last_constraint in SOFT_CONCURRENCY_CONSTRAINTS
+            and demand_high
+            and not oom_event
+            and not failure_high
+            and not pressure_high
+            and not pressure_critical
+            and not thermal_cap_hit
+            and not latency_contention
+            and (
+                gpu_utilization_pct is None
+                or gpu_utilization_pct <= max(0.0, target_gpu_utilization_pct - 18.0)
+            )
+        ):
+            memory = self.clear_soft_concurrency_ceiling(model=configured_model)
         learned_concurrency_ceiling = self.learned_concurrency_ceiling(
             model=configured_model,
             fallback=hardware_concurrency_ceiling,
         )
         target_concurrency_ceiling = min(target_concurrency_ceiling, learned_concurrency_ceiling)
+        stable = not oom_event and not failure_high and not pressure_high and not latency_contention and not thermal_cap_hit
         bounded_current_concurrency = max(
             0 if heat_governor_plan.paused else 1,
             min(current_concurrency, max(0, target_concurrency_ceiling)) if not heat_governor_plan.paused else 0,
@@ -872,7 +958,7 @@ class AutopilotController:
                 "Autopilot reduced active concurrency because the VRAM headroom floor or OOM-risk guardrail "
                 "was breached."
             )
-        elif latency_spike or latency_high:
+        elif latency_contention:
             memory = self.remember_safe_concurrency(
                 model=configured_model,
                 safe_limit=max(1, current_concurrency - 1),
@@ -1054,6 +1140,15 @@ class AutopilotController:
         )
         effective_concurrency_ceiling = min(dynamic_concurrency_ceiling, learned_concurrency_ceiling)
         memory = self.concurrency_memory(live_model)
+        advertised_concurrency = recommendation.max_concurrent_assignments
+        explicit_profile_target = self._explicit_profile_concurrency_target(live_model, self.settings)
+        if explicit_profile_target is not None and not (
+            self.heat_governor_plan is not None and self.heat_governor_plan.paused
+        ):
+            advertised_concurrency = max(
+                advertised_concurrency,
+                min(explicit_profile_target, effective_concurrency_ceiling),
+            )
         runtime_tuple = resolved_runtime_tuple(
             self.settings,
             live_model,
@@ -1061,9 +1156,9 @@ class AutopilotController:
         )
         embedding_concurrency_limit: int | None = None
         if "embeddings" in live_operations and live_model == DEFAULT_EMBEDDING_MODEL:
-            embedding_concurrency_limit = max(1, recommendation.max_concurrent_assignments)
+            embedding_concurrency_limit = max(1, advertised_concurrency)
         prefetch_concurrency_target = max(
-            recommendation.max_concurrent_assignments,
+            advertised_concurrency,
             effective_concurrency_ceiling,
         )
         embedding_microbatch_limit = resolved_embeddings_microbatch_assignment_limit(
@@ -1079,8 +1174,8 @@ class AutopilotController:
             operations=live_operations,
             gpu_memory_gb=settings_float(self.settings, "gpu_memory_gb", 24.0),
             max_concurrent_assignments=max(
-                recommendation.max_concurrent_assignments,
-                embedding_concurrency_limit or recommendation.max_concurrent_assignments,
+                advertised_concurrency,
+                embedding_concurrency_limit or advertised_concurrency,
             ),
             pull_bundle_size=settings_int(self.settings, "pull_bundle_size", 16),
             max_microbatch_assignments=embedding_microbatch_limit,
@@ -1098,13 +1193,14 @@ class AutopilotController:
             embedding_concurrency_limit = 0 if embedding_concurrency_limit is not None else None
             embedding_microbatch_limit = 0 if embedding_microbatch_limit is not None else None
             local_queue_limit = 0
+            advertised_concurrency = 0
         else:
             if embedding_concurrency_limit is not None:
                 embedding_concurrency_limit = max(
                     1,
                     min(
                         embedding_concurrency_limit,
-                        recommendation.max_concurrent_assignments,
+                        advertised_concurrency,
                     ),
                 )
             if embedding_microbatch_limit is not None:
@@ -1113,9 +1209,12 @@ class AutopilotController:
                     round(embedding_microbatch_limit * heat_governor_plan.microbatch_scale),
                 )
             local_queue_limit = max(
-                recommendation.max_concurrent_assignments,
+                advertised_concurrency,
                 round(local_queue_limit * max(0.25, heat_governor_plan.microbatch_scale)),
             )
+        pull_bundle_limit = max(local_queue_limit, settings_int(self.settings, "pull_bundle_size", 16))
+        if heat_governor_plan.paused:
+            pull_bundle_limit = 0
         payload: dict[str, Any] = {
             "supported_models": [live_model],
             "operations": live_operations,
@@ -1124,7 +1223,7 @@ class AutopilotController:
             "max_context_tokens": runtime_tuple.effective_context_tokens
             or settings_int(self.settings, "max_context_tokens", 32768),
             "max_batch_tokens": settings_int(self.settings, "max_batch_tokens", 50000),
-            "max_concurrent_assignments": recommendation.max_concurrent_assignments,
+            "max_concurrent_assignments": max(1, advertised_concurrency),
             "max_local_queue_assignments": local_queue_limit,
             "target_gpu_utilization_pct": heat_governor_plan.effective_target_pct,
             "min_gpu_memory_headroom_pct": self.configured_min_gpu_memory_headroom_pct(),
@@ -1138,6 +1237,7 @@ class AutopilotController:
                 "safe_limit": memory.safe_limit,
                 "learned_ceiling": memory.learned_ceiling,
                 "hardware_ceiling": hardware_concurrency_ceiling,
+                "configured_cap": self.configured_concurrency_cap(),
                 "effective_ceiling": effective_concurrency_ceiling,
                 "last_constraint": memory.last_constraint,
                 "last_limit": memory.last_limit,
@@ -1147,7 +1247,7 @@ class AutopilotController:
             payload["max_concurrent_assignments_embeddings"] = embedding_concurrency_limit
         if embedding_microbatch_limit is not None:
             payload["max_microbatch_assignments_embeddings"] = embedding_microbatch_limit
-        payload["max_pull_bundle_assignments"] = local_queue_limit
+        payload["max_pull_bundle_assignments"] = pull_bundle_limit
         configured_heat_output_watts = settings_optional_float(self.settings, "estimated_heat_output_watts")
         optional_values = {
             "room_temp_c": heat_governor_plan.room_temp_c,

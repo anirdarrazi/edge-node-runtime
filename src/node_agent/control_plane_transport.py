@@ -331,7 +331,7 @@ class EdgeControlTransport:
                     if is_relative_target and self.faults.consume("dns_flap"):
                         raise httpx.ConnectError("temporary failure in name resolution")
                     response = self._request_once(method, path_or_url, base_url=base_url if is_relative_target else None, **kwargs)
-                    response.raise_for_status()
+                    self._raise_for_status_with_body(response)
                     self._record_success(
                         base_url=base_url,
                         request_url=request_url,
@@ -352,6 +352,22 @@ class EdgeControlTransport:
         if last_error is not None:
             raise last_error
         raise RuntimeError("control plane retry loop exhausted")
+
+    @staticmethod
+    def _raise_for_status_with_body(response: httpx.Response) -> None:
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as error:
+            body = str(getattr(response, "text", "") or "").strip()
+            if not body:
+                raise
+            if len(body) > 1200:
+                body = f"{body[:1200]}..."
+            raise httpx.HTTPStatusError(
+                f"{error} Response body: {body}",
+                request=error.request,
+                response=error.response,
+            ) from error
 
     def post_json(self, path: str, payload: dict[str, Any]) -> Any:
         response = self._request_with_retry("POST", path, json=payload)

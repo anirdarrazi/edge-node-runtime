@@ -1,0 +1,195 @@
+{
+  "status": "ok",
+  "requested": {
+    "model": "google/gemma-4-E4B-it",
+    "max_price": 0.2,
+    "image": "anirdarrazi/autonomousc-ai-edge-runtime:single-cuda-gemma4-e4b-20260501-4",
+    "api": "responses",
+    "runtype": "args",
+    "run_mode": "full",
+    "durable_node": true,
+    "max_context_tokens": 8192,
+    "max_batch_tokens": 8192,
+    "max_concurrent_assignments": 2,
+    "node_region": "eu-se-1",
+    "runtime_profile": "rtx_5060_ti_16gb_gemma4_e4b",
+    "min_cuda_max_good": 12.9,
+    "expected_api_path": "/v1/responses",
+    "readiness_path": "/v1/models",
+    "startup_status_path": "/startup-status",
+    "benchmark_requests": 1,
+    "benchmark_concurrency": 1,
+    "benchmark_profile": "balanced",
+    "vllm_extra_args": "--quantization fp8 --kv-cache-dtype fp8 --gpu-memory-utilization 0.913 --max-num-seqs 12 --generation-config vllm --skip-mm-profiling"
+  },
+  "selected_offer": {
+    "id": 35947518,
+    "gpu_name": "RTX 5060 Ti",
+    "gpu_ram_gb": 15.9,
+    "dph_total": 0.068889,
+    "reliability": 0.989289,
+    "inet_down": 909.7,
+    "disk_space": 203.0,
+    "cuda_max_good": 13.0,
+    "geolocation": "Vietnam, VN",
+    "verification": "deverified"
+  },
+  "instance": {
+    "id": 35958713,
+    "runtype": "args",
+    "public_ip": "171.248.246.120",
+    "host_port": 10569,
+    "startup_status_host_port": 10557,
+    "base_url": "http://171.248.246.120:10569",
+    "gpu_name": "RTX 5060 Ti",
+    "gpu_ram_gb": 15.9,
+    "dph_total": 0.088889,
+    "geolocation": "Vietnam, VN"
+  },
+  "runtime": {
+    "base_url": "http://171.248.246.120:10569",
+    "startup_status_path": "/startup-status",
+    "startup_status_url": "http://171.248.246.120:10557/startup-status",
+    "models_path": "/v1/models",
+    "startup_status_code": 200,
+    "startup_status": {
+      "current_model": "google/gemma-4-E4B-it",
+      "effective_max_context_tokens": 8192,
+      "failure_reason": null,
+      "local_inference_url": "http://127.0.0.1:8000",
+      "run_mode": "full",
+      "start_node_agent": true,
+      "start_vllm": true,
+      "startup_stage": "ready",
+      "status": "ready",
+      "status_path": "/var/lib/autonomousc/scratch/startup-status.json",
+      "status_url": "http://127.0.0.1:8011/startup-status",
+      "status_url_self_check_ok": true,
+      "updated_at": "2026-05-01T12:16:36.066569Z",
+      "vllm_command": [
+        "/usr/bin/python3",
+        "-m",
+        "vllm.entrypoints.openai.api_server",
+        "--model",
+        "google/gemma-4-E4B-it",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--quantization",
+        "fp8",
+        "--kv-cache-dtype",
+        "fp8",
+        "--gpu-memory-utilization",
+        "0.913",
+        "--max-num-seqs",
+        "12",
+        "--generation-config",
+        "vllm",
+        "--skip-mm-profiling",
+        "--max-model-len",
+        "8192"
+      ],
+      "warm_source": "unknown",
+      "warm_source_label": "Unknown",
+      "warm_source_scope": "unknown"
+    },
+    "models_status": 200,
+    "served_model": "google/gemma-4-E4B-it"
+  },
+  "probe": {
+    "api": "responses",
+    "path": "/v1/responses",
+    "status": 200,
+    "output_text": "ready",
+    "usage": {
+      "input_tokens": 16,
+      "input_tokens_details": {
+        "cached_tokens": 0,
+        "input_tokens_per_turn": [],
+        "cached_tokens_per_turn": []
+      },
+      "output_tokens": 2,
+      "output_tokens_details": {
+        "reasoning_tokens": 0,
+        "tool_output_tokens": 0,
+        "output_tokens_per_turn": [],
+        "tool_output_tokens_per_turn": []
+      },
+      "total_tokens": 18
+    }
+  },
+  "benchmark": {
+    "request_count": 1,
+    "concurrency": 1,
+    "benchmark_profile": "balanced",
+    "elapsed_seconds": 4.453,
+    "requests_per_second": 0.224568,
+    "latency_seconds": {
+      "avg": 4.453,
+      "min": 4.453,
+      "p50": 4.453,
+      "p95": 4.453,
+      "max": 4.453
+    },
+    "api_counts": {
+      "responses": 1
+    },
+    "usage": {
+      "input_tokens": 44,
+      "cached_input_tokens": 0,
+      "uncached_input_tokens": 44,
+      "output_tokens": 256,
+      "total_tokens": 300,
+      "avg_input_tokens_per_request": 44.0,
+      "avg_cached_input_tokens_per_request": 0.0,
+      "avg_uncached_input_tokens_per_request": 44.0,
+      "avg_output_tokens_per_request": 256.0,
+      "avg_total_tokens_per_request": 300.0
+    },
+    "economics": {
+      "hourly_cost_usd": 0.088889,
+      "input_tokens_per_second": 9.880979,
+      "cached_input_tokens_per_second": 0.0,
+      "uncached_input_tokens_per_second": 9.880979,
+      "output_tokens_per_second": 57.489333,
+      "total_tokens_per_second": 67.370312,
+      "usd_per_million_input_tokens": 2.498878,
+      "usd_per_million_cached_input_tokens": null,
+      "usd_per_million_uncached_input_tokens": 2.498878,
+      "usd_per_million_output_tokens": 0.429495,
+      "usd_per_million_total_tokens": 0.366502
+    },
+    "pricing": {
+      "platform_overhead_pct": 0.1,
+      "idle_reserve_pct": 0.15,
+      "target_margin_pct": 0.35,
+      "warmup_seconds": 761.297,
+      "warmup_reference_window_seconds": 3600.0,
+      "warmup_overhead_pct": 0.211471,
+      "effective_floor_usd_per_million_input_tokens": 3.027318,
+      "effective_floor_usd_per_million_output_tokens": 0.520321,
+      "effective_floor_usd_per_million_total_tokens": 0.444007,
+      "recommended_price_usd_per_million_input_tokens": 7.568295,
+      "recommended_price_usd_per_million_output_tokens": 1.300803,
+      "recommended_price_usd_per_million_total_tokens": 1.110017
+    },
+    "last_probe": {
+      "api": "responses",
+      "path": "/v1/responses",
+      "status": 200
+    }
+  },
+  "candidate_failures": [],
+  "cleanup": {
+    "destroyed": false,
+    "kept_alive": true,
+    "instance_id": 35958713
+  },
+  "notes": [],
+  "timings": {
+    "total_seconds": 768.17,
+    "launch_seconds": 761.3,
+    "warm_seconds": 761.3
+  }
+}

@@ -202,14 +202,73 @@ def test_choose_cheapest_offer_prefers_lower_price_once_hosts_are_model_suitable
 def test_choose_cheapest_offer_prefers_model_sized_vram_for_gemma() -> None:
     selected = vast_smoke.choose_cheapest_offer(
         [
-            {"id": 1, "dph_total": 0.18, "reliability": 0.998, "inet_down": 900, "gpu_ram": 24576},
-            {"id": 2, "dph_total": 0.23, "reliability": 0.996, "inet_down": 700, "gpu_ram": 32768},
+            {
+                "id": 1,
+                "gpu_name": "RTX 5060 Ti",
+                "dph_total": 0.18,
+                "reliability": 0.998,
+                "inet_down": 900,
+                "gpu_ram": 16384,
+                "disk_space": 120,
+                "direct_port_count": 2,
+            },
+            {
+                "id": 2,
+                "gpu_name": "RTX 5090",
+                "dph_total": 0.23,
+                "reliability": 0.996,
+                "inet_down": 700,
+                "gpu_ram": 32768,
+                "disk_space": 120,
+                "direct_port_count": 2,
+            },
         ],
         max_price=0.25,
         model="google/gemma-4-E4B-it",
     )
 
     assert selected["id"] == 1
+
+
+def test_gemma_offer_policy_requires_5060_ti_runtime_fit() -> None:
+    selected = vast_smoke.choose_cheapest_offer(
+        [
+            {
+                "id": 1,
+                "gpu_name": "RTX 4090",
+                "gpu_ram": 24576,
+                "dph_total": 0.06,
+                "reliability": 0.999,
+                "inet_down": 900,
+                "disk_space": 120,
+                "direct_port_count": 4,
+            },
+            {
+                "id": 2,
+                "gpu_name": "RTX 5060 Ti",
+                "gpu_ram": 16384,
+                "dph_total": 0.08,
+                "reliability": 0.996,
+                "inet_down": 900,
+                "disk_space": 80,
+                "direct_port_count": 2,
+            },
+            {
+                "id": 3,
+                "gpu_name": "RTX 5060 Ti",
+                "gpu_ram": 16384,
+                "dph_total": 0.07,
+                "reliability": 0.996,
+                "inet_down": 900,
+                "disk_space": 80,
+                "direct_port_count": 1,
+            },
+        ],
+        max_price=0.25,
+        model="google/gemma-4-E4B-it",
+    )
+
+    assert selected["id"] == 2
 
 
 def test_offer_fit_tier_prefers_hosts_that_meet_both_vram_and_network_targets() -> None:
@@ -333,6 +392,118 @@ def test_runner_launches_serves_and_destroys() -> None:
     assert runtime.get_calls[1].endswith("/v1/models")
     assert api.created[0]["runtype"] == "args"
     assert api.destroyed == [424242]
+
+
+def test_runner_durable_gemma_node_uses_full_mode_and_stays_live() -> None:
+    clock = FakeClock()
+    api = FakeVastAPI(
+        offers=[
+            {
+                "id": 506016,
+                "gpu_name": "RTX 5060 Ti",
+                "gpu_ram": 16384,
+                "dph_total": 0.081,
+                "reliability": 0.996,
+                "inet_down": 900,
+                "disk_space": 120,
+                "cuda_max_good": 13.0,
+                "direct_port_count": 2,
+                "geolocation": "Sweden, SE",
+                "verification": "verified",
+            },
+        ],
+        instances=[
+            {
+                "actual_status": "running",
+                "cur_state": "running",
+                "public_ipaddr": "203.0.113.10",
+                "gpu_name": "RTX 5060 Ti",
+                "gpu_ram": 16384,
+                "dph_total": 0.081,
+                "geolocation": "Sweden, SE",
+                "ports": {"8000/tcp": [{"HostPort": "41000"}], "8011/tcp": [{"HostPort": "41011"}]},
+            },
+        ],
+    )
+    runtime = FakeRuntimeProbeClient(
+        get_responses=[
+            FakeResponse(
+                200,
+                {
+                    "status": "ready",
+                    "current_model": "google/gemma-4-E4B-it",
+                    "status_url": "http://127.0.0.1:8011/startup-status",
+                },
+            ),
+            FakeResponse(
+                200,
+                {
+                    "object": "list",
+                    "data": [{"id": "google/gemma-4-E4B-it", "object": "model"}],
+                },
+            ),
+        ],
+        post_responses=[
+            FakeResponse(
+                200,
+                {
+                    "output": [{"content": [{"text": "ready"}]}],
+                    "usage": {"input_tokens": 4, "output_tokens": 1, "total_tokens": 5},
+                },
+            )
+        ],
+    )
+    config = vast_smoke.VastSmokeConfig(
+        api_key="secret",
+        model="google/gemma-4-E4B-it",
+        max_price=0.20,
+        api_kind="responses",
+        durable_node=True,
+        edge_control_url="https://edge.autonomousc.com",
+        node_id="node_test",
+        node_key="node_key_test",
+        node_region="eu-se-1",
+        runtime_profile="rtx_5060_ti_16gb_gemma4_e4b",
+        max_context_tokens=32768,
+    )
+
+    report = vast_smoke.VastSmokeRunner(
+        api,
+        runtime,
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+    ).run(config)
+
+    env = api.created[0]["env"]
+    assert report["status"] == "ok"
+    assert report["requested"]["run_mode"] == "full"
+    assert report["cleanup"] == {"destroyed": False, "kept_alive": True, "instance_id": 424242}
+    assert api.destroyed == []
+    assert env["RUN_MODE"] == "full"
+    assert env["START_NODE_AGENT"] == "true"
+    assert env["TEMPORARY_NODE"] == "false"
+    assert env["DISABLE_PUBLIC_BOOTSTRAP_FALLBACK"] == "true"
+    assert env["RUNTIME_PROFILE"] == "rtx_5060_ti_16gb_gemma4_e4b"
+    assert env["VLLM_MODEL"] == "google/gemma-4-E4B-it"
+    assert env["SUPPORTED_MODELS"] == "google/gemma-4-E4B-it"
+    assert env["NODE_REGION"] == "eu-se-1"
+    assert env["MAX_CONTEXT_TOKENS"] == "32768"
+    assert env["MAX_BATCH_TOKENS"] == "32768"
+    assert env["MAX_CONCURRENT_ASSIGNMENTS"] == "12"
+    assert env["MAX_CONCURRENT_ASSIGNMENTS_CAP"] == "12"
+    assert env["MAX_LOCAL_QUEUE_ASSIGNMENTS"] == "24"
+    assert env["PULL_BUNDLE_SIZE"] == "40"
+    assert env["VLLM_STARTUP_TIMEOUT_SECONDS"] == "1800"
+    assert env["VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS"] == "1"
+    assert env["HEAT_GOVERNOR_MODE"] == "100"
+    assert env["TARGET_GPU_UTILIZATION_PCT"] == "100"
+    assert env["THERMAL_HEADROOM"] == "0.95"
+    assert env["OWNER_OBJECTIVE"] == "earnings_only"
+    assert env["GPU_POWER_LIMIT_ENABLED"] == "false"
+    assert env["MIN_GPU_MEMORY_HEADROOM_PCT"] == "5"
+    assert env["ALLOW_HIGH_GPU_MEMORY_PRESSURE"] == "true"
+    assert "--quantization fp8" in env["VLLM_EXTRA_ARGS"]
+    assert "--max-num-seqs 12" in env["VLLM_EXTRA_ARGS"]
 
 
 def test_runner_retries_stale_offer_and_keeps_real_error_body() -> None:
@@ -1118,7 +1289,7 @@ def test_direct_config_applies_safer_vast_context_defaults_for_known_models() ->
     assert gemma_26b.min_inet_down_mbps == 700.0
     assert gemma_26b_fp8.min_inet_down_mbps == 700.0
     assert llama.min_vram_gb == 24.0
-    assert gemma.min_vram_gb == 16.0
+    assert gemma.min_vram_gb == 15.0
     assert gemma_26b.min_vram_gb == 70.0
     assert gemma_26b_fp8.min_vram_gb == 70.0
 

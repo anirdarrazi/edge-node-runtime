@@ -82,16 +82,39 @@ DEPLOYMENT_TARGET=vast_ai
 INFERENCE_ENGINE=vllm
 RUNTIME_IMAGE=anirdarrazi/autonomousc-ai-edge-runtime:single-cuda-latest
 CAPACITY_CLASS=elastic_burst
-TEMPORARY_NODE=true
+TEMPORARY_NODE=false
 BURST_PROVIDER=vast_ai
 GPU_NAME=RTX 5060 Ti
 GPU_MEMORY_GB=16
-MAX_CONCURRENT_ASSIGNMENTS=1
+MAX_CONTEXT_TOKENS=8192
+MAX_BATCH_TOKENS=8192
+MAX_CONCURRENT_ASSIGNMENTS=2
+MAX_CONCURRENT_ASSIGNMENTS_CAP=2
+VLLM_STARTUP_TIMEOUT_SECONDS=1800
 VLLM_MODEL=google/gemma-4-E4B-it
 SUPPORTED_MODELS=google/gemma-4-E4B-it
 ```
 
-The control plane catalogs this profile as exact-model, audited-safetensors, `restricted`-eligible, and `elastic_exact_vast`. The Vast smoke defaults use 16 GB minimum/preferred VRAM and 32k context for Gemma E4B.
+The control plane catalogs this profile as exact-model, audited-safetensors, `restricted`-eligible, and `elastic_exact_vast`. The durable Vast launcher uses a conservative 8k context on 16 GB RTX 5060 Ti nodes, treats `MAX_CONCURRENT_ASSIGNMENTS_CAP=2` as the owner scheduling cap, allows a long first-load Gemma warmup, and keeps the contract alive after smoke success. Offer selection is intentionally narrow for this profile: one RTX 5060 Ti 16GB GPU, `cuda_max_good >= 12.9`, at least 80 GB disk, a basic reliability floor, and direct mappings for the runtime/status ports. Failed smoke candidates are destroyed before the launcher tries the next cheapest viable host.
+
+Durable Vast launch helper:
+
+```bash
+python -m node_agent.vast_smoke \
+  --durable-node \
+  --model google/gemma-4-E4B-it \
+  --api responses \
+  --max-context-tokens 8192 \
+  --max-price 0.20 \
+  --min-vram-gb 16 \
+  --min-cuda-max-good 12.9 \
+  --disk-gb 80 \
+  --max-concurrent-assignments 2 \
+  --vllm-startup-timeout-seconds 1800 \
+  --node-region eu-se-1
+```
+
+Required runtime secrets are read from environment variables: `VAST_API_KEY`, `HUGGING_FACE_HUB_TOKEN`, `EDGE_CONTROL_URL`, `NODE_ID`, and `NODE_KEY`. Do not commit these values.
 
 Build and push the public `latest` image:
 

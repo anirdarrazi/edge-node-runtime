@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import urllib.request
 from dataclasses import dataclass
@@ -66,11 +67,30 @@ ARTIFACT_DEFINITIONS = (
             "vocab.txt",
         ),
     ),
+    ArtifactDefinition(
+        model="google/gemma-4-E4B-it",
+        operation="responses",
+        runtime_engine="vllm",
+        model_files=(
+            "config.json",
+            "generation_config.json",
+            "model.safetensors",
+        ),
+        tokenizer_files=(
+            "chat_template.jinja",
+            "tokenizer.json",
+            "tokenizer_config.json",
+        ),
+    ),
 )
 
 
 def fetch_json(url: str) -> Any:
-    with urllib.request.urlopen(url, timeout=30) as response:
+    request = urllib.request.Request(url)
+    token = os.getenv("HUGGING_FACE_HUB_TOKEN") or os.getenv("HF_TOKEN")
+    if token:
+        request.add_header("Authorization", f"Bearer {token}")
+    with urllib.request.urlopen(request, timeout=30) as response:
         return json.load(response)
 
 
