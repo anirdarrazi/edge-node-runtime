@@ -361,4 +361,20 @@ Then open `http://127.0.0.1:8765` and click "Quick Start".
 
 ---
 
+## Qdrant Semantic Memory (Optional)
+
+A `.mcp.json` in this repo root configures a local Qdrant vector store (collection: `edge_node_runtime`). This is **optional developer tooling** — the project builds and runs without it.
+
+**Check availability before using:**
+```bash
+curl http://localhost:6333/healthz
+```
+
+- **Available** (`healthz check passed`): use `qdrant-find` to surface prior context before starting work, and `qdrant-store` to persist architectural decisions, non-obvious patterns, and bug root causes.
+- **Not available** (timeout / connection refused): proceed normally without it. Do not prompt the developer to set it up unless they ask — it is a local-only tool, not shared infrastructure.
+
+To set it up: [`../QDRANT.md`](../QDRANT.md) · Full agent usage guide: [`../QDRANT-AGENTS.md`](../QDRANT-AGENTS.md)
+
+---
+
 **Last Updated**: 2026-05-03
