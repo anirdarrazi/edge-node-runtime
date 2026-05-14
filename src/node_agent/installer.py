@@ -3406,6 +3406,13 @@ class GuidedInstaller:
         credentials_present = self.credentials_path.exists() or bool(
             first_nonempty(runtime_env.get("NODE_ID")) and first_nonempty(runtime_env.get("NODE_KEY"))
         )
+        recovery_note = ""
+        recovery_note_path = self.credentials_dir / "recovery-note.txt"
+        if recovery_note_path.exists():
+            try:
+                recovery_note = recovery_note_path.read_text(encoding="utf-8").strip()
+            except OSError:
+                recovery_note = ""
         edge_control_url = first_nonempty(
             runtime_env.get("EDGE_CONTROL_URL"),
             str(config_preview.get("edge_control_url") or ""),
@@ -4067,6 +4074,7 @@ class GuidedInstaller:
             "disk": disk,
             "running_services": running_services,
             "credentials_present": credentials_present,
+            "recovery_note": recovery_note,
             "runtime_backend": runtime_backend,
             "runtime_backend_label": runtime_backend_label(runtime_backend),
             "dns": dns_payload,

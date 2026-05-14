@@ -2464,6 +2464,63 @@ def test_runtime_health_snapshot_reports_low_disk_guidance(tmp_path: Path, monke
     assert self_healing["prerequisite_action"]["code"] == "free_disk_space"
 
 
+def test_runtime_health_snapshot_uses_recovery_note_for_reclaim_guidance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_example_env(tmp_path)
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(installer_module.shutil, "which", lambda name: "docker" if name == "docker" else "nvidia-smi")
+
+    service = service_module.NodeRuntimeService(
+        runtime_dir=tmp_path,
+        command_runner=base_runner_factory(commands),
+        autostart_manager=ReadyManager(),
+        desktop_launcher_manager=ReadyManager(),
+    )
+    service.ensure_local_config()
+
+    installer_snapshot = service.guided_installer.status_payload()
+    recovery_note = (
+        "This node was disabled by the control plane after being offline past the allowed window. "
+        "Run `node-agent bootstrap` in an interactive Docker container with the same persistent volume "
+        "to claim this machine again with a new node ID."
+    )
+    installer_snapshot["preflight"].update(
+        {
+            "credentials_present": False,
+            "recovery_note": recovery_note,
+            "running_services": [],
+            "disk": {
+                "free_gb": 100,
+                "total_gb": 200,
+                "recommended_free_gb": 30,
+                "ok": True,
+            },
+            "docker_cli": True,
+            "docker_compose": True,
+            "docker_daemon": True,
+            "gpu": {
+                "detected": True,
+                "name": "RTX 4090",
+                "memory_gb": 24,
+                "provider": "nvidia",
+            },
+            "nvidia_container_runtime": {
+                "checked": True,
+                "visible": True,
+                "error": None,
+            },
+        }
+    )
+
+    health = service.runtime_health_snapshot(installer_snapshot=installer_snapshot)
+
+    assert health["issue_code"] == "approval_required"
+    assert health["issue_detail"] == recovery_note
+    assert health["runtime"]["recovery_note"] == recovery_note
+
+
 def test_runtime_health_snapshot_reports_docker_not_running_guidance(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

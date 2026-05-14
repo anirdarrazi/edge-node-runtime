@@ -35,10 +35,10 @@ class NodeBootstrapOrchestrator:
         self.sleep = sleep or time.sleep
 
     @staticmethod
-    def setup_ui_claim_message() -> str:
+    def missing_credentials_message() -> str:
         return (
-            "No stored node credentials were found. Open the setup UI and run Quick Start to claim this node. "
-            "Use `node-agent bootstrap` only for direct terminal debugging."
+            "No stored node credentials were found. Set NODE_ID and NODE_KEY in the Docker environment, "
+            "or run `node-agent bootstrap` once in an interactive Docker container with the same persistent volume."
         )
 
     @staticmethod
@@ -85,7 +85,7 @@ class NodeBootstrapOrchestrator:
         persisted = self.credential_store.load_credentials()
         if persisted:
             return persisted
-        raise RuntimeError(self.setup_ui_claim_message())
+        raise RuntimeError(self.missing_credentials_message())
 
     def bootstrap(self, interactive: bool = True) -> tuple[str, str]:
         if self.settings.node_id and self.settings.node_key:
@@ -96,7 +96,7 @@ class NodeBootstrapOrchestrator:
         if self.settings.operator_token:
             return self.legacy_enroll()
         if not interactive or not self.terminal_available():
-            raise RuntimeError(self.setup_ui_claim_message())
+            raise RuntimeError(self.missing_credentials_message())
 
         claim = self.create_claim_session()
         self.print_claim_instructions(claim)
@@ -110,13 +110,13 @@ class NodeBootstrapOrchestrator:
                 return self.persist_from_response(result.model_dump())
             if result.status == "consumed":
                 raise RuntimeError(
-                    "Node claim was consumed but did not return credentials. Start Quick Start again from the setup UI, "
-                    "or rerun `node-agent bootstrap` if you are using the direct terminal flow."
+                    "Node claim was consumed but did not return credentials. Rerun `node-agent bootstrap` "
+                    "in an interactive Docker container with the same persistent volume."
                 )
             if result.status == "expired":
                 raise RuntimeError(
-                    "Node claim expired before approval completed. Start Quick Start again from the setup UI, "
-                    "or rerun `node-agent bootstrap` if you are using the direct terminal flow."
+                    "Node claim expired before approval completed. Rerun `node-agent bootstrap` "
+                    "in an interactive Docker container with the same persistent volume."
                 )
             remaining = self.format_remaining_time(result.expires_at)
             if result.status != last_status or remaining != last_remaining:

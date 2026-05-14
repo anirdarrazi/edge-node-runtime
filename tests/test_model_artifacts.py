@@ -7,9 +7,11 @@ from node_agent.model_artifacts import (
     find_model_artifact,
     load_model_artifacts_manifest,
     resolved_chat_template_digest,
+    resolved_expected_context_tokens,
     resolved_model_manifest_digest,
     resolved_tokenizer_digest,
 )
+from node_agent.runtime_tuple import resolved_runtime_tuple
 
 
 class StubSettings:
@@ -19,6 +21,7 @@ class StubSettings:
     vllm_model = "meta-llama/Llama-3.1-8B-Instruct"
     model_manifest_digest = None
     tokenizer_digest = None
+    max_context_tokens = 32768
 
 
 class GgufStubSettings:
@@ -29,6 +32,7 @@ class GgufStubSettings:
     vllm_model = "meta-llama/Llama-3.1-8B-Instruct"
     model_manifest_digest = None
     tokenizer_digest = None
+    max_context_tokens = 32768
 
 
 def test_bundled_model_artifacts_manifest_matches_the_signed_release_version() -> None:
@@ -66,7 +70,9 @@ def test_gemma_e4b_model_artifact_is_bundled_for_vllm_responses() -> None:
     assert artifact.model_manifest_digest.startswith("sha256:")
     assert artifact.tokenizer_digest.startswith("sha256:")
     assert any(file.path == "model.safetensors" for file in artifact.model_manifest.files)
+    assert any(file.path == "processor_config.json" for file in artifact.model_manifest.files)
     assert any(file.path == "chat_template.jinja" for file in artifact.tokenizer_manifest.files)
+    assert artifact.expected_context_tokens == 32768
 
 
 def test_runtime_metadata_resolution_prefers_bundled_release_manifest() -> None:
@@ -92,6 +98,20 @@ def test_chat_template_digest_is_derived_for_responses_only() -> None:
     assert isinstance(chat_digest, str)
     assert chat_digest.startswith("sha256:")
     assert resolved_chat_template_digest(settings, "BAAI/bge-large-en-v1.5", "embeddings") is None
+
+
+def test_runtime_tuple_clamps_to_bundled_safetensors_context_metadata() -> None:
+    class GemmaSettings(StubSettings):
+        vllm_model = "google/gemma-4-E4B-it"
+        max_context_tokens = 131072
+
+    settings = GemmaSettings()
+
+    assert resolved_expected_context_tokens(settings, "google/gemma-4-E4B-it", "responses") == 32768
+
+    runtime_tuple = resolved_runtime_tuple(settings, "google/gemma-4-E4B-it", "responses")
+
+    assert runtime_tuple.effective_context_tokens == 32768
 
 
 def test_gguf_artifact_contract_declares_quantized_file_metadata() -> None:

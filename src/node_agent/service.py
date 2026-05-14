@@ -1591,6 +1591,7 @@ class NodeRuntimeService:
             "current_model": current_model,
             "config_present": config_present,
             "credentials_present": preflight.get("credentials_present", False),
+            "recovery_note": preflight.get("recovery_note", ""),
             "runtime_backend": preflight.get("runtime_backend", self.runtime_backend),
             "runtime_backend_label": preflight.get("runtime_backend_label", runtime_backend_label(self.runtime_backend)),
         }
@@ -2064,6 +2065,7 @@ class NodeRuntimeService:
         config_present = bool(runtime.get("config_present"))
         credentials_present = bool(runtime.get("credentials_present"))
         credentials_file_present = self.guided_installer.credentials_path.exists()
+        recovery_note = str(runtime.get("recovery_note") or preflight.get("recovery_note") or "").strip()
         disk = preflight.get("disk") if isinstance(preflight.get("disk"), dict) else {}
         gpu = preflight.get("gpu") if isinstance(preflight.get("gpu"), dict) else {}
         nvidia_container_runtime = (
@@ -2196,7 +2198,7 @@ class NodeRuntimeService:
             issue_action_label = str(startup_issue.get("issue_action_label") or "Fix it")
         elif not credentials_present and config_present:
             issue_code = "approval_required"
-            issue_detail = "This machine still needs approval before the runtime can come online."
+            issue_detail = recovery_note or "This machine still needs approval before the runtime can come online."
             manual_fix_available = True
             issue_action_label = "Resume setup"
 

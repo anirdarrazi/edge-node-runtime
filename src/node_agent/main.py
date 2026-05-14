@@ -2281,18 +2281,33 @@ def run_worker_loop(control: EdgeControlClient, runtime: VLLMRuntime, attest_on_
             )
         except Exception as error:  # pragma: no cover - long-running loop
             if control.is_auth_error(error):
+                reclaim_required = bool(getattr(control, "is_reclaim_required", lambda _error: False)(error))
                 LOGGER.warning(
                     "node credentials were rejected by the control plane; clearing local credentials and requiring a new bootstrap"
                 )
-                control.write_recovery_note(
-                    "This node lost control-plane access because its credentials were rejected or revoked. "
-                    "Open the setup UI and run Quick Start to re-approve this machine. "
-                    "Use `node-agent bootstrap` only for direct terminal debugging."
-                )
+                if reclaim_required:
+                    control.write_recovery_note(
+                        "This node was disabled by the control plane after being offline past the allowed window. "
+                        "Run `node-agent bootstrap` in an interactive Docker container with the same persistent volume "
+                        "to claim this machine again with a new node ID."
+                    )
+                else:
+                    control.write_recovery_note(
+                        "This node lost control-plane access because its credentials were rejected or revoked. "
+                        "Run `node-agent bootstrap` in an interactive Docker container with the same persistent volume "
+                        "to re-approve this machine with a fresh node ID."
+                    )
                 control.clear_credentials()
+                if reclaim_required:
+                    raise RuntimeError(
+                        "Node was disabled after being offline too long. "
+                        "Run `node-agent bootstrap` in an interactive Docker container with the same persistent volume "
+                        "to reclaim this machine with a new node ID."
+                    ) from error
                 raise RuntimeError(
                     "Node credentials were rejected by the control plane. "
-                    "Open the setup UI and run Quick Start to reclaim this node."
+                    "Run `node-agent bootstrap` in an interactive Docker container with the same persistent volume "
+                    "to reclaim this node with a fresh node ID."
                 ) from error
             if control.is_transient_network_error(error):
                 LOGGER.warning("control plane connectivity degraded temporarily: %s", error)

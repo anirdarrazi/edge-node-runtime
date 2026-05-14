@@ -503,6 +503,24 @@ def test_collect_preflight_reports_missing_docker(tmp_path: Path, monkeypatch: p
     assert "Install Docker Desktop" in docker_check["fix"]
 
 
+def test_collect_preflight_surfaces_recovery_note(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    write_example_env(tmp_path)
+    monkeypatch.setattr(installer_module.shutil, "which", lambda _name: None)
+
+    installer = installer_module.GuidedInstaller(runtime_dir=tmp_path)
+    installer.credentials_dir.mkdir(parents=True, exist_ok=True)
+    (installer.credentials_dir / "recovery-note.txt").write_text(
+        "This node was disabled after being offline too long. Run Quick Start again.",
+        encoding="utf-8",
+    )
+
+    preflight = installer.collect_preflight()
+
+    assert preflight["recovery_note"] == (
+        "This node was disabled after being offline too long. Run Quick Start again."
+    )
+
+
 def test_collect_preflight_reports_missing_nvidia_container_runtime(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

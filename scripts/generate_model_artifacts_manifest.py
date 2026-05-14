@@ -26,6 +26,7 @@ class ArtifactDefinition:
     runtime_engine: str
     model_files: tuple[str, ...]
     tokenizer_files: tuple[str, ...]
+    expected_context_tokens: int | None = None
 
 
 ARTIFACT_DEFINITIONS = (
@@ -75,12 +76,14 @@ ARTIFACT_DEFINITIONS = (
             "config.json",
             "generation_config.json",
             "model.safetensors",
+            "processor_config.json",
         ),
         tokenizer_files=(
             "chat_template.jinja",
             "tokenizer.json",
             "tokenizer_config.json",
         ),
+        expected_context_tokens=32768,
     ),
 )
 
@@ -171,6 +174,11 @@ def artifact_manifest(
 def build_manifest() -> dict[str, Any]:
     release_manifest = load_release_manifest()
     artifacts: list[dict[str, Any]] = []
+    definition_order = {
+        (definition.model, definition.operation): index
+        for index, definition in enumerate(ARTIFACT_DEFINITIONS)
+    }
+    operation_order = {"embeddings": 0, "responses": 1}
     for definition in ARTIFACT_DEFINITIONS:
         info = huggingface_model_info(definition.model)
         revision = info.get("sha")
@@ -191,20 +199,26 @@ def build_manifest() -> dict[str, Any]:
             artifact_kind="huggingface_tokenizer_snapshot",
             files=definition.tokenizer_files,
         )
-        artifacts.append(
-            {
-                "model": definition.model,
-                "operation": definition.operation,
-                "source": "huggingface",
-                "repository": definition.model,
-                "revision": revision,
-                "model_manifest_digest": manifest_digest(model_manifest),
-                "tokenizer_digest": manifest_digest(tokenizer_manifest),
-                "model_manifest": model_manifest,
-                "tokenizer_manifest": tokenizer_manifest,
-            }
+        record: dict[str, Any] = {
+            "model": definition.model,
+            "operation": definition.operation,
+            "source": "huggingface",
+            "repository": definition.model,
+            "revision": revision,
+            "model_manifest_digest": manifest_digest(model_manifest),
+            "tokenizer_digest": manifest_digest(tokenizer_manifest),
+            "model_manifest": model_manifest,
+            "tokenizer_manifest": tokenizer_manifest,
+        }
+        if definition.expected_context_tokens is not None:
+            record["expected_context_tokens"] = definition.expected_context_tokens
+        artifacts.append(record)
+    artifacts.sort(
+        key=lambda item: (
+            operation_order.get(str(item["operation"]), 99),
+            definition_order.get((str(item["model"]), str(item["operation"])), 99),
         )
-    artifacts.sort(key=lambda item: (str(item["operation"]), str(item["model"])))
+    )
     return {
         "version": release_manifest.version,
         "generated_at": release_manifest.published_at,

@@ -26,7 +26,6 @@ src/node_agent/gguf_artifacts.py
 src/node_agent/heat_governor.py
 src/node_agent/inference_engine.py
 src/node_agent/installer.py
-src/node_agent/installer_ui.html
 src/node_agent/launcher.py
 src/node_agent/local_api_security.py
 src/node_agent/main.py
@@ -40,7 +39,6 @@ src/node_agent/runtime_profiles.py
 src/node_agent/runtime_quality.py
 src/node_agent/runtime_tuple.py
 src/node_agent/service.py
-src/node_agent/service_ui.html
 src/node_agent/single_container.py
 src/node_agent/staging_smoke.py
 src/node_agent/vast_smoke.py

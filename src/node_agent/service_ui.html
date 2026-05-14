@@ -1866,6 +1866,7 @@
         const dashboard = payload.dashboard || {};
         const heatGovernor = payload.heat_governor || {};
         const claim = installerState.claim || null;
+        const recoveryNote = runtime.recovery_note || preflight.recovery_note || "";
         const gpu = preflight.gpu || {};
         const nvidiaRuntime = preflight.nvidia_container_runtime || {};
         const disk = preflight.disk || {};
@@ -1918,9 +1919,11 @@
         document.getElementById("claim-copy").textContent =
           registrationReady
             ? "Credentials are stored locally for this machine."
+            : (recoveryNote
+              ? recoveryNote
             : (claim
               ? `Claim code ${claim.claim_code}. ${claimRefreshCopy(claim)}`
-              : "Run Quick Start and the service will open the browser approval page automatically and show a QR code here.");
+              : "Run Quick Start and the service will open the browser approval page automatically and show a QR code here."));
 
         const runtimeOk = runtime.stage === "running";
         setPill(document.getElementById("runtime-pill"), runtimeOk ? "Running" : (runtime.stage || "Idle"), tone(runtimeOk, runtime.stage === "ready" || runtime.stage === "registration_required"));

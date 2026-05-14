@@ -47,6 +47,7 @@ class FakeControl:
         self.clear_calls = 0
         self.recovery_notes = []
         self.auth_fail_on_heartbeat = False
+        self.reclaim_required_on_heartbeat = False
         self.progress_updates = []
         self.touched_assignments = []
         self.failures = []
@@ -84,9 +85,16 @@ class FakeControl:
         }
 
     def heartbeat(self, *args, **kwargs):
-        if self.auth_fail_on_heartbeat:
+        if self.auth_fail_on_heartbeat or self.reclaim_required_on_heartbeat:
             request = httpx.Request("POST", "http://edge.test/nodes/heartbeat")
-            response = httpx.Response(401, request=request)
+            if self.reclaim_required_on_heartbeat:
+                response = httpx.Response(
+                    410,
+                    json={"error": {"code": "node_reclaim_required", "message": "claim a fresh node id"}},
+                    request=request,
+                )
+            else:
+                response = httpx.Response(401, request=request)
             raise httpx.HTTPStatusError("unauthorized", request=request, response=response)
         raise KeyboardInterrupt()
 
@@ -126,7 +134,10 @@ class FakeControl:
         self.recovery_notes.append(message)
 
     def is_auth_error(self, error: Exception) -> bool:
-        return isinstance(error, httpx.HTTPStatusError) and error.response.status_code == 401
+        return isinstance(error, httpx.HTTPStatusError) and error.response.status_code in {401, 410}
+
+    def is_reclaim_required(self, error: Exception) -> bool:
+        return isinstance(error, httpx.HTTPStatusError) and error.response.status_code == 410
 
     def is_transient_network_error(self, error: Exception) -> bool:
         if isinstance(error, main_module.ArtifactFlowError):
@@ -178,12 +189,24 @@ def test_run_worker_loop_clears_credentials_after_auth_failure():
     control = FakeControl(has_credentials=True)
     control.auth_fail_on_heartbeat = True
 
-    with pytest.raises(RuntimeError, match="Open the setup UI and run Quick Start"):
+    with pytest.raises(RuntimeError, match="node-agent bootstrap"):
         main_module.run_worker_loop(control, object(), attest_on_start=False)
 
     assert control.clear_calls == 1
     assert control.recovery_notes
-    assert "Open the setup UI and run Quick Start" in control.recovery_notes[-1]
+    assert "node-agent bootstrap" in control.recovery_notes[-1]
+
+
+def test_run_worker_loop_writes_reclaim_note_after_offline_disable():
+    control = FakeControl(has_credentials=True)
+    control.reclaim_required_on_heartbeat = True
+
+    with pytest.raises(RuntimeError, match="new node ID"):
+        main_module.run_worker_loop(control, object(), attest_on_start=False)
+
+    assert control.clear_calls == 1
+    assert control.recovery_notes
+    assert "offline past the allowed window" in control.recovery_notes[-1]
 
 
 def test_recommended_local_reservoir_target_expands_during_degraded_mode():

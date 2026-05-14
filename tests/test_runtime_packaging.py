@@ -43,11 +43,14 @@ def test_inference_compose_command_keeps_container_shell_variables(compose_path:
     assert 'exec "$@";' not in content
 
 
-def test_manager_mode_readme_requests_gpu_access() -> None:
+def test_readme_documents_docker_only_runtime_setup() -> None:
     readme = (RUNTIME_ROOT / "README.md").read_text(encoding="utf-8")
-    manager_section = readme.split("#### Local manager mode", 1)[1].split("Then open", 1)[0]
 
-    assert "docker run --rm \\\n  --gpus all \\" in manager_section
+    assert "The runtime has one supported setup path: Docker." in readme
+    assert "--gpus all" in readme
+    assert "node-agent-bootstrap" in readme
+    assert "browser Quick Start" in readme
+    assert "open `http://127.0.0.1:8765`" not in readme
 
 
 def test_built_wheel_includes_hidden_runtime_env_example(tmp_path: Path) -> None:

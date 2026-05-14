@@ -8,6 +8,7 @@ from typing import Any
 from .gguf_artifacts import resolved_gguf_artifact_contract
 from .model_artifacts import (
     resolved_chat_template_digest,
+    resolved_expected_context_tokens,
     resolved_model_manifest_digest,
     resolved_tokenizer_digest,
 )
@@ -71,7 +72,12 @@ def _effective_context_tokens(
     max_context = getattr(settings, "max_context_tokens", None)
     local_max = max_context if isinstance(max_context, int) and max_context > 0 else None
     known_context = _known_effective_context_tokens(model, operation)
-    expected_context = gguf_expected_context if gguf_expected_context is not None else known_context
+    model_expected_context = resolved_expected_context_tokens(settings, model, operation)
+    expected_context = gguf_expected_context
+    if expected_context is None:
+        expected_context = model_expected_context
+    if expected_context is None:
+        expected_context = known_context
     if local_max is not None and expected_context is not None:
         return min(local_max, expected_context)
     return local_max or expected_context

@@ -298,8 +298,8 @@ class EdgeControlClient:
         self.bootstrapper.print_claim_instructions(claim)
 
     @staticmethod
-    def _setup_ui_claim_message() -> str:
-        return NodeBootstrapOrchestrator.setup_ui_claim_message()
+    def _missing_credentials_message() -> str:
+        return NodeBootstrapOrchestrator.missing_credentials_message()
 
     def has_credentials(self) -> bool:
         return self.bootstrapper.has_credentials()
@@ -340,6 +340,9 @@ class EdgeControlClient:
     def is_auth_error(self, error: Exception) -> bool:
         return self.transport.is_auth_error(error)
 
+    def is_reclaim_required(self, error: Exception) -> bool:
+        return self.transport.is_reclaim_required(error)
+
     def is_transient_network_error(self, error: Exception) -> bool:
         if isinstance(error, ArtifactFlowError):
             return error.retryable
@@ -357,7 +360,8 @@ class EdgeControlClient:
         if not self.settings.operator_token:
             raise RuntimeError(
                 "OPERATOR_TOKEN is only needed for legacy headless enrollment. "
-                "Normal setup should use the setup UI claim flow instead."
+                "Set NODE_ID and NODE_KEY in the Docker environment, or run `node-agent bootstrap` "
+                "once in an interactive Docker container with the same persistent volume."
             )
 
         payload = self.transport.post_json(

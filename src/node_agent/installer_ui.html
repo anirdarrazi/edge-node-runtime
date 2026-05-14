@@ -904,6 +904,7 @@
         const autostart = data.autostart || {};
         const launcher = data.desktop_launcher || {};
         const claim = state.claim || null;
+        const recoveryNote = preflight.recovery_note || "";
         const gpu = preflight.gpu || {};
         const disk = preflight.disk || {};
         const runningServices = (preflight.running_services || [])
@@ -943,9 +944,11 @@
         document.getElementById("claim-copy").textContent =
           claimReady
             ? "Credentials are stored locally for this machine."
+            : (recoveryNote
+              ? recoveryNote
             : (claim
               ? `Claim code ${claim.claim_code}. ${claimRefreshCopy(claim)}`
-              : "Quick Start will open the browser approval page automatically and show a QR code here.");
+              : "Quick Start will open the browser approval page automatically and show a QR code here."));
 
         setPill(document.getElementById("autostart-pill"), autostart.label || "Unavailable", pillTone(Boolean(autostart.enabled), Boolean(autostart.supported)));
         document.getElementById("autostart-copy").textContent =

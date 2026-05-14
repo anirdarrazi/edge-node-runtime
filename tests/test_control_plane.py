@@ -108,6 +108,14 @@ def build_settings(credentials_path: Path, operator_token: str | None):
         operator_token=operator_token,
         node_session_id="session_test_123",
         boot_id="boot_test_123",
+        runtime_profile="auto",
+        deployment_target="auto",
+        inference_engine="auto",
+        vllm_model="meta-llama/Llama-3.1-8B-Instruct",
+        supported_models="meta-llama/Llama-3.1-8B-Instruct,BAAI/bge-large-en-v1.5",
+        max_concurrent_assignments_embeddings=None,
+        max_microbatch_assignments_embeddings=None,
+        max_local_queue_assignments=None,
     )
 
 
@@ -227,7 +235,7 @@ def test_bootstrap_requires_interactive_terminal_without_credentials(tmp_path: P
     settings = build_settings(credentials_path, operator_token=None)
     client = EdgeControlClient(settings)
 
-    with pytest.raises(RuntimeError, match="Open the setup UI and run Quick Start"):
+    with pytest.raises(RuntimeError, match="NODE_ID and NODE_KEY"):
         client.bootstrap(interactive=False)
 
 
@@ -236,7 +244,7 @@ def test_require_credentials_points_missing_nodes_back_to_setup_ui(tmp_path: Pat
     settings = build_settings(credentials_path, operator_token=None)
     client = EdgeControlClient(settings)
 
-    with pytest.raises(RuntimeError, match="Open the setup UI and run Quick Start"):
+    with pytest.raises(RuntimeError, match="NODE_ID and NODE_KEY"):
         client.require_credentials()
 
 
@@ -905,8 +913,16 @@ def test_is_auth_error_only_matches_control_plane_requests(tmp_path: Path):
     runtime_request = httpx.Request("POST", "http://localhost:8000/v1/chat/completions")
     control_error = httpx.HTTPStatusError("unauthorized", request=control_request, response=httpx.Response(401, request=control_request))
     runtime_error = httpx.HTTPStatusError("unauthorized", request=runtime_request, response=httpx.Response(401, request=runtime_request))
+    reclaim_response = httpx.Response(
+        410,
+        json={"error": {"code": "node_reclaim_required", "message": "claim a fresh node id"}},
+        request=control_request,
+    )
+    reclaim_error = httpx.HTTPStatusError("reclaim required", request=control_request, response=reclaim_response)
 
     assert client.is_auth_error(control_error) is True
+    assert client.is_auth_error(reclaim_error) is True
+    assert client.is_reclaim_required(reclaim_error) is True
     assert client.is_auth_error(runtime_error) is False
 
 

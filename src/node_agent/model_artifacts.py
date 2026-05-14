@@ -61,6 +61,7 @@ class ModelArtifactRecord:
     revision: str
     model_manifest_digest: str
     tokenizer_digest: str
+    expected_context_tokens: int | None
     model_manifest: ArtifactManifest
     tokenizer_manifest: ArtifactManifest
 
@@ -177,6 +178,7 @@ def _parse_record(raw: Any) -> ModelArtifactRecord:
     revision = raw.get("revision")
     model_manifest_digest = raw.get("model_manifest_digest")
     tokenizer_digest = raw.get("tokenizer_digest")
+    expected_context_tokens = raw.get("expected_context_tokens")
     if not isinstance(model, str) or not model:
         raise ModelArtifactsError("Model artifact model is missing.")
     if not isinstance(operation, str) or not operation:
@@ -191,6 +193,10 @@ def _parse_record(raw: Any) -> ModelArtifactRecord:
         raise ModelArtifactsError(f"{model} {operation} model manifest digest is missing.")
     if not isinstance(tokenizer_digest, str) or not tokenizer_digest.startswith("sha256:"):
         raise ModelArtifactsError(f"{model} {operation} tokenizer digest is missing.")
+    if expected_context_tokens is not None and (
+        not isinstance(expected_context_tokens, int) or expected_context_tokens <= 0
+    ):
+        raise ModelArtifactsError(f"{model} {operation} expected_context_tokens is invalid.")
 
     model_manifest = _parse_artifact_manifest(raw.get("model_manifest"), model=model, operation=operation, label="model")
     tokenizer_manifest = _parse_artifact_manifest(
@@ -209,6 +215,7 @@ def _parse_record(raw: Any) -> ModelArtifactRecord:
         revision=revision,
         model_manifest_digest=model_manifest_digest,
         tokenizer_digest=tokenizer_digest,
+        expected_context_tokens=expected_context_tokens,
         model_manifest=model_manifest,
         tokenizer_manifest=tokenizer_manifest,
     )
@@ -331,6 +338,15 @@ def resolved_chat_template_digest(settings: NodeAgentSettings, model: str | None
         artifact = find_model_artifact(model, operation, runtime_engine=runtime_engine)
         if artifact is not None:
             return _chat_template_digest(artifact.tokenizer_manifest, operation)
+    return None
+
+
+def resolved_expected_context_tokens(settings: NodeAgentSettings, model: str | None, operation: str | None) -> int | None:
+    runtime_engine = _settings_runtime_engine(settings)
+    if isinstance(model, str) and model and isinstance(operation, str) and operation:
+        artifact = find_model_artifact(model, operation, runtime_engine=runtime_engine)
+        if artifact is not None:
+            return artifact.expected_context_tokens
     return None
 
 

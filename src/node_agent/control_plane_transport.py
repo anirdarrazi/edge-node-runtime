@@ -210,11 +210,33 @@ class EdgeControlTransport:
         jitter = random.uniform(0.0, max(0.5, base_delay * 0.25))
         return min(cap, base_delay + jitter)
 
-    def is_auth_error(self, error: Exception) -> bool:
-        if not isinstance(error, httpx.HTTPStatusError) or error.response.status_code not in {401, 403}:
+    def _is_control_plane_status_error(self, error: Exception, status_codes: set[int]) -> bool:
+        if not isinstance(error, httpx.HTTPStatusError) or error.response.status_code not in status_codes:
             return False
         request_url = str(error.request.url)
         return any(request_url.startswith(base_url) for base_url in self.base_urls)
+
+    @staticmethod
+    def _error_code(error: httpx.HTTPStatusError) -> str | None:
+        try:
+            payload = error.response.json()
+        except ValueError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        body = payload.get("error")
+        if not isinstance(body, dict):
+            return None
+        code = body.get("code")
+        return code if isinstance(code, str) else None
+
+    def is_reclaim_required(self, error: Exception) -> bool:
+        if not self._is_control_plane_status_error(error, {410}):
+            return False
+        return self._error_code(error) == "node_reclaim_required"
+
+    def is_auth_error(self, error: Exception) -> bool:
+        return self._is_control_plane_status_error(error, {401, 403}) or self.is_reclaim_required(error)
 
     @staticmethod
     def is_dns_error(error: Exception) -> bool:
