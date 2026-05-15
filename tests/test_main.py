@@ -1666,6 +1666,41 @@ def test_validate_assignment_rejects_item_model_mismatch():
         )
 
 
+def test_validate_assignment_accepts_requested_model_alias():
+    control = FakeControl(has_credentials=True)
+    control.settings.supported_models = "google/gemma-4-E4B-it"
+    control.settings.vllm_model = "google/gemma-4-E4B-it"
+    assignment = SimpleNamespace(
+        assignment_id="assign_model_alias",
+        execution_id="pexec_model_alias",
+        item_count=1,
+        operation="responses",
+        model="google/gemma-4-E4B-it",
+        requested_model="gemma-4-e4b-it",
+        privacy_tier="standard",
+        allowed_regions=["global"],
+        required_vram_gb=16.0,
+        required_context_tokens=32768,
+        token_budget={"total_tokens": 2048},
+    )
+
+    items = main_module.validate_assignment(
+        control,
+        assignment,
+        [
+            {
+                "batch_item_id": "item_1",
+                "customer_item_id": "cust_1",
+                "operation": "responses",
+                "model": "gemma-4-e4b-it",
+                "input": {"messages": [{"role": "user", "content": "hello"}]},
+            }
+        ],
+    )
+
+    assert items[0]["model"] == "gemma-4-e4b-it"
+
+
 def test_build_runtime_receipt_uses_release_metadata_for_the_assignment_model():
     control = FakeControl(has_credentials=True)
     assignment = SimpleNamespace(

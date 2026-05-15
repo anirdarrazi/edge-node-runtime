@@ -1148,7 +1148,15 @@ def validate_assignment_items(assignment: object, items: object) -> list[dict[st
             raise ValueError(
                 f"assignment item {index} operation {item.get('operation')!r} does not match envelope"
             )
-        if item.get("model") != getattr(assignment, "model", None):
+        accepted_models = {
+            model
+            for model in (
+                getattr(assignment, "model", None),
+                getattr(assignment, "requested_model", None),
+            )
+            if isinstance(model, str) and model
+        }
+        if item.get("model") not in accepted_models:
             raise ValueError(f"assignment item {index} model {item.get('model')!r} does not match envelope")
         if not isinstance(item.get("batch_item_id"), str) or not item["batch_item_id"]:
             raise ValueError(f"assignment item {index} is missing batch_item_id")

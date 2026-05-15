@@ -372,6 +372,7 @@ class AssignmentEnvelope(BaseModel):
     assignment_nonce: str
     operation: str
     model: str
+    requested_model: str | None = None
     privacy_tier: str
     node_trust_requirement: str
     result_guarantee: str

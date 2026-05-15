@@ -373,6 +373,30 @@ def test_heartbeat_can_omit_capabilities_and_runtime(tmp_path: Path):
     assert "runtime" not in payload
 
 
+def test_heartbeat_omits_null_optional_capability_values(tmp_path: Path):
+    credentials_path = tmp_path / "credentials" / "node.json"
+    settings = build_settings(credentials_path, operator_token="operator_token")
+    settings.node_id = "node_123"
+    settings.node_key = "key_123456789012345678901234"
+    client = EdgeControlClient(settings)
+    recording_client = RecordingClient()
+    client.client = recording_client
+
+    capabilities = client._node_capabilities_payload()
+    capabilities["heat_governor_pause_reason"] = None
+    capabilities["dynamic_concurrency"] = {
+        "learned_ceiling": None,
+        "last_constraint": None,
+        "last_limit": 8,
+    }
+
+    client.heartbeat(queue_depth=0, active_assignments=0, capabilities=capabilities, include_runtime=False)
+
+    _path, payload = recording_client.calls[0]
+    assert "heat_governor_pause_reason" not in payload["capabilities"]
+    assert payload["capabilities"]["dynamic_concurrency"] == {"last_limit": 8}
+
+
 def test_pull_assignment_tracks_control_plane_queue_depth(tmp_path: Path):
     credentials_path = tmp_path / "credentials" / "node.json"
     settings = build_settings(credentials_path, operator_token="operator_token")

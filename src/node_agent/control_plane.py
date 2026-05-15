@@ -65,6 +65,18 @@ def _csv_urls(value: Any) -> list[str]:
     return urls
 
 
+def _without_none_values(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _without_none_values(entry)
+            for key, entry in value.items()
+            if entry is not None
+        }
+    if isinstance(value, list):
+        return [_without_none_values(entry) for entry in value]
+    return value
+
+
 class EdgeControlClient:
     def __init__(self, settings: NodeAgentSettings):
         self.settings = settings
@@ -424,9 +436,9 @@ class EdgeControlClient:
             "active_assignments": active_assignments,
         }
         if include_capabilities:
-            payload["capabilities"] = capabilities or self._node_capabilities_payload()
+            payload["capabilities"] = _without_none_values(capabilities or self._node_capabilities_payload())
         if include_runtime:
-            payload["runtime"] = runtime or self._node_runtime_payload(autopilot=autopilot)
+            payload["runtime"] = _without_none_values(runtime or self._node_runtime_payload(autopilot=autopilot))
         self.transport.post_json("/nodes/heartbeat", payload)
         self.clear_recovery_note()
 

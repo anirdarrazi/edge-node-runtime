@@ -591,6 +591,8 @@ def test_main_skips_node_agent_in_serve_only_mode(monkeypatch, tmp_path) -> None
             return self.returncode
 
     monkeypatch.setenv("RUN_MODE", "serve_only")
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
     monkeypatch.setenv("STARTUP_STATUS_PATH", str(tmp_path / "startup-status.json"))
     monkeypatch.setenv("STARTUP_STATUS_PORT", "0")
     monkeypatch.setattr(single_container.subprocess, "Popen", FakeProcess)
