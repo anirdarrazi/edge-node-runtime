@@ -24,7 +24,9 @@ from .heat_governor import (
 from .runtime_profiles import (
     HOME_EMBEDDINGS_LLAMA_CPP_PROFILE,
     HOME_LLAMA_CPP_GGUF_PROFILE,
+    LEGACY_RTX_5060_TI_16GB_GEMMA4_E4B_PROFILE,
     LLAMA_CPP_INFERENCE_ENGINE,
+    RTX_5060_TI_16GB_GEMMA4_E4B_IT_PROFILE,
     llama_cpp_model_source,
 )
 from .runtime_tuple import resolved_runtime_tuple
@@ -586,7 +588,11 @@ class AutopilotController:
 
         runtime_profile = str(getattr(settings, "runtime_profile", "") or "").strip()
         if (
-            runtime_profile == "rtx_5060_ti_16gb_gemma4_e4b"
+            runtime_profile
+            in {
+                RTX_5060_TI_16GB_GEMMA4_E4B_IT_PROFILE,
+                LEGACY_RTX_5060_TI_16GB_GEMMA4_E4B_PROFILE,
+            }
             and model.strip().lower() == "google/gemma-4-e4b-it"
         ):
             configured_target = max(
@@ -602,7 +608,11 @@ class AutopilotController:
     def _explicit_profile_concurrency_target(model: str, settings: NodeAgentSettings) -> int | None:
         runtime_profile = str(getattr(settings, "runtime_profile", "") or "").strip()
         if (
-            runtime_profile != "rtx_5060_ti_16gb_gemma4_e4b"
+            runtime_profile
+            not in {
+                RTX_5060_TI_16GB_GEMMA4_E4B_IT_PROFILE,
+                LEGACY_RTX_5060_TI_16GB_GEMMA4_E4B_PROFILE,
+            }
             or model.strip().lower() != "google/gemma-4-e4b-it"
         ):
             return None

@@ -86,7 +86,7 @@ def test_autopilot_uses_tuned_gemma_5060_profile_concurrency_targets(tmp_path: P
     settings = NodeAgentSettings(
         vllm_model=model,
         supported_models=model,
-        runtime_profile="rtx_5060_ti_16gb_gemma4_e4b",
+        runtime_profile="rtx_5060_ti_16gb_gemma4_e4b_it",
         max_concurrent_assignments=12,
         max_concurrent_assignments_cap=12,
         max_local_queue_assignments=24,
@@ -115,7 +115,7 @@ def test_tuned_gemma_5060_profile_advertises_configured_capacity_from_stale_stat
     settings = NodeAgentSettings(
         vllm_model=model,
         supported_models=model,
-        runtime_profile="rtx_5060_ti_16gb_gemma4_e4b",
+        runtime_profile="rtx_5060_ti_16gb_gemma4_e4b_it",
         max_concurrent_assignments=12,
         max_concurrent_assignments_cap=12,
         max_local_queue_assignments=24,

@@ -72,12 +72,12 @@ The regular runtime images now preseed the public bootstrap-model cache into the
 
 ### Vast.ai RTX 5060 Ti Gemma profile
 
-The provider profile for the market-data fallback node is `rtx_5060_ti_16gb_gemma4_e4b`. It is a Vast.ai `vllm` profile for one RTX 5060 Ti 16GB node serving `google/gemma-4-E4B-it` through the `/v1/responses` API.
+The provider profile for the market-data fallback node is `rtx_5060_ti_16gb_gemma4_e4b_it`. It is a Vast.ai `vllm` profile for one RTX 5060 Ti 16GB node serving `google/gemma-4-E4B-it` through the `/v1/responses` API.
 
 Advanced-mode environment values:
 
 ```env
-RUNTIME_PROFILE=rtx_5060_ti_16gb_gemma4_e4b
+RUNTIME_PROFILE=rtx_5060_ti_16gb_gemma4_e4b_it
 DEPLOYMENT_TARGET=vast_ai
 INFERENCE_ENGINE=vllm
 RUNTIME_IMAGE=anirdarrazi/autonomousc-ai-edge-runtime:single-cuda-latest
@@ -86,16 +86,18 @@ TEMPORARY_NODE=false
 BURST_PROVIDER=vast_ai
 GPU_NAME=RTX 5060 Ti
 GPU_MEMORY_GB=16
-MAX_CONTEXT_TOKENS=8192
-MAX_BATCH_TOKENS=8192
-MAX_CONCURRENT_ASSIGNMENTS=2
-MAX_CONCURRENT_ASSIGNMENTS_CAP=2
+MAX_CONTEXT_TOKENS=32768
+MAX_BATCH_TOKENS=32768
+MAX_CONCURRENT_ASSIGNMENTS=12
+MAX_CONCURRENT_ASSIGNMENTS_CAP=12
+MAX_LOCAL_QUEUE_ASSIGNMENTS=24
 VLLM_STARTUP_TIMEOUT_SECONDS=1800
 VLLM_MODEL=google/gemma-4-E4B-it
 SUPPORTED_MODELS=google/gemma-4-E4B-it
+VLLM_EXTRA_ARGS=--quantization fp8 --kv-cache-dtype fp8 --gpu-memory-utilization 0.913 --max-num-seqs 12 --generation-config vllm --skip-mm-profiling
 ```
 
-The control plane catalogs this profile as exact-model, audited-safetensors, `restricted`-eligible, and `elastic_exact_vast`. The durable Vast launcher uses a conservative 8k context on 16 GB RTX 5060 Ti nodes, treats `MAX_CONCURRENT_ASSIGNMENTS_CAP=2` as the owner scheduling cap, allows a long first-load Gemma warmup, and keeps the contract alive after smoke success. Offer selection is intentionally narrow for this profile: one RTX 5060 Ti 16GB GPU, `cuda_max_good >= 12.9`, at least 80 GB disk, a basic reliability floor, and direct mappings for the runtime/status ports. Failed smoke candidates are destroyed before the launcher tries the next cheapest viable host.
+The control plane catalogs this profile as exact-model, audited-safetensors, `restricted`-eligible, and `elastic_exact_vast`. The durable Vast launcher uses a 32k context on 16 GB RTX 5060 Ti nodes, treats `MAX_CONCURRENT_ASSIGNMENTS_CAP=12` as the owner scheduling cap, runs vLLM with FP8 weight quantization and FP8 KV cache over the BF16 safetensors source repo, allows a long first-load Gemma warmup, and keeps the contract alive after smoke success. Offer selection is intentionally narrow for this profile: one RTX 5060 Ti 16GB GPU, `cuda_max_good >= 12.9`, at least 80 GB disk, a basic reliability floor, and direct mappings for the runtime/status ports. Failed smoke candidates are destroyed before the launcher tries the next cheapest viable host.
 
 Durable Vast launch helper:
 
@@ -104,12 +106,14 @@ python -m node_agent.vast_smoke \
   --durable-node \
   --model google/gemma-4-E4B-it \
   --api responses \
-  --max-context-tokens 8192 \
+  --max-context-tokens 32768 \
+  --max-batch-tokens 32768 \
   --max-price 0.20 \
   --min-vram-gb 16 \
   --min-cuda-max-good 12.9 \
   --disk-gb 80 \
-  --max-concurrent-assignments 2 \
+  --max-concurrent-assignments 12 \
+  --max-local-queue-assignments 24 \
   --vllm-startup-timeout-seconds 1800 \
   --node-region eu-se-1
 ```

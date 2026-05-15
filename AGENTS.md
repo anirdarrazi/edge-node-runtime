@@ -296,13 +296,13 @@ Then open `http://127.0.0.1:8765` and click "Quick Start".
 ## Specialized Profiles
 
 ### RTX 5060 Ti Gemma Profile
-- **Name**: `rtx_5060_ti_16gb_gemma4_e4b`
+- **Name**: `rtx_5060_ti_16gb_gemma4_e4b_it`
 - **Hardware**: RTX 5060 Ti 16GB
 - **Engine**: vllm
 - **Model**: google/gemma-4-E4B-it
 - **Context**: 32k tokens
 - **Deployment**: Vast.ai marketplace
-- **Capacity**: Elastic burst, single concurrent assignment
+- **Capacity**: Elastic burst, up to 12 concurrent assignments
 
 ---
 

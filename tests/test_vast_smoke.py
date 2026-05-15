@@ -463,7 +463,7 @@ def test_runner_durable_gemma_node_uses_full_mode_and_stays_live() -> None:
         node_id="node_test",
         node_key="node_key_test",
         node_region="eu-se-1",
-        runtime_profile="rtx_5060_ti_16gb_gemma4_e4b",
+        runtime_profile="rtx_5060_ti_16gb_gemma4_e4b_it",
         max_context_tokens=32768,
     )
 
@@ -483,7 +483,7 @@ def test_runner_durable_gemma_node_uses_full_mode_and_stays_live() -> None:
     assert env["START_NODE_AGENT"] == "true"
     assert env["TEMPORARY_NODE"] == "false"
     assert env["DISABLE_PUBLIC_BOOTSTRAP_FALLBACK"] == "true"
-    assert env["RUNTIME_PROFILE"] == "rtx_5060_ti_16gb_gemma4_e4b"
+    assert env["RUNTIME_PROFILE"] == "rtx_5060_ti_16gb_gemma4_e4b_it"
     assert env["VLLM_MODEL"] == "google/gemma-4-E4B-it"
     assert env["SUPPORTED_MODELS"] == "google/gemma-4-E4B-it"
     assert env["NODE_REGION"] == "eu-se-1"

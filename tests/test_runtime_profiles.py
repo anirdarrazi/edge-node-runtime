@@ -7,8 +7,9 @@ from node_agent.runtime_profiles import (
     DEFAULT_PUBLIC_SMOKE_TEST_API_PATH,
     HOME_EMBEDDINGS_LLAMA_CPP_PROFILE,
     HOME_LLAMA_CPP_GGUF_PROFILE,
+    LEGACY_RTX_5060_TI_16GB_GEMMA4_E4B_PROFILE,
     PARTNER_VLLM_TRUSTED_PROFILE,
-    RTX_5060_TI_16GB_GEMMA4_E4B_PROFILE,
+    RTX_5060_TI_16GB_GEMMA4_E4B_IT_PROFILE,
     VAST_VLLM_SAFETENSORS_PROFILE,
     default_public_smoke_test_model,
     resolve_runtime_profile,
@@ -124,13 +125,13 @@ def test_vast_and_partner_profiles_split_elastic_from_trusted_vllm() -> None:
 
 def test_rtx_5060_ti_gemma_profile_targets_vast_responses() -> None:
     profile = resolve_runtime_profile(
-        RTX_5060_TI_16GB_GEMMA4_E4B_PROFILE,
+        RTX_5060_TI_16GB_GEMMA4_E4B_IT_PROFILE,
         configured_engine=None,
         configured_deployment_target=None,
         runtime_backend=SINGLE_CONTAINER_RUNTIME_BACKEND,
     )
 
-    assert profile.id == RTX_5060_TI_16GB_GEMMA4_E4B_PROFILE
+    assert profile.id == RTX_5060_TI_16GB_GEMMA4_E4B_IT_PROFILE
     assert profile.inference_engine == "vllm"
     assert profile.deployment_target == "vast_ai"
     assert profile.model_format == "safetensors"
@@ -154,4 +155,15 @@ def test_auto_vast_gemma_model_resolves_5060_ti_profile() -> None:
         model=DEFAULT_GEMMA_4_E4B_MODEL,
     )
 
-    assert profile.id == RTX_5060_TI_16GB_GEMMA4_E4B_PROFILE
+    assert profile.id == RTX_5060_TI_16GB_GEMMA4_E4B_IT_PROFILE
+
+
+def test_legacy_5060_ti_gemma_profile_id_resolves_to_renamed_profile() -> None:
+    profile = resolve_runtime_profile(
+        LEGACY_RTX_5060_TI_16GB_GEMMA4_E4B_PROFILE,
+        configured_engine=None,
+        configured_deployment_target=None,
+        runtime_backend=SINGLE_CONTAINER_RUNTIME_BACKEND,
+    )
+
+    assert profile.id == RTX_5060_TI_16GB_GEMMA4_E4B_IT_PROFILE

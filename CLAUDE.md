@@ -199,7 +199,7 @@ python -m pytest tests/enrollment_test.py  # Specific test file
 
 **Advanced Mode** (`.env.example` template):
 ```env
-RUNTIME_PROFILE=rtx_5060_ti_16gb_gemma4_e4b
+RUNTIME_PROFILE=rtx_5060_ti_16gb_gemma4_e4b_it
 DEPLOYMENT_TARGET=vast_ai
 INFERENCE_ENGINE=vllm
 RUNTIME_IMAGE=anirdarrazi/autonomousc-ai-edge-runtime:single-cuda-latest
@@ -265,13 +265,13 @@ Then:
 ## Specialized Profiles
 
 ### RTX 5060 Ti Gemma Profile
-- **Name**: `rtx_5060_ti_16gb_gemma4_e4b`
+- **Name**: `rtx_5060_ti_16gb_gemma4_e4b_it`
 - **Hardware**: NVIDIA RTX 5060 Ti 16GB
 - **Engine**: vllm
 - **Model**: google/gemma-4-E4B-it
 - **Context**: 32k tokens
 - **Deployment**: Vast.ai marketplace
-- **Capacity**: Elastic burst with single concurrent assignment
+- **Capacity**: Elastic burst with up to 12 concurrent assignments
 
 ### Building Custom Profiles
 1. Create Docker image with desired specs

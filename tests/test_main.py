@@ -789,7 +789,7 @@ def test_validate_startup_settings_accepts_global_marketplace_region(monkeypatch
     settings = main_module.NodeAgentSettings(
         edge_control_url="https://edge.autonomousc.com",
         node_region="global",
-        runtime_profile="rtx_5060_ti_16gb_gemma4_e4b",
+        runtime_profile="rtx_5060_ti_16gb_gemma4_e4b_it",
         inference_engine="vllm",
         vllm_model="google/gemma-4-E4B-it",
         supported_models="google/gemma-4-E4B-it",

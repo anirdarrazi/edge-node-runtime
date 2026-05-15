@@ -275,7 +275,7 @@ def test_embedded_runtime_uses_public_bootstrap_on_low_vram_even_with_token(tmp_
 def test_embedded_runtime_keeps_5060_gemma_profile_on_16gb_vram(tmp_path) -> None:
     supervisor = single_container.EmbeddedRuntimeSupervisor(
         lambda: {
-            "RUNTIME_PROFILE": "rtx_5060_ti_16gb_gemma4_e4b",
+            "RUNTIME_PROFILE": "rtx_5060_ti_16gb_gemma4_e4b_it",
             "VLLM_MODEL": "google/gemma-4-E4B-it",
             "SUPPORTED_MODELS": "google/gemma-4-E4B-it",
             "GPU_MEMORY_GB": "16",
@@ -288,7 +288,7 @@ def test_embedded_runtime_keeps_5060_gemma_profile_on_16gb_vram(tmp_path) -> Non
 
     values = supervisor.env_values()
 
-    assert values["RUNTIME_PROFILE"] == "rtx_5060_ti_16gb_gemma4_e4b"
+    assert values["RUNTIME_PROFILE"] == "rtx_5060_ti_16gb_gemma4_e4b_it"
     assert values["VLLM_MODEL"] == "google/gemma-4-E4B-it"
     assert values["MAX_CONTEXT_TOKENS"] == "32768"
     assert values["SUPPORTED_MODELS"] == "google/gemma-4-E4B-it"

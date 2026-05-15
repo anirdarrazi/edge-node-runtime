@@ -10,7 +10,9 @@ from .runtime_backend import MANAGER_RUNTIME_BACKEND, SINGLE_CONTAINER_RUNTIME_B
 AUTO_RUNTIME_PROFILE = "auto"
 HOME_LLAMA_CPP_GGUF_PROFILE = "home_llama_cpp_gguf"
 VAST_VLLM_SAFETENSORS_PROFILE = "vast_vllm_safetensors"
-RTX_5060_TI_16GB_GEMMA4_E4B_PROFILE = "rtx_5060_ti_16gb_gemma4_e4b"
+RTX_5060_TI_16GB_GEMMA4_E4B_IT_PROFILE = "rtx_5060_ti_16gb_gemma4_e4b_it"
+LEGACY_RTX_5060_TI_16GB_GEMMA4_E4B_PROFILE = "rtx_5060_ti_16gb_gemma4_e4b"
+RTX_5060_TI_16GB_GEMMA4_E4B_PROFILE = RTX_5060_TI_16GB_GEMMA4_E4B_IT_PROFILE
 PARTNER_VLLM_TRUSTED_PROFILE = "partner_vllm_trusted"
 HOME_EMBEDDINGS_LLAMA_CPP_PROFILE = "home_embeddings_llama_cpp"
 
@@ -292,9 +294,9 @@ RUNTIME_PROFILES: dict[str, RuntimeProfile] = {
             safe_price_ceiling_usd=DEFAULT_VAST_BURST_COST_CEILING_USD,
         ),
     ),
-    RTX_5060_TI_16GB_GEMMA4_E4B_PROFILE: RuntimeProfile(
-        id=RTX_5060_TI_16GB_GEMMA4_E4B_PROFILE,
-        label="RTX 5060 Ti 16GB Gemma 4 E4B",
+    RTX_5060_TI_16GB_GEMMA4_E4B_IT_PROFILE: RuntimeProfile(
+        id=RTX_5060_TI_16GB_GEMMA4_E4B_IT_PROFILE,
+        label="RTX 5060 Ti 16GB Gemma 4 E4B IT",
         inference_engine=VLLM_INFERENCE_ENGINE,
         deployment_target=VAST_AI_DEPLOYMENT_TARGET,
         model_format=MODEL_FORMAT_SAFETENSORS,
@@ -411,11 +413,10 @@ def _normalize_known(value: str | None, *, known: set[str], fallback: str) -> st
 
 
 def normalize_runtime_profile_id(value: str | None) -> str:
-    return _normalize_known(
-        value,
-        known=set(RUNTIME_PROFILES),
-        fallback=AUTO_RUNTIME_PROFILE,
-    )
+    normalized = (value or AUTO_RUNTIME_PROFILE).strip().lower().replace("-", "_")
+    if normalized == LEGACY_RTX_5060_TI_16GB_GEMMA4_E4B_PROFILE:
+        normalized = RTX_5060_TI_16GB_GEMMA4_E4B_IT_PROFILE
+    return normalized if normalized in RUNTIME_PROFILES else AUTO_RUNTIME_PROFILE
 
 
 def normalize_deployment_target(value: str | None) -> str:
@@ -482,7 +483,7 @@ def _profile_id_for_legacy_runtime(engine: str, target: str, model: str | None) 
         return HOME_LLAMA_CPP_GGUF_PROFILE
     if target == VAST_AI_DEPLOYMENT_TARGET:
         if model == DEFAULT_GEMMA_4_E4B_MODEL:
-            return RTX_5060_TI_16GB_GEMMA4_E4B_PROFILE
+            return RTX_5060_TI_16GB_GEMMA4_E4B_IT_PROFILE
         return VAST_VLLM_SAFETENSORS_PROFILE
     return PARTNER_VLLM_TRUSTED_PROFILE
 
@@ -690,6 +691,7 @@ __all__ = [
     "HOME_LLAMA_CPP_GGUF_PROFILE",
     "LLAMA_CPP_INFERENCE_ENGINE",
     "LLAMA_CPP_MODEL_SOURCES",
+    "LEGACY_RTX_5060_TI_16GB_GEMMA4_E4B_PROFILE",
     "LlamaCppModelSource",
     "MODEL_FORMAT_GGUF",
     "MODEL_FORMAT_SAFETENSORS",
@@ -702,6 +704,7 @@ __all__ = [
     "ROUTING_LANE_TRUSTED_EXACT_PARTNER",
     "ROUTING_LANE_POLICIES",
     "RTX_5060_TI_16GB_GEMMA4_E4B_PROFILE",
+    "RTX_5060_TI_16GB_GEMMA4_E4B_IT_PROFILE",
     "RUNTIME_PROFILES",
     "RoutingLanePolicy",
     "RuntimeProfile",

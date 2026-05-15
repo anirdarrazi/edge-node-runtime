@@ -23,7 +23,9 @@ from .fault_injection import DEFAULT_FAULT_INJECTION_STATE_NAME, FaultInjectionC
 
 DEFAULT_GATED_STARTUP_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 DEFAULT_PUBLIC_BOOTSTRAP_MODEL = "BAAI/bge-large-en-v1.5"
-RTX_5060_TI_16GB_GEMMA4_E4B_PROFILE = "rtx_5060_ti_16gb_gemma4_e4b"
+RTX_5060_TI_16GB_GEMMA4_E4B_IT_PROFILE = "rtx_5060_ti_16gb_gemma4_e4b_it"
+LEGACY_RTX_5060_TI_16GB_GEMMA4_E4B_PROFILE = "rtx_5060_ti_16gb_gemma4_e4b"
+RTX_5060_TI_16GB_GEMMA4_E4B_PROFILE = RTX_5060_TI_16GB_GEMMA4_E4B_IT_PROFILE
 GEMMA_4_E4B_MODEL_LOOKUP_KEY = "google/gemma-4-e4b-it"
 MIN_VRAM_FOR_GATED_STARTUP_GB = 24.0
 MIN_VRAM_FOR_GEMMA_E4B_5060_PROFILE_GB = 15.5
@@ -519,7 +521,7 @@ def low_vram_bootstrap_fallback_applies(
     profile = str(values.get("RUNTIME_PROFILE", "")).strip().lower().replace("-", "_")
     model = str(current_model or "").strip().lower()
     if (
-        profile == RTX_5060_TI_16GB_GEMMA4_E4B_PROFILE
+        profile in {RTX_5060_TI_16GB_GEMMA4_E4B_IT_PROFILE, LEGACY_RTX_5060_TI_16GB_GEMMA4_E4B_PROFILE}
         and model == GEMMA_4_E4B_MODEL_LOOKUP_KEY
         and gpu_memory_gb >= MIN_VRAM_FOR_GEMMA_E4B_5060_PROFILE_GB
     ):

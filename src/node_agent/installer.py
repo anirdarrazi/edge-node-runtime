@@ -360,7 +360,7 @@ NVIDIA_SUPPORT_PRESETS = (
         ),
     ),
     NvidiaSupportPreset(
-        key="rtx_5060_ti_16gb_gemma4_e4b",
+        key="rtx_5060_ti_16gb_gemma4_e4b_it",
         label="RTX 5060 Ti 16 GB",
         min_vram_gb=15.0,
         max_vram_gb=17.9,
