@@ -84,14 +84,14 @@
       "operation": "responses",
       "source": "huggingface",
       "repository": "google/gemma-4-E4B-it",
-      "revision": "c53e9d33178b12afbad4a48334d21e19b8c29761",
-      "model_manifest_digest": "sha256:5ab9c212fa46b9a8c3553a13080b0b8925d5e95a0de4e3faa18913020df56822",
-      "tokenizer_digest": "sha256:ce4a1d9adff76b49317ffaf5d2a5d7dd6d8871e701d1fae7d7344e645294dc9a",
+      "revision": "3555bddc93a623db8887dd2e52123facc45ade77",
+      "model_manifest_digest": "sha256:c93db70cf620c383ba47cc8ce3941dd7e7956a7165c7c4c3226c17038cd1cb19",
+      "tokenizer_digest": "sha256:f4444d361709a9eb881a33c3ba1e0b857ab817dda69ed6cdd266f17785e3ed50",
       "model_manifest": {
         "artifact_kind": "huggingface_model_snapshot",
         "operation": "responses",
         "repository": "google/gemma-4-E4B-it",
-        "revision": "c53e9d33178b12afbad4a48334d21e19b8c29761",
+        "revision": "3555bddc93a623db8887dd2e52123facc45ade77",
         "runtime_engine": "vllm",
         "files": [
           {
@@ -115,7 +115,7 @@
         "artifact_kind": "huggingface_tokenizer_snapshot",
         "operation": "responses",
         "repository": "google/gemma-4-E4B-it",
-        "revision": "c53e9d33178b12afbad4a48334d21e19b8c29761",
+        "revision": "3555bddc93a623db8887dd2e52123facc45ade77",
         "runtime_engine": "vllm",
         "files": [
           {
@@ -142,7 +142,7 @@
       "source": "huggingface",
       "repository": "meta-llama/Llama-3.1-8B-Instruct",
       "revision": "0e9e39f249a16976918f6564b8830bc894c89659",
-      "model_manifest_digest": "sha256:da694a4d5bb28bae78f6b004622a80915f9a4c09399709e64214e3087fb8eace",
+      "model_manifest_digest": "sha256:c58ccc76f8acd8100cdaa1dca9168bf16e31f510846e1edc52cbbbbad18e43f2",
       "tokenizer_digest": "sha256:1e7bf56135c6a61a0fa6c7b3bc79981614281dc3f58bbd4410ad051b6fc0647d",
       "model_manifest": {
         "artifact_kind": "huggingface_model_snapshot",
@@ -163,22 +163,22 @@
           },
           {
             "path": "model-00001-of-00004.safetensors",
-            "digest": "sha256:****************************************************************",
+            "digest": "sha256:2b1879f356aed350030bb40eb45ad362c89d9891096f79a3ab323d3ba5607668",
             "size_bytes": 4976698672
           },
           {
             "path": "model-00002-of-00004.safetensors",
-            "digest": "sha256:****************************************************************",
+            "digest": "sha256:09d433f650646834a83c580877bd60c6d1f88f7755305c12576b5c7058f9af15",
             "size_bytes": 4999802720
           },
           {
             "path": "model-00003-of-00004.safetensors",
-            "digest": "sha256:****************************************************************",
+            "digest": "sha256:fc1cdddd6bfa91128d6e94ee73d0ce62bfcdb7af29e978ddcab30c66ae9ea7fa",
             "size_bytes": 4915916176
           },
           {
             "path": "model-00004-of-00004.safetensors",
-            "digest": "sha256:****************************************************************",
+            "digest": "sha256:92ecfe1a2414458b4821ac8c13cf8cb70aed66b5eea8dc5ad9eeb4ff309d6d7b",
             "size_bytes": 1168138808
           },
           {
