@@ -52,6 +52,15 @@ class VLLMRuntime:
         return self._embedding_microbatch_results(model, [("__single_assignment__", items)])["__single_assignment__"]
 
     @staticmethod
+    def _control_plane_priced_cost() -> dict[str, Any]:
+        return {
+            "provider_cost": {"currency": "usd", "amount": "0.0000"},
+            "customer_charge": {"currency": "usd", "amount": "0.0000"},
+            "platform_margin": {"currency": "usd", "amount": "0.0000"},
+            "pricing_source": "catalog",
+        }
+
+    @staticmethod
     def _usage_share(usage: dict[str, Any], text_count: int, total_texts: int) -> dict[str, int]:
         prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
         total_tokens = int(usage.get("total_tokens", prompt_tokens) or 0)
@@ -109,12 +118,7 @@ class VLLMRuntime:
                         "input_texts": text_count,
                         "total_tokens": usage_share["total_tokens"],
                     },
-                    "cost": {
-                        "provider_cost": {"currency": "usd", "amount": "0.0001"},
-                        "customer_charge": {"currency": "usd", "amount": "0.0002"},
-                        "platform_margin": {"currency": "usd", "amount": "0.0001"},
-                        "pricing_source": "provider_usage_rate_card",
-                    },
+                    "cost": self._control_plane_priced_cost(),
                     "output": item_payload,
                     "completed_at": datetime.now(timezone.utc).isoformat(),
                 }
@@ -208,12 +212,7 @@ class VLLMRuntime:
                 "output_tokens": usage.get("completion_tokens", 0),
                 "total_tokens": usage.get("total_tokens", 0),
             },
-            "cost": {
-                "provider_cost": {"currency": "usd", "amount": "0.0010"},
-                "customer_charge": {"currency": "usd", "amount": "0.0014"},
-                "platform_margin": {"currency": "usd", "amount": "0.0004"},
-                "pricing_source": "provider_usage_rate_card",
-            },
+            "cost": self._control_plane_priced_cost(),
             "output": payload,
             "completed_at": datetime.now(timezone.utc).isoformat(),
         }
