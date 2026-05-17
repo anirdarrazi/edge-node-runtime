@@ -1,0 +1,42 @@
+{"event":"poll","size":1200,"batch_id":"batch_ad672e69a41a466eada7e7dbe8cae7d4","state":"queued","counts":{"total":1200,"pending":1200,"running":0,"completed":0,"failed":0,"canceled":0},"polls":1,"elapsed_seconds":11}
+{"event":"poll","size":1200,"batch_id":"batch_ad672e69a41a466eada7e7dbe8cae7d4","state":"running","counts":{"total":1200,"pending":1200,"running":0,"completed":0,"failed":0,"canceled":0},"polls":2,"elapsed_seconds":21}
+{"event":"poll","size":1200,"batch_id":"batch_ad672e69a41a466eada7e7dbe8cae7d4","state":"running","counts":{"total":1200,"pending":1200,"running":0,"completed":0,"failed":0,"canceled":0},"polls":3,"elapsed_seconds":31}
+{"event":"poll","size":1200,"batch_id":"batch_ad672e69a41a466eada7e7dbe8cae7d4","state":"running","counts":{"total":1200,"pending":1200,"running":0,"completed":0,"failed":0,"canceled":0},"polls":4,"elapsed_seconds":42}
+{"event":"poll","size":1200,"batch_id":"batch_ad672e69a41a466eada7e7dbe8cae7d4","state":"running","counts":{"total":1200,"pending":1200,"running":0,"completed":0,"failed":0,"canceled":0},"polls":5,"elapsed_seconds":52}
+{"event":"poll","size":1200,"batch_id":"batch_ad672e69a41a466eada7e7dbe8cae7d4","state":"running","counts":{"total":1200,"pending":1200,"running":0,"completed":0,"failed":0,"canceled":0},"polls":6,"elapsed_seconds":62}
+{"event":"poll","size":1200,"batch_id":"batch_ad672e69a41a466eada7e7dbe8cae7d4","state":"running","counts":{"total":1200,"pending":1200,"running":0,"completed":0,"failed":0,"canceled":0},"polls":7,"elapsed_seconds":72}
+{"event":"poll","size":1200,"batch_id":"batch_ad672e69a41a466eada7e7dbe8cae7d4","state":"running","counts":{"total":1200,"pending":1200,"running":0,"completed":0,"failed":0,"canceled":0},"polls":8,"elapsed_seconds":83}
+{"event":"poll","size":1200,"batch_id":"batch_ad672e69a41a466eada7e7dbe8cae7d4","state":"completed","counts":{"total":1200,"pending":0,"running":0,"completed":1200,"failed":0,"canceled":0},"polls":9,"elapsed_seconds":94}
+{
+  "event": "summary",
+  "run_id": "fleet_multinode_1200_20260517_03",
+  "size": 1200,
+  "batch_id": "batch_ad672e69a41a466eada7e7dbe8cae7d4",
+  "state": "completed",
+  "counts": {
+    "total": 1200,
+    "pending": 0,
+    "running": 0,
+    "completed": 1200,
+    "failed": 0,
+    "canceled": 0
+  },
+  "elapsed_seconds": 94,
+  "polls": 9,
+  "quote_id": "qlock_247e0a0db78d4e0e80345337594abeb4",
+  "quote_work_unit_item_counts": [
+    250,
+    250,
+    250,
+    250,
+    200
+  ],
+  "selected_providers": [
+    "autonomousc"
+  ],
+  "provider_breakdown": {
+    "autonomousc": 1200
+  },
+  "output_preview_rows": 5,
+  "receipt_ok": true
+}
