@@ -416,14 +416,12 @@ class VastAPI:
             "rentable": {"eq": True},
             "rented": {"eq": False},
             "num_gpus": {"eq": 1},
-            "gpu_frac": {"eq": 1},
             "gpu_ram": {"gte": int(config.min_vram_gb * 1024)},
             "disk_space": {"gte": int(config.disk_gb)},
             "reliability": {"gte": float(config.min_reliability)},
             "inet_down": {"gte": float(config.min_inet_down_mbps)},
+            "verified": {"eq": True},
         }
-        if not model_requires_rtx_5060_ti_gemma_policy(config.model):
-            payload["verified"] = {"eq": True}
         response = self._request_with_retries("post", "/bundles/", json=payload)
         response.raise_for_status()
         body = response.json()

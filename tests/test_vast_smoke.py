@@ -137,6 +137,16 @@ class FakeGetClient:
         return self.responses.pop(0)
 
 
+class FakePostClient:
+    def __init__(self, responses: list[FakeResponse]) -> None:
+        self.responses = list(responses)
+        self.post_calls: list[tuple[str, dict[str, object]]] = []
+
+    def post(self, path: str, **kwargs: object) -> FakeResponse:
+        self.post_calls.append((path, dict(kwargs)))
+        return self.responses.pop(0)
+
+
 class TimedRuntimeProbeClient(FakeRuntimeProbeClient):
     def __init__(
         self,
@@ -1091,6 +1101,44 @@ def test_get_instance_retries_transient_http_errors(monkeypatch) -> None:
         "/instances/424242/",
         "/instances/424242/",
     ]
+
+
+def test_search_offers_does_not_require_gpu_frac_for_single_gpu_hosts() -> None:
+    client = FakePostClient(
+        responses=[
+            FakeResponse(
+                200,
+                {
+                    "offers": [
+                        {
+                            "id": 506016,
+                            "gpu_name": "RTX 5060 Ti",
+                            "gpu_frac": 0.125,
+                            "num_gpus": 1,
+                        }
+                    ]
+                },
+            )
+        ]
+    )
+    api = vast_smoke.VastAPI("secret", client=client)
+    config = vast_smoke.VastSmokeConfig(
+        api_key="secret",
+        model="google/gemma-4-E4B-it",
+        min_vram_gb=16,
+        min_reliability=0.9,
+        min_inet_down_mbps=100,
+    )
+
+    offers = api.search_offers(config)
+
+    assert offers == [{"id": 506016, "gpu_name": "RTX 5060 Ti", "gpu_frac": 0.125, "num_gpus": 1}]
+    assert client.post_calls[0][0] == "/bundles/"
+    payload = client.post_calls[0][1]["json"]
+    assert isinstance(payload, dict)
+    assert payload["num_gpus"] == {"eq": 1}
+    assert payload["verified"] == {"eq": True}
+    assert "gpu_frac" not in payload
 
 
 def test_wait_for_instance_allows_extra_time_while_image_layers_are_still_downloading() -> None:
