@@ -7,6 +7,7 @@ from io import StringIO
 from pathlib import Path
 
 import node_agent.vast_smoke as vast_smoke
+import node_agent.vast_fleet_plan as vast_fleet_plan
 
 
 class FakeClock:
@@ -1307,6 +1308,31 @@ def test_build_config_defaults_follow_vast_launch_profile() -> None:
     assert config.min_cuda_max_good == 12.9
 
 
+def test_build_config_accepts_fleet_offer_controls() -> None:
+    config = vast_smoke.build_config_from_args(
+        vast_smoke.parse_args(
+            [
+                "--api-key",
+                "secret",
+                "--preferred-offer-id",
+                "2003",
+                "--exclude-offer-id",
+                "2001",
+                "--exclude-offer-ids",
+                "2002,2001",
+                "--exclude-machine-id",
+                "HOST-A",
+                "--exclude-machine-ids",
+                "host-b,42",
+            ]
+        )
+    )
+
+    assert config.preferred_offer_id == 2003
+    assert config.exclude_offer_ids == (2001, 2002)
+    assert config.exclude_machine_ids == ("42", "host-a", "host-b")
+
+
 def test_build_config_uses_response_probe_defaults_for_non_embedding_models() -> None:
     config = vast_smoke.build_config_from_args(
         vast_smoke.parse_args(["--api-key", "secret", "--model", "Qwen/Qwen2.5-1.5B-Instruct"])
@@ -1561,3 +1587,75 @@ def test_affordable_offers_require_minimum_cuda_max_good() -> None:
     )
 
     assert [offer["id"] for offer in offers] == [2]
+
+
+def test_affordable_offers_support_fleet_offer_and_machine_exclusions() -> None:
+    offers = vast_smoke.affordable_offers(
+        [
+            {
+                "id": 1001,
+                "machine_id": "host-a",
+                "gpu_name": "RTX 3090",
+                "gpu_ram": 24576,
+                "dph_total": 0.11,
+                "reliability": 0.997,
+                "inet_down": 800,
+                "cuda_max_good": 13.0,
+            },
+            {
+                "id": 1002,
+                "machine_id": "host-b",
+                "gpu_name": "RTX 3090",
+                "gpu_ram": 24576,
+                "dph_total": 0.12,
+                "reliability": 0.995,
+                "inet_down": 600,
+                "cuda_max_good": 13.0,
+            },
+            {
+                "id": 1003,
+                "machine_id": "host-c",
+                "gpu_name": "RTX 3090",
+                "gpu_ram": 24576,
+                "dph_total": 0.13,
+                "reliability": 0.995,
+                "inet_down": 600,
+                "cuda_max_good": 13.0,
+            },
+        ],
+        max_price=0.20,
+        min_cuda_max_good=12.9,
+        exclude_offer_ids=(1001,),
+        exclude_machine_ids=("host-b",),
+    )
+
+    assert [offer["id"] for offer in offers] == [1003]
+
+
+def test_affordable_offers_preferred_offer_is_strict() -> None:
+    offers = vast_smoke.affordable_offers(
+        [
+            {"id": 1001, "gpu_name": "RTX 3090", "gpu_ram": 24576, "dph_total": 0.11, "reliability": 0.997, "inet_down": 800, "cuda_max_good": 13.0},
+            {"id": 1002, "gpu_name": "RTX 3090", "gpu_ram": 24576, "dph_total": 0.12, "reliability": 0.995, "inet_down": 600, "cuda_max_good": 13.0},
+        ],
+        max_price=0.20,
+        min_cuda_max_good=12.9,
+        preferred_offer_id=1002,
+    )
+
+    assert [offer["id"] for offer in offers] == [1002]
+
+
+def test_fleet_planner_selects_distinct_machine_ids() -> None:
+    selected = vast_fleet_plan.select_fleet_offers(
+        [
+            {"id": 1001, "machine_id": "host-a"},
+            {"id": 1002, "machine_id": "host-a"},
+            {"id": 1003, "machine_id": "host-b"},
+            {"id": 1004},
+        ],
+        nodes=3,
+    )
+
+    assert [offer["id"] for offer in selected] == [1001, 1003, 1004]
+    assert vast_fleet_plan.launch_args_for_offer(selected[0]) == ["--preferred-offer-id", "1001"]

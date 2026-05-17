@@ -87,6 +87,15 @@ DEFAULT_GEMMA_E4B_VLLM_EXTRA_ARGS = (
     "--quantization fp8 --kv-cache-dtype fp8 --gpu-memory-utilization 0.913 "
     "--max-num-seqs 8 --generation-config vllm --skip-mm-profiling"
 )
+OFFER_MACHINE_ID_KEYS = (
+    "machine_id",
+    "machine_uuid",
+    "host_id",
+    "host_uuid",
+    "host_machine_id",
+    "server_id",
+    "server_uuid",
+)
 DEFAULT_BENCHMARK_RESPONSES_INPUT = (
     "Write exactly 180 plain-text words about keeping GPU inference cheap on rented nodes. "
     "Do not use bullet points or markdown. Do not include a preamble or conclusion."
@@ -145,6 +154,9 @@ class VastSmokeConfig:
     min_reliability: float = DEFAULT_MIN_RELIABILITY
     min_inet_down_mbps: float = DEFAULT_MIN_INET_DOWN_MBPS
     offer_limit: int = DEFAULT_OFFER_LIMIT
+    preferred_offer_id: int | None = None
+    exclude_offer_ids: tuple[int, ...] = ()
+    exclude_machine_ids: tuple[str, ...] = ()
     launch_timeout_seconds: float = DEFAULT_LAUNCH_TIMEOUT_SECONDS
     readiness_timeout_seconds: float = DEFAULT_READINESS_TIMEOUT_SECONDS
     poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS
@@ -179,6 +191,21 @@ class VastSmokeConfig:
     def __post_init__(self) -> None:
         normalized_api_kind = str(self.api_kind or "auto").strip().lower() or "auto"
         object.__setattr__(self, "api_kind", normalized_api_kind)
+        try:
+            preferred_offer_id = int(self.preferred_offer_id or 0)
+        except (TypeError, ValueError):
+            preferred_offer_id = 0
+        object.__setattr__(self, "preferred_offer_id", preferred_offer_id if preferred_offer_id > 0 else None)
+        object.__setattr__(
+            self,
+            "exclude_offer_ids",
+            parse_int_list(list(self.exclude_offer_ids or ())),
+        )
+        object.__setattr__(
+            self,
+            "exclude_machine_ids",
+            parse_identity_list(list(self.exclude_machine_ids or ())),
+        )
         expected_path = expected_api_path_for(normalized_api_kind, self.model)
         current_path = str(self.smoke_test_api_path or "").strip()
         if not current_path or (
@@ -544,6 +571,63 @@ def _int_value(payload: dict[str, Any], key: str, default: int = 0) -> int:
         return default
 
 
+def _normalized_identity_value(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        numeric = float(text)
+    except ValueError:
+        return text.lower()
+    if numeric.is_integer():
+        return str(int(numeric))
+    return text.lower()
+
+
+def offer_machine_id_values(offer: Mapping[str, Any]) -> set[str]:
+    values: set[str] = set()
+    for key in OFFER_MACHINE_ID_KEYS:
+        value = _normalized_identity_value(offer.get(key))
+        if value:
+            values.add(value)
+    return values
+
+
+def parse_int_list(values: list[Any] | tuple[Any, ...] | None = None, *, csv_value: str | None = None) -> tuple[int, ...]:
+    parsed: set[int] = set()
+    for value in values or ():
+        try:
+            numeric = int(value)
+        except (TypeError, ValueError):
+            continue
+        if numeric > 0:
+            parsed.add(numeric)
+    for raw in str(csv_value or "").split(","):
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            numeric = int(raw)
+        except ValueError:
+            continue
+        if numeric > 0:
+            parsed.add(numeric)
+    return tuple(sorted(parsed))
+
+
+def parse_identity_list(values: list[Any] | tuple[Any, ...] | None = None, *, csv_value: str | None = None) -> tuple[str, ...]:
+    parsed: set[str] = set()
+    for value in values or ():
+        normalized = _normalized_identity_value(value)
+        if normalized:
+            parsed.add(normalized)
+    for raw in str(csv_value or "").split(","):
+        normalized = _normalized_identity_value(raw)
+        if normalized:
+            parsed.add(normalized)
+    return tuple(sorted(parsed))
+
+
 def response_json_object(response: Any) -> dict[str, Any] | None:
     try:
         payload = response.json()
@@ -590,7 +674,7 @@ def format_vast_launch_error(
 
 
 def summarize_offer(offer: dict[str, Any]) -> dict[str, Any]:
-    return {
+    summary = {
         "id": offer.get("id"),
         "gpu_name": offer.get("gpu_name"),
         "gpu_ram_gb": round(_float_value(offer, "gpu_ram") / 1024.0, 1),
@@ -602,6 +686,10 @@ def summarize_offer(offer: dict[str, Any]) -> dict[str, Any]:
         "geolocation": offer.get("geolocation"),
         "verification": offer.get("verification") or ("verified" if offer.get("verified") else None),
     }
+    machine_ids = sorted(offer_machine_id_values(offer))
+    if machine_ids:
+        summary["machine_ids"] = machine_ids
+    return summary
 
 
 def offer_fit_tier(offer: dict[str, Any], *, model: str | None = None) -> int:
@@ -692,6 +780,9 @@ def affordable_offers(
     max_price: float,
     min_cuda_max_good: float | None,
     model: str | None = None,
+    preferred_offer_id: int | None = None,
+    exclude_offer_ids: tuple[int, ...] | list[int] | None = None,
+    exclude_machine_ids: tuple[str, ...] | list[str] | None = None,
 ) -> list[dict[str, Any]]:
     affordable = [
         offer for offer in offers if _float_value(offer, "dph_total", default=10**9) <= float(max_price)
@@ -717,8 +808,32 @@ def affordable_offers(
             "after requiring an RTX 5060 Ti 16GB host with enough disk and direct ports "
             "for google/gemma-4-E4B-it."
         )
+    preferred_offer_id = int(preferred_offer_id or 0)
+    selected = runtime_supported
+    if preferred_offer_id > 0:
+        selected = [offer for offer in selected if _int_value(offer, "id") == preferred_offer_id]
+        if not selected:
+            raise VastSmokeError(
+                f"Preferred Vast offer {preferred_offer_id} is not available or does not match the current filters."
+            )
+    excluded_offer_ids = set(parse_int_list(list(exclude_offer_ids or ())))
+    if excluded_offer_ids:
+        selected = [offer for offer in selected if _int_value(offer, "id") not in excluded_offer_ids]
+        if not selected:
+            raise VastSmokeError(
+                "No suitable Vast offers remained after excluding planned or already-rented offer IDs."
+            )
+    excluded_machine_ids = set(parse_identity_list(list(exclude_machine_ids or ())))
+    if excluded_machine_ids:
+        selected = [
+            offer for offer in selected if offer_machine_id_values(offer).isdisjoint(excluded_machine_ids)
+        ]
+        if not selected:
+            raise VastSmokeError(
+                "No suitable Vast offers remained after excluding planned or already-rented machine IDs."
+            )
     return sorted(
-        runtime_supported,
+        selected,
         key=lambda offer: offer_readiness_sort_key(offer, model=model),
     )
 
@@ -1636,6 +1751,9 @@ class VastSmokeRunner:
                 "benchmark_concurrency": int(config.benchmark_concurrency),
                 "benchmark_profile": config.benchmark_profile,
                 "vllm_extra_args": str(config.vllm_extra_args or "").strip() or None,
+                "preferred_offer_id": config.preferred_offer_id,
+                "exclude_offer_ids": list(config.exclude_offer_ids),
+                "exclude_machine_ids": list(config.exclude_machine_ids),
             },
             "selected_offer": None,
             "instance": None,
@@ -1656,6 +1774,9 @@ class VastSmokeRunner:
                 max_price=config.max_price,
                 min_cuda_max_good=config.min_cuda_max_good,
                 model=config.model,
+                preferred_offer_id=config.preferred_offer_id,
+                exclude_offer_ids=config.exclude_offer_ids,
+                exclude_machine_ids=config.exclude_machine_ids,
             )
             launch_errors: list[str] = []
             for selected_offer in candidate_offers:
@@ -1870,6 +1991,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--min-reliability", type=float, default=DEFAULT_MIN_RELIABILITY, help="Minimum host reliability score.")
     parser.add_argument("--min-inet-down-mbps", type=float, default=DEFAULT_MIN_INET_DOWN_MBPS, help="Minimum internet download speed in Mbps.")
     parser.add_argument("--offer-limit", type=int, default=DEFAULT_OFFER_LIMIT, help="Maximum number of Vast offers to inspect.")
+    parser.add_argument("--preferred-offer-id", type=int, default=0, help="Launch only this pre-planned Vast offer ID.")
+    parser.add_argument(
+        "--exclude-offer-id",
+        action="append",
+        type=int,
+        default=[],
+        help="Skip a Vast offer ID. May be passed more than once for fleet-safe launches.",
+    )
+    parser.add_argument(
+        "--exclude-offer-ids",
+        default="",
+        help="Comma-separated Vast offer IDs to skip for fleet-safe launches.",
+    )
+    parser.add_argument(
+        "--exclude-machine-id",
+        action="append",
+        default=[],
+        help="Skip a Vast machine/host identity when the offer payload exposes one. May be passed more than once.",
+    )
+    parser.add_argument(
+        "--exclude-machine-ids",
+        default="",
+        help="Comma-separated Vast machine/host identities to skip when the offer payload exposes them.",
+    )
     parser.add_argument("--launch-timeout-seconds", type=float, default=DEFAULT_LAUNCH_TIMEOUT_SECONDS, help="How long to wait for the Vast instance to boot.")
     parser.add_argument("--readiness-timeout-seconds", type=float, default=DEFAULT_READINESS_TIMEOUT_SECONDS, help="How long to wait for /v1/models to come up.")
     parser.add_argument("--poll-interval-seconds", type=float, default=DEFAULT_POLL_INTERVAL_SECONDS, help="Polling interval for Vast and runtime readiness.")
@@ -1998,6 +2143,19 @@ def build_config_from_args(args: argparse.Namespace) -> VastSmokeConfig:
         min_reliability=max(0.0, min(1.0, float(args.min_reliability))),
         min_inet_down_mbps=max(0.0, float(args.min_inet_down_mbps)),
         offer_limit=max(1, int(args.offer_limit)),
+        preferred_offer_id=(
+            max(1, int(getattr(args, "preferred_offer_id", 0)))
+            if int(getattr(args, "preferred_offer_id", 0) or 0) > 0
+            else None
+        ),
+        exclude_offer_ids=parse_int_list(
+            list(getattr(args, "exclude_offer_id", []) or ()),
+            csv_value=str(getattr(args, "exclude_offer_ids", "") or ""),
+        ),
+        exclude_machine_ids=parse_identity_list(
+            list(getattr(args, "exclude_machine_id", []) or ()),
+            csv_value=str(getattr(args, "exclude_machine_ids", "") or ""),
+        ),
         launch_timeout_seconds=max(30.0, float(args.launch_timeout_seconds)),
         readiness_timeout_seconds=max(30.0, float(args.readiness_timeout_seconds)),
         poll_interval_seconds=max(1.0, float(args.poll_interval_seconds)),
