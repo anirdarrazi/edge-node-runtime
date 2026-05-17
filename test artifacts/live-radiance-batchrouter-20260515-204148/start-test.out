@@ -1,0 +1,111 @@
+usage: vast_smoke.py [-h] [--api-key API_KEY] [--config CONFIG]
+                     [--model MODEL] [--image IMAGE] [--max-price MAX_PRICE]
+                     [--disk-gb DISK_GB] [--min-vram-gb MIN_VRAM_GB]
+                     [--min-cuda-max-good MIN_CUDA_MAX_GOOD]
+                     [--min-reliability MIN_RELIABILITY]
+                     [--min-inet-down-mbps MIN_INET_DOWN_MBPS]
+                     [--offer-limit OFFER_LIMIT]
+                     [--launch-timeout-seconds LAUNCH_TIMEOUT_SECONDS]
+                     [--readiness-timeout-seconds READINESS_TIMEOUT_SECONDS]
+                     [--poll-interval-seconds POLL_INTERVAL_SECONDS]
+                     [--api {auto,embeddings,responses,chat_completions}]
+                     [--runtype RUNTYPE]
+                     [--max-context-tokens MAX_CONTEXT_TOKENS]
+                     [--durable-node] [--edge-control-url EDGE_CONTROL_URL]
+                     [--node-id NODE_ID] [--node-key NODE_KEY]
+                     [--node-region NODE_REGION]
+                     [--runtime-profile RUNTIME_PROFILE]
+                     [--max-batch-tokens MAX_BATCH_TOKENS]
+                     [--max-concurrent-assignments MAX_CONCURRENT_ASSIGNMENTS]
+                     [--max-local-queue-assignments MAX_LOCAL_QUEUE_ASSIGNMENTS]
+                     [--pull-bundle-size PULL_BUNDLE_SIZE]
+                     [--vllm-startup-timeout-seconds VLLM_STARTUP_TIMEOUT_SECONDS]
+                     [--benchmark-requests BENCHMARK_REQUESTS]
+                     [--benchmark-concurrency BENCHMARK_CONCURRENCY]
+                     [--benchmark-profile {balanced,input_heavy,output_heavy}]
+                     [--vllm-extra-args VLLM_EXTRA_ARGS] [--hf-token HF_TOKEN]
+                     [--json-indent JSON_INDENT]
+
+Launch a cheap Vast.ai serve-only smoke test for the AUTONOMOUSc runtime.
+
+options:
+  -h, --help            show this help message and exit
+  --api-key API_KEY     Temporary Vast.ai API key. Prefer VAST_API_KEY or a
+                        local config file over typing it directly.
+  --config CONFIG       Optional local JSON config file for secrets such as
+                        api_key and hf_token. Defaults to
+                        C:\Users\Anir\AppData\Local\AUTONOMOUSc Edge
+                        Node\local-secrets\vast-smoke.json when that file
+                        already exists.
+  --model MODEL         Model to warm for the smoke test.
+  --image IMAGE         Container image to launch on Vast.ai.
+  --max-price MAX_PRICE
+                        Maximum hourly price in USD.
+  --disk-gb DISK_GB     Requested disk size in GB.
+  --min-vram-gb MIN_VRAM_GB
+                        Minimum GPU VRAM in GB.
+  --min-cuda-max-good MIN_CUDA_MAX_GOOD
+                        Minimum cuda_max_good host capability for the selected
+                        runtime image.
+  --min-reliability MIN_RELIABILITY
+                        Minimum host reliability score.
+  --min-inet-down-mbps MIN_INET_DOWN_MBPS
+                        Minimum internet download speed in Mbps.
+  --offer-limit OFFER_LIMIT
+                        Maximum number of Vast offers to inspect.
+  --launch-timeout-seconds LAUNCH_TIMEOUT_SECONDS
+                        How long to wait for the Vast instance to boot.
+  --readiness-timeout-seconds READINESS_TIMEOUT_SECONDS
+                        How long to wait for /v1/models to come up.
+  --poll-interval-seconds POLL_INTERVAL_SECONDS
+                        Polling interval for Vast and runtime readiness.
+  --api {auto,embeddings,responses,chat_completions}
+                        Smoke probe type to run after /v1/models succeeds.
+  --runtype RUNTYPE     Vast runtype to use. Defaults to the runtime profile
+                        launch metadata.
+  --max-context-tokens MAX_CONTEXT_TOKENS
+                        Requested max context tokens before model-safe
+                        clamping.
+  --durable-node        Launch full node-agent mode and keep the Vast instance
+                        alive after smoke success.
+  --edge-control-url EDGE_CONTROL_URL
+                        Control-plane URL for durable node mode. Defaults to
+                        EDGE_CONTROL_URL or AUTONOMOUSC_EDGE_BASE_URL.
+  --node-id NODE_ID     Pre-registered AUTONOMOUSc node id for durable node
+                        mode. Defaults to NODE_ID.
+  --node-key NODE_KEY   Pre-registered AUTONOMOUSc node key for durable node
+                        mode. Defaults to NODE_KEY.
+  --node-region NODE_REGION
+                        Concrete scheduler region for durable node mode.
+  --runtime-profile RUNTIME_PROFILE
+                        Runtime profile advertised by durable node mode.
+  --max-batch-tokens MAX_BATCH_TOKENS
+                        Durable node assignment token budget cap.
+  --max-concurrent-assignments MAX_CONCURRENT_ASSIGNMENTS
+                        Durable node advertised assignment concurrency.
+  --max-local-queue-assignments MAX_LOCAL_QUEUE_ASSIGNMENTS
+                        Durable node local reservoir target for assignment
+                        prefetch.
+  --pull-bundle-size PULL_BUNDLE_SIZE
+                        Durable node scheduler pull bundle target for keeping
+                        the GPU fed.
+  --vllm-startup-timeout-seconds VLLM_STARTUP_TIMEOUT_SECONDS
+                        Local vLLM warmup timeout passed into the launched
+                        container. Durable Gemma defaults to 1800.
+  --benchmark-requests BENCHMARK_REQUESTS
+                        Optional number of post-readiness benchmark requests
+                        to run for throughput and cost-per-million-token
+                        metrics.
+  --benchmark-concurrency BENCHMARK_CONCURRENCY
+                        How many benchmark requests to keep in flight at once
+                        for burst throughput testing.
+  --benchmark-profile {balanced,input_heavy,output_heavy}
+                        Benchmark workload shape for separating prompt-heavy
+                        and decode-heavy economics.
+  --vllm-extra-args VLLM_EXTRA_ARGS
+                        Optional extra vLLM server arguments passed through
+                        VLLM_EXTRA_ARGS during the Vast launch.
+  --hf-token HF_TOKEN   Optional Hugging Face token for gated models. Prefer
+                        HUGGING_FACE_HUB_TOKEN or the local config file.
+  --json-indent JSON_INDENT
+                        JSON indentation level for the report.

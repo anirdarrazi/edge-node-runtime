@@ -1,0 +1,34 @@
+{
+  "status": 503,
+  "ok": false,
+  "payload": {
+    "error": {
+      "code": "provider_capacity_unavailable",
+      "message": "No aggregate provider capacity can accept all items for work unit workload:v2|workflow:custom|op:responses|model:google-gemma|task:responses|schema:none|tags:none|privacy:standard|sla:standard|responses|gemma-4-e4b-it|google/gemma|standard|global|standard|hybrid|{\"allow_fallbacks\":false,\"only\":[\"autonomousc\"]}|autonomousc.",
+      "details": {
+        "work_unit": "workload:v2|workflow:custom|op:responses|model:google-gemma|task:responses|schema:none|tags:none|privacy:standard|sla:standard|responses|gemma-4-e4b-it|google/gemma|standard|global|standard|hybrid|{\"allow_fallbacks\":false,\"only\":[\"autonomousc\"]}|autonomousc",
+        "operation": "responses",
+        "model_family": "google/gemma",
+        "routing_mode": "hybrid",
+        "privacy_tier": "standard",
+        "sla_tier": "standard",
+        "requested_items": 501,
+        "allocated_items": 500,
+        "candidate_providers": [
+          "autonomousc"
+        ],
+        "provider_capacity": [
+          {
+            "provider": "autonomousc",
+            "max_items": 500,
+            "capacity_limit_reasons": [
+              "max_batch_items"
+            ]
+          }
+        ],
+        "provider_failures": []
+      }
+    }
+  },
+  "text": "{\"error\":{\"code\":\"provider_capacity_unavailable\",\"message\":\"No aggregate provider capacity can accept all items for work unit workload:v2|workflow:custom|op:responses|model:google-gemma|task:responses|schema:none|tags:none|privacy:standard|sla:standard|responses|gemma-4-e4b-it|google/gemma|standard|global|standard|hybrid|{\\\"allow_fallbacks\\\":false,\\\"only\\\":[\\\"autonomousc\\\"]}|autonomousc.\",\"details\":{\"work_unit\":\"workload:v2|workflow:custom|op:responses|model:google-gemma|task:responses|schema:none|tags:none|privacy:standard|sla:standard|responses|gemma-4-e4b-it|google/gemma|standard|global|standard|hybrid|{\\\"allow_fallbacks\\\":false,\\\"only\\\":[\\\"autonomousc\\\"]}|autonomousc\",\"operation\":\"responses\",\"model_family\":\"google/gemma\",\"routing_mode\":\"hybrid\",\"privacy_tier\":\"standard\",\"sla_tier\":\"standard\",\"requested_items\":501,\"allocated_items\":500,\"candidate_providers\":[\"autonomousc\"],\"provider_capacity\":[{\"provider\":\"autonomousc\",\"max_items\":500,\"capacity_limit_reasons\":[\"max_batch_items\"]}],\"provider_failures\":[]}}}"
+}

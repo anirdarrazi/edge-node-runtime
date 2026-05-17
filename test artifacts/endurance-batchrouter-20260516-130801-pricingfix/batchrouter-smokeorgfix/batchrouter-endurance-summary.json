@@ -1,0 +1,327 @@
+{
+  "run_id": "endurance_20260516_130801_pricingfix_smokeorgfix",
+  "base_url": "https://batchrouter.com",
+  "quoted_at": "2026-05-16T11:25:24.613Z",
+  "quote_summaries": [
+    {
+      "size": 100,
+      "http_status": 200,
+      "ok": true,
+      "quote_id": "qlock_045372bf685d46a8a57f8bd46329dcfe",
+      "total_usd": 0.001059,
+      "work_unit_item_counts": [
+        100
+      ],
+      "selected_providers": [
+        "autonomousc"
+      ],
+      "route_candidate_providers": [
+        "autonomousc"
+      ],
+      "error_code": null,
+      "error_message": null,
+      "error_details": null
+    },
+    {
+      "size": 250,
+      "http_status": 200,
+      "ok": true,
+      "quote_id": "qlock_07e690faf6b1451a82d0bbbbf113bfe6",
+      "total_usd": 0.002753,
+      "work_unit_item_counts": [
+        250
+      ],
+      "selected_providers": [
+        "autonomousc"
+      ],
+      "route_candidate_providers": [
+        "autonomousc"
+      ],
+      "error_code": null,
+      "error_message": null,
+      "error_details": null
+    },
+    {
+      "size": 500,
+      "http_status": 200,
+      "ok": true,
+      "quote_id": "qlock_de9c7e99c32d4c3d9cbfe8af07a96ed1",
+      "total_usd": 0.005507,
+      "work_unit_item_counts": [
+        500
+      ],
+      "selected_providers": [
+        "autonomousc"
+      ],
+      "route_candidate_providers": [
+        "autonomousc"
+      ],
+      "error_code": null,
+      "error_message": null,
+      "error_details": null
+    },
+    {
+      "size": 501,
+      "http_status": 503,
+      "ok": false,
+      "quote_id": null,
+      "total_usd": null,
+      "work_unit_item_counts": [],
+      "selected_providers": [],
+      "route_candidate_providers": [],
+      "error_code": "provider_capacity_unavailable",
+      "error_message": "No aggregate provider capacity can accept all items for work unit workload:v2|workflow:custom|op:responses|model:google-gemma|task:responses|schema:none|tags:none|privacy:standard|sla:standard|responses|gemma-4-e4b-it|google/gemma|standard|global|standard|hybrid|{\"allow_fallbacks\":false,\"only\":[\"autonomousc\"]}|autonomousc.",
+      "error_details": {
+        "work_unit": "workload:v2|workflow:custom|op:responses|model:google-gemma|task:responses|schema:none|tags:none|privacy:standard|sla:standard|responses|gemma-4-e4b-it|google/gemma|standard|global|standard|hybrid|{\"allow_fallbacks\":false,\"only\":[\"autonomousc\"]}|autonomousc",
+        "operation": "responses",
+        "model_family": "google/gemma",
+        "routing_mode": "hybrid",
+        "privacy_tier": "standard",
+        "sla_tier": "standard",
+        "requested_items": 501,
+        "allocated_items": 500,
+        "candidate_providers": [
+          "autonomousc"
+        ],
+        "provider_capacity": [
+          {
+            "provider": "autonomousc",
+            "max_items": 500,
+            "capacity_limit_reasons": [
+              "max_batch_items"
+            ]
+          }
+        ],
+        "provider_failures": []
+      }
+    },
+    {
+      "size": 520,
+      "http_status": 503,
+      "ok": false,
+      "quote_id": null,
+      "total_usd": null,
+      "work_unit_item_counts": [],
+      "selected_providers": [],
+      "route_candidate_providers": [],
+      "error_code": "provider_capacity_unavailable",
+      "error_message": "No aggregate provider capacity can accept all items for work unit workload:v2|workflow:custom|op:responses|model:google-gemma|task:responses|schema:none|tags:none|privacy:standard|sla:standard|responses|gemma-4-e4b-it|google/gemma|standard|global|standard|hybrid|{\"allow_fallbacks\":false,\"only\":[\"autonomousc\"]}|autonomousc.",
+      "error_details": {
+        "work_unit": "workload:v2|workflow:custom|op:responses|model:google-gemma|task:responses|schema:none|tags:none|privacy:standard|sla:standard|responses|gemma-4-e4b-it|google/gemma|standard|global|standard|hybrid|{\"allow_fallbacks\":false,\"only\":[\"autonomousc\"]}|autonomousc",
+        "operation": "responses",
+        "model_family": "google/gemma",
+        "routing_mode": "hybrid",
+        "privacy_tier": "standard",
+        "sla_tier": "standard",
+        "requested_items": 520,
+        "allocated_items": 500,
+        "candidate_providers": [
+          "autonomousc"
+        ],
+        "provider_capacity": [
+          {
+            "provider": "autonomousc",
+            "max_items": 500,
+            "capacity_limit_reasons": [
+              "max_batch_items"
+            ]
+          }
+        ],
+        "provider_failures": []
+      }
+    },
+    {
+      "size": 600,
+      "http_status": 503,
+      "ok": false,
+      "quote_id": null,
+      "total_usd": null,
+      "work_unit_item_counts": [],
+      "selected_providers": [],
+      "route_candidate_providers": [],
+      "error_code": "provider_capacity_unavailable",
+      "error_message": "No aggregate provider capacity can accept all items for work unit workload:v2|workflow:custom|op:responses|model:google-gemma|task:responses|schema:none|tags:none|privacy:standard|sla:standard|responses|gemma-4-e4b-it|google/gemma|standard|global|standard|hybrid|{\"allow_fallbacks\":false,\"only\":[\"autonomousc\"]}|autonomousc.",
+      "error_details": {
+        "work_unit": "workload:v2|workflow:custom|op:responses|model:google-gemma|task:responses|schema:none|tags:none|privacy:standard|sla:standard|responses|gemma-4-e4b-it|google/gemma|standard|global|standard|hybrid|{\"allow_fallbacks\":false,\"only\":[\"autonomousc\"]}|autonomousc",
+        "operation": "responses",
+        "model_family": "google/gemma",
+        "routing_mode": "hybrid",
+        "privacy_tier": "standard",
+        "sla_tier": "standard",
+        "requested_items": 600,
+        "allocated_items": 500,
+        "candidate_providers": [
+          "autonomousc"
+        ],
+        "provider_capacity": [
+          {
+            "provider": "autonomousc",
+            "max_items": 500,
+            "capacity_limit_reasons": [
+              "max_batch_items"
+            ]
+          }
+        ],
+        "provider_failures": []
+      }
+    },
+    {
+      "size": 750,
+      "http_status": 503,
+      "ok": false,
+      "quote_id": null,
+      "total_usd": null,
+      "work_unit_item_counts": [],
+      "selected_providers": [],
+      "route_candidate_providers": [],
+      "error_code": "provider_capacity_unavailable",
+      "error_message": "No aggregate provider capacity can accept all items for work unit workload:v2|workflow:custom|op:responses|model:google-gemma|task:responses|schema:none|tags:none|privacy:standard|sla:standard|responses|gemma-4-e4b-it|google/gemma|standard|global|standard|hybrid|{\"allow_fallbacks\":false,\"only\":[\"autonomousc\"]}|autonomousc.",
+      "error_details": {
+        "work_unit": "workload:v2|workflow:custom|op:responses|model:google-gemma|task:responses|schema:none|tags:none|privacy:standard|sla:standard|responses|gemma-4-e4b-it|google/gemma|standard|global|standard|hybrid|{\"allow_fallbacks\":false,\"only\":[\"autonomousc\"]}|autonomousc",
+        "operation": "responses",
+        "model_family": "google/gemma",
+        "routing_mode": "hybrid",
+        "privacy_tier": "standard",
+        "sla_tier": "standard",
+        "requested_items": 750,
+        "allocated_items": 500,
+        "candidate_providers": [
+          "autonomousc"
+        ],
+        "provider_capacity": [
+          {
+            "provider": "autonomousc",
+            "max_items": 500,
+            "capacity_limit_reasons": [
+              "max_batch_items"
+            ]
+          }
+        ],
+        "provider_failures": []
+      }
+    },
+    {
+      "size": 1000,
+      "http_status": 503,
+      "ok": false,
+      "quote_id": null,
+      "total_usd": null,
+      "work_unit_item_counts": [],
+      "selected_providers": [],
+      "route_candidate_providers": [],
+      "error_code": "provider_capacity_unavailable",
+      "error_message": "No aggregate provider capacity can accept all items for work unit workload:v2|workflow:custom|op:responses|model:google-gemma|task:responses|schema:none|tags:none|privacy:standard|sla:standard|responses|gemma-4-e4b-it|google/gemma|standard|global|standard|hybrid|{\"allow_fallbacks\":false,\"only\":[\"autonomousc\"]}|autonomousc.",
+      "error_details": {
+        "work_unit": "workload:v2|workflow:custom|op:responses|model:google-gemma|task:responses|schema:none|tags:none|privacy:standard|sla:standard|responses|gemma-4-e4b-it|google/gemma|standard|global|standard|hybrid|{\"allow_fallbacks\":false,\"only\":[\"autonomousc\"]}|autonomousc",
+        "operation": "responses",
+        "model_family": "google/gemma",
+        "routing_mode": "hybrid",
+        "privacy_tier": "standard",
+        "sla_tier": "standard",
+        "requested_items": 1000,
+        "allocated_items": 500,
+        "candidate_providers": [
+          "autonomousc"
+        ],
+        "provider_capacity": [
+          {
+            "provider": "autonomousc",
+            "max_items": 500,
+            "capacity_limit_reasons": [
+              "max_batch_items"
+            ]
+          }
+        ],
+        "provider_failures": []
+      }
+    }
+  ],
+  "batches": [
+    {
+      "size": 100,
+      "batch_id": "batch_2a8a51561a4f442a864782b5c4032827",
+      "state": "completed",
+      "elapsed_seconds": 61,
+      "polls": 6,
+      "counts": {
+        "total": 100,
+        "pending": 0,
+        "running": 0,
+        "completed": 100,
+        "failed": 0,
+        "canceled": 0
+      },
+      "provider_breakdown": {
+        "autonomousc": 100
+      },
+      "preview_rows": 5,
+      "output_file_present": true,
+      "quote_total_usd": 0.001059,
+      "billing_receipt_present": true,
+      "success_rate": 1,
+      "failed_items": 0
+    },
+    {
+      "size": 250,
+      "batch_id": "batch_4541fb674f3a4cdc805931e8887bc854",
+      "state": "completed",
+      "elapsed_seconds": 82,
+      "polls": 8,
+      "counts": {
+        "total": 250,
+        "pending": 0,
+        "running": 0,
+        "completed": 250,
+        "failed": 0,
+        "canceled": 0
+      },
+      "provider_breakdown": {
+        "autonomousc": 250
+      },
+      "preview_rows": 5,
+      "output_file_present": true,
+      "quote_total_usd": 0.002753,
+      "billing_receipt_present": true,
+      "success_rate": 1,
+      "failed_items": 0
+    },
+    {
+      "size": 500,
+      "batch_id": "batch_8805c4a125034fd89f51d3649a8ba4f1",
+      "state": "completed",
+      "elapsed_seconds": 153,
+      "polls": 15,
+      "counts": {
+        "total": 500,
+        "pending": 0,
+        "running": 0,
+        "completed": 500,
+        "failed": 0,
+        "canceled": 0
+      },
+      "provider_breakdown": {
+        "autonomousc": 500
+      },
+      "preview_rows": 5,
+      "output_file_present": true,
+      "quote_total_usd": 0.005507,
+      "billing_receipt_present": true,
+      "success_rate": 1,
+      "failed_items": 0
+    },
+    {
+      "size": 750,
+      "skipped": true,
+      "reason": "quote_failed",
+      "quote_error_code": "provider_capacity_unavailable"
+    },
+    {
+      "size": 1000,
+      "skipped": true,
+      "reason": "quote_failed",
+      "quote_error_code": "provider_capacity_unavailable"
+    }
+  ],
+  "spent_quoted_usd": 0.009319,
+  "passed": true
+}

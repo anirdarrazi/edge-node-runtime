@@ -573,7 +573,7 @@ def test_process_assignment_bundle_microbatches_compatible_embeddings():
                     {
                         "batch_item_id": items[0]["batch_item_id"],
                         "customer_item_id": items[0]["customer_item_id"],
-                        "provider": "autonomousc_edge",
+                        "provider": "autonomousc",
                         "provider_model": model,
                         "status": "completed",
                         "usage": {"input_texts": 1, "total_tokens": 1},
@@ -913,7 +913,7 @@ def test_run_worker_loop_prefetches_local_queue_and_drains_it_in_microbatches(
                     {
                         "batch_item_id": items[0]["batch_item_id"],
                         "customer_item_id": items[0]["customer_item_id"],
-                        "provider": "autonomousc_edge",
+                        "provider": "autonomousc",
                         "provider_model": model,
                         "status": "completed",
                         "usage": {"input_texts": 1, "total_tokens": 1},
@@ -1026,7 +1026,7 @@ def test_run_worker_loop_prefetches_next_batch_while_microbatch_is_active(
                     {
                         "batch_item_id": items[0]["batch_item_id"],
                         "customer_item_id": items[0]["customer_item_id"],
-                        "provider": "autonomousc_edge",
+                        "provider": "autonomousc",
                         "provider_model": model,
                         "status": "completed",
                         "usage": {"input_texts": 1, "total_tokens": 1},
@@ -1121,7 +1121,7 @@ def test_run_worker_loop_marks_nonretryable_completion_failures_as_failed():
                 {
                     "batch_item_id": "item_1",
                     "customer_item_id": "cust_1",
-                    "provider": "autonomousc_edge",
+                    "provider": "autonomousc",
                     "provider_model": "meta-llama/Llama-3.1-8B-Instruct",
                     "status": "completed",
                     "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},

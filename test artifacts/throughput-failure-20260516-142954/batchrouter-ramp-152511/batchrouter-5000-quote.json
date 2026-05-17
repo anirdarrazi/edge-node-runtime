@@ -1,0 +1,11 @@
+{
+  "status": 400,
+  "ok": false,
+  "payload": {
+    "error": {
+      "code": "invalid_request",
+      "message": "items: Array must contain at most 1000 element(s)"
+    }
+  },
+  "text": "{\"error\":{\"code\":\"invalid_request\",\"message\":\"items: Array must contain at most 1000 element(s)\"}}"
+}

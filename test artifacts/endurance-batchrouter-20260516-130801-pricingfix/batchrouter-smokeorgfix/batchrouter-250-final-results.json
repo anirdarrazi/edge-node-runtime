@@ -1,0 +1,400 @@
+{
+  "batch_id": "batch_4541fb674f3a4cdc805931e8887bc854",
+  "work_order_id": "wo_88c0040c16604660908990b51fd7b34f",
+  "state": "completed",
+  "counts": {
+    "total": 250,
+    "pending": 0,
+    "running": 0,
+    "completed": 250,
+    "failed": 0,
+    "canceled": 0
+  },
+  "deadline_at": "2026-05-17T11:19:44.451Z",
+  "route_version": "rv_default",
+  "output_file": {
+    "id": "file_e49c69abec1c462881b59e212cc41bbc",
+    "url": "https://batchrouter.com/v1/files/file_e49c69abec1c462881b59e212cc41bbc?expires=1778931449&signature=e5WWI8Z5CmDCeVDmHLclBgVBMXxsvzM5VoXUW3LtH_4"
+  },
+  "review_file": null,
+  "error_file": null,
+  "retry_file": null,
+  "route_receipt_file": {
+    "id": "file_591c2ceddf994683a9698b7050e0b793",
+    "url": "https://batchrouter.com/v1/files/file_591c2ceddf994683a9698b7050e0b793?expires=1778931449&signature=yYiMK4O_GtMrr-zakHPyvVG5w2CUU5e8MTqHxrzz6wY"
+  },
+  "output_preview_rows": [
+    {
+      "custom_id": "endurance_20260516_130801_pricingfix_smokeorgfix_250_0000",
+      "customer_item_id": "endurance_20260516_130801_pricingfix_smokeorgfix_250_0000",
+      "batch_item_id": "item_abad9e63d2ae475b97d5cc6e0eb660fb",
+      "sequence_no": 0,
+      "operation": "responses",
+      "status": "completed",
+      "provider": "autonomousc",
+      "provider_model": "google/gemma-4-E4B-it",
+      "attempt": 1,
+      "usage": {
+        "input_tokens": 18,
+        "output_tokens": 7,
+        "total_tokens": 25
+      },
+      "cost": {
+        "provider_cost": {
+          "currency": "usd",
+          "amount": "0.0000"
+        },
+        "customer_charge": {
+          "currency": "usd",
+          "amount": "0.0000"
+        },
+        "platform_margin": {
+          "currency": "usd",
+          "amount": "0.0000"
+        },
+        "pricing_source": "catalog",
+        "provider_execution_ref": "pexec_5182662e08784cc0b29296910378edc8"
+      },
+      "output": {
+        "id": "chatcmpl-81426a816908381a",
+        "object": "chat.completion",
+        "created": 1778930489,
+        "model": "google/gemma-4-E4B-it",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "endurance-ok-0",
+              "refusal": null,
+              "annotations": null,
+              "audio": null,
+              "function_call": null,
+              "tool_calls": [],
+              "reasoning": null
+            },
+            "logprobs": null,
+            "finish_reason": "stop",
+            "stop_reason": 106,
+            "token_ids": null
+          }
+        ],
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": {
+          "prompt_tokens": 18,
+          "total_tokens": 25,
+          "completion_tokens": 7,
+          "prompt_tokens_details": null
+        },
+        "prompt_logprobs": null,
+        "prompt_token_ids": null,
+        "kv_transfer_params": null
+      },
+      "error": null,
+      "completed_at": "2026-05-16T11:21:29.142722+00:00"
+    },
+    {
+      "custom_id": "endurance_20260516_130801_pricingfix_smokeorgfix_250_0001",
+      "customer_item_id": "endurance_20260516_130801_pricingfix_smokeorgfix_250_0001",
+      "batch_item_id": "item_a6907841d4f24afdae4225615d211008",
+      "sequence_no": 1,
+      "operation": "responses",
+      "status": "completed",
+      "provider": "autonomousc",
+      "provider_model": "google/gemma-4-E4B-it",
+      "attempt": 1,
+      "usage": {
+        "input_tokens": 18,
+        "output_tokens": 7,
+        "total_tokens": 25
+      },
+      "cost": {
+        "provider_cost": {
+          "currency": "usd",
+          "amount": "0.0000"
+        },
+        "customer_charge": {
+          "currency": "usd",
+          "amount": "0.0000"
+        },
+        "platform_margin": {
+          "currency": "usd",
+          "amount": "0.0000"
+        },
+        "pricing_source": "catalog",
+        "provider_execution_ref": "pexec_5182662e08784cc0b29296910378edc8"
+      },
+      "output": {
+        "id": "chatcmpl-9e64e16259da6b34",
+        "object": "chat.completion",
+        "created": 1778930489,
+        "model": "google/gemma-4-E4B-it",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "endurance-ok-1",
+              "refusal": null,
+              "annotations": null,
+              "audio": null,
+              "function_call": null,
+              "tool_calls": [],
+              "reasoning": null
+            },
+            "logprobs": null,
+            "finish_reason": "stop",
+            "stop_reason": 106,
+            "token_ids": null
+          }
+        ],
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": {
+          "prompt_tokens": 18,
+          "total_tokens": 25,
+          "completion_tokens": 7,
+          "prompt_tokens_details": null
+        },
+        "prompt_logprobs": null,
+        "prompt_token_ids": null,
+        "kv_transfer_params": null
+      },
+      "error": null,
+      "completed_at": "2026-05-16T11:21:29.266563+00:00"
+    },
+    {
+      "custom_id": "endurance_20260516_130801_pricingfix_smokeorgfix_250_0002",
+      "customer_item_id": "endurance_20260516_130801_pricingfix_smokeorgfix_250_0002",
+      "batch_item_id": "item_6c9bf2c1a4584e9abd790ab62110888d",
+      "sequence_no": 2,
+      "operation": "responses",
+      "status": "completed",
+      "provider": "autonomousc",
+      "provider_model": "google/gemma-4-E4B-it",
+      "attempt": 1,
+      "usage": {
+        "input_tokens": 18,
+        "output_tokens": 7,
+        "total_tokens": 25
+      },
+      "cost": {
+        "provider_cost": {
+          "currency": "usd",
+          "amount": "0.0000"
+        },
+        "customer_charge": {
+          "currency": "usd",
+          "amount": "0.0000"
+        },
+        "platform_margin": {
+          "currency": "usd",
+          "amount": "0.0000"
+        },
+        "pricing_source": "catalog",
+        "provider_execution_ref": "pexec_5182662e08784cc0b29296910378edc8"
+      },
+      "output": {
+        "id": "chatcmpl-b3918ec1ad24cbbb",
+        "object": "chat.completion",
+        "created": 1778930489,
+        "model": "google/gemma-4-E4B-it",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "endurance-ok-2",
+              "refusal": null,
+              "annotations": null,
+              "audio": null,
+              "function_call": null,
+              "tool_calls": [],
+              "reasoning": null
+            },
+            "logprobs": null,
+            "finish_reason": "stop",
+            "stop_reason": 106,
+            "token_ids": null
+          }
+        ],
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": {
+          "prompt_tokens": 18,
+          "total_tokens": 25,
+          "completion_tokens": 7,
+          "prompt_tokens_details": null
+        },
+        "prompt_logprobs": null,
+        "prompt_token_ids": null,
+        "kv_transfer_params": null
+      },
+      "error": null,
+      "completed_at": "2026-05-16T11:21:29.390330+00:00"
+    },
+    {
+      "custom_id": "endurance_20260516_130801_pricingfix_smokeorgfix_250_0003",
+      "customer_item_id": "endurance_20260516_130801_pricingfix_smokeorgfix_250_0003",
+      "batch_item_id": "item_626b032d8cec4f6cb677b699752e874a",
+      "sequence_no": 3,
+      "operation": "responses",
+      "status": "completed",
+      "provider": "autonomousc",
+      "provider_model": "google/gemma-4-E4B-it",
+      "attempt": 1,
+      "usage": {
+        "input_tokens": 18,
+        "output_tokens": 7,
+        "total_tokens": 25
+      },
+      "cost": {
+        "provider_cost": {
+          "currency": "usd",
+          "amount": "0.0000"
+        },
+        "customer_charge": {
+          "currency": "usd",
+          "amount": "0.0000"
+        },
+        "platform_margin": {
+          "currency": "usd",
+          "amount": "0.0000"
+        },
+        "pricing_source": "catalog",
+        "provider_execution_ref": "pexec_5182662e08784cc0b29296910378edc8"
+      },
+      "output": {
+        "id": "chatcmpl-80d91d71071d9d46",
+        "object": "chat.completion",
+        "created": 1778930489,
+        "model": "google/gemma-4-E4B-it",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "endurance-ok-3",
+              "refusal": null,
+              "annotations": null,
+              "audio": null,
+              "function_call": null,
+              "tool_calls": [],
+              "reasoning": null
+            },
+            "logprobs": null,
+            "finish_reason": "stop",
+            "stop_reason": 106,
+            "token_ids": null
+          }
+        ],
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": {
+          "prompt_tokens": 18,
+          "total_tokens": 25,
+          "completion_tokens": 7,
+          "prompt_tokens_details": null
+        },
+        "prompt_logprobs": null,
+        "prompt_token_ids": null,
+        "kv_transfer_params": null
+      },
+      "error": null,
+      "completed_at": "2026-05-16T11:21:29.514160+00:00"
+    },
+    {
+      "custom_id": "endurance_20260516_130801_pricingfix_smokeorgfix_250_0004",
+      "customer_item_id": "endurance_20260516_130801_pricingfix_smokeorgfix_250_0004",
+      "batch_item_id": "item_2860e8df337546d9b3293ef35b35ce54",
+      "sequence_no": 4,
+      "operation": "responses",
+      "status": "completed",
+      "provider": "autonomousc",
+      "provider_model": "google/gemma-4-E4B-it",
+      "attempt": 1,
+      "usage": {
+        "input_tokens": 18,
+        "output_tokens": 7,
+        "total_tokens": 25
+      },
+      "cost": {
+        "provider_cost": {
+          "currency": "usd",
+          "amount": "0.0000"
+        },
+        "customer_charge": {
+          "currency": "usd",
+          "amount": "0.0000"
+        },
+        "platform_margin": {
+          "currency": "usd",
+          "amount": "0.0000"
+        },
+        "pricing_source": "catalog",
+        "provider_execution_ref": "pexec_5182662e08784cc0b29296910378edc8"
+      },
+      "output": {
+        "id": "chatcmpl-b1802f020f97c0e4",
+        "object": "chat.completion",
+        "created": 1778930489,
+        "model": "google/gemma-4-E4B-it",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "endurance-ok-4",
+              "refusal": null,
+              "annotations": null,
+              "audio": null,
+              "function_call": null,
+              "tool_calls": [],
+              "reasoning": null
+            },
+            "logprobs": null,
+            "finish_reason": "stop",
+            "stop_reason": 106,
+            "token_ids": null
+          }
+        ],
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": {
+          "prompt_tokens": 18,
+          "total_tokens": 25,
+          "completion_tokens": 7,
+          "prompt_tokens_details": null
+        },
+        "prompt_logprobs": null,
+        "prompt_token_ids": null,
+        "kv_transfer_params": null
+      },
+      "error": null,
+      "completed_at": "2026-05-16T11:21:29.637986+00:00"
+    }
+  ],
+  "review_preview_rows": [],
+  "error_preview_rows": [],
+  "retry_preview_rows": [],
+  "confidence_gating": {
+    "auto_deliver_count": 250,
+    "review_count": 0,
+    "retry_count": 0,
+    "auto_delivery_threshold": 0.8,
+    "approval_rule": "auto_deliver_high_confidence",
+    "summary": "250 rows auto-delivered."
+  },
+  "retry_recommendations": [],
+  "preview_limit": 5,
+  "execution_summary": {
+    "routed_providers": [
+      "autonomousc"
+    ],
+    "final_provider_breakdown": {
+      "autonomousc": 250
+    }
+  },
+  "sample_run": null
+}

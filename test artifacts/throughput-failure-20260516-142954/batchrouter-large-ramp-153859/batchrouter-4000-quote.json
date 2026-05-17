@@ -1,0 +1,14 @@
+{
+  "status": 500,
+  "ok": false,
+  "payload": {
+    "error": {
+      "code": "internal_error",
+      "message": "Unexpected server error. Reference err_fed29a397a3d4e0399c48fdeee87467a.",
+      "details": {
+        "error_id": "err_fed29a397a3d4e0399c48fdeee87467a"
+      }
+    }
+  },
+  "text": "{\"error\":{\"code\":\"internal_error\",\"message\":\"Unexpected server error. Reference err_fed29a397a3d4e0399c48fdeee87467a.\",\"details\":{\"error_id\":\"err_fed29a397a3d4e0399c48fdeee87467a\"}}}"
+}

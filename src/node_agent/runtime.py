@@ -110,7 +110,7 @@ class VLLMRuntime:
                 {
                     "batch_item_id": item["batch_item_id"],
                     "customer_item_id": item["customer_item_id"],
-                    "provider": "autonomousc_edge",
+                    "provider": "autonomousc",
                     "provider_model": model,
                     "status": "completed",
                     "usage": {
@@ -204,7 +204,7 @@ class VLLMRuntime:
         return {
             "batch_item_id": item["batch_item_id"],
             "customer_item_id": item["customer_item_id"],
-            "provider": "autonomousc_edge",
+            "provider": "autonomousc",
             "provider_model": model,
             "status": "completed",
             "usage": {

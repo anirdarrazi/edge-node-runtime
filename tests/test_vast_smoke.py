@@ -489,10 +489,18 @@ def test_runner_durable_gemma_node_uses_full_mode_and_stays_live() -> None:
     assert env["NODE_REGION"] == "eu-se-1"
     assert env["MAX_CONTEXT_TOKENS"] == "32768"
     assert env["MAX_BATCH_TOKENS"] == "32768"
-    assert env["MAX_CONCURRENT_ASSIGNMENTS"] == "12"
-    assert env["MAX_CONCURRENT_ASSIGNMENTS_CAP"] == "12"
-    assert env["MAX_LOCAL_QUEUE_ASSIGNMENTS"] == "24"
-    assert env["PULL_BUNDLE_SIZE"] == "40"
+    assert env["TARGET_BATCH_ITEMS"] == "100"
+    assert env["MAX_BATCH_ITEMS"] == "250"
+    assert env["TARGET_BATCH_TOKENS"] == "12000"
+    assert env["MAX_CONCURRENT_CHUNKS"] == "4"
+    assert env["AVAILABLE_QUEUE_ITEMS"] == "5000"
+    assert env["AVAILABLE_QUEUE_TOKENS"] == "262144"
+    assert env["MAX_QUEUED_ITEMS"] == "5000"
+    assert env["BATCHROUTER_CAPACITY_TIER"] == "edge"
+    assert env["MAX_CONCURRENT_ASSIGNMENTS"] == "8"
+    assert env["MAX_CONCURRENT_ASSIGNMENTS_CAP"] == "8"
+    assert env["MAX_LOCAL_QUEUE_ASSIGNMENTS"] == "64"
+    assert env["PULL_BUNDLE_SIZE"] == "64"
     assert env["VLLM_STARTUP_TIMEOUT_SECONDS"] == "1800"
     assert env["VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS"] == "1"
     assert env["HEAT_GOVERNOR_MODE"] == "100"
@@ -503,7 +511,7 @@ def test_runner_durable_gemma_node_uses_full_mode_and_stays_live() -> None:
     assert env["MIN_GPU_MEMORY_HEADROOM_PCT"] == "5"
     assert env["ALLOW_HIGH_GPU_MEMORY_PRESSURE"] == "true"
     assert "--quantization fp8" in env["VLLM_EXTRA_ARGS"]
-    assert "--max-num-seqs 12" in env["VLLM_EXTRA_ARGS"]
+    assert "--max-num-seqs 8" in env["VLLM_EXTRA_ARGS"]
 
 
 def test_runner_retries_stale_offer_and_keeps_real_error_body() -> None:

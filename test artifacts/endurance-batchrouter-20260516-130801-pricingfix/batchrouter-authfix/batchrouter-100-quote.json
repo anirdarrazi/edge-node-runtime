@@ -1,0 +1,14 @@
+{
+  "status": 500,
+  "ok": false,
+  "payload": {
+    "error": {
+      "code": "internal_error",
+      "message": "Unexpected server error. Reference err_f6cb6ba4783b48b1a90a41a0502b3e4f.",
+      "details": {
+        "error_id": "err_f6cb6ba4783b48b1a90a41a0502b3e4f"
+      }
+    }
+  },
+  "text": "{\"error\":{\"code\":\"internal_error\",\"message\":\"Unexpected server error. Reference err_f6cb6ba4783b48b1a90a41a0502b3e4f.\",\"details\":{\"error_id\":\"err_f6cb6ba4783b48b1a90a41a0502b3e4f\"}}}"
+}

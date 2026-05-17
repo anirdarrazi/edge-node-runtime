@@ -1,0 +1,86 @@
+{
+  "run_id": "autonomousc_5060_ti_5000_postfix_20260516_160720",
+  "base_url": "https://batchrouter.com",
+  "quoted_at": "2026-05-16T14:31:29.460Z",
+  "quote_summaries": [
+    {
+      "size": 5000,
+      "http_status": 200,
+      "ok": true,
+      "quote_id": "qlock_fc998f7de0e4416face7128ac79b2049",
+      "total_usd": 0.0555962,
+      "work_unit_item_counts": [
+        250,
+        250,
+        250,
+        250,
+        250,
+        250,
+        250,
+        250,
+        250,
+        250,
+        250,
+        250,
+        250,
+        250,
+        250,
+        250,
+        250,
+        250,
+        250,
+        250
+      ],
+      "selected_providers": [
+        "autonomousc"
+      ],
+      "route_candidate_providers": [
+        "autonomousc"
+      ],
+      "error_code": null,
+      "error_message": null,
+      "error_details": null
+    },
+    {
+      "size": 5250,
+      "http_status": 400,
+      "ok": false,
+      "quote_id": null,
+      "total_usd": null,
+      "work_unit_item_counts": [],
+      "selected_providers": [],
+      "route_candidate_providers": [],
+      "error_code": "invalid_request",
+      "error_message": "items: Array must contain at most 5000 element(s)",
+      "error_details": null
+    }
+  ],
+  "batches": [
+    {
+      "size": 5000,
+      "batch_id": "batch_192a310ac55444f9ab57bc0ac825b50e",
+      "state": "completed",
+      "elapsed_seconds": 1184,
+      "polls": 38,
+      "counts": {
+        "total": 5000,
+        "pending": 0,
+        "running": 0,
+        "completed": 5000,
+        "failed": 0,
+        "canceled": 0
+      },
+      "provider_breakdown": {
+        "autonomousc": 5000
+      },
+      "preview_rows": 5,
+      "output_file_present": true,
+      "quote_total_usd": 0.0555962,
+      "billing_receipt_present": true,
+      "success_rate": 1,
+      "failed_items": 0
+    }
+  ],
+  "spent_quoted_usd": 0.055596,
+  "passed": true
+}

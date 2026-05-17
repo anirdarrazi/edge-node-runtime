@@ -1,0 +1,210 @@
+{
+  "run_id": "autonomousc_5060_ti_large_20260516_153859",
+  "base_url": "https://batchrouter.com",
+  "quoted_at": "2026-05-16T13:49:35.541Z",
+  "quote_summaries": [
+    {
+      "size": 1000,
+      "http_status": 200,
+      "ok": true,
+      "quote_id": "qlock_8e4aab7a716b49d7baa76208fe4a9e96",
+      "total_usd": 0.0111162,
+      "work_unit_item_counts": [
+        250,
+        250,
+        250,
+        250
+      ],
+      "selected_providers": [
+        "autonomousc"
+      ],
+      "route_candidate_providers": [
+        "autonomousc"
+      ],
+      "error_code": null,
+      "error_message": null,
+      "error_details": null
+    },
+    {
+      "size": 1500,
+      "http_status": 200,
+      "ok": true,
+      "quote_id": "qlock_d5d4623e892d4920a43f11d46f8b1766",
+      "total_usd": 0.0166762,
+      "work_unit_item_counts": [
+        250,
+        250,
+        250,
+        250,
+        250,
+        250
+      ],
+      "selected_providers": [
+        "autonomousc"
+      ],
+      "route_candidate_providers": [
+        "autonomousc"
+      ],
+      "error_code": null,
+      "error_message": null,
+      "error_details": null
+    },
+    {
+      "size": 2000,
+      "http_status": 200,
+      "ok": true,
+      "quote_id": "qlock_4a264cec58fc4d57a2d71a78eaae2ec3",
+      "total_usd": 0.0222362,
+      "work_unit_item_counts": [
+        250,
+        250,
+        250,
+        250,
+        250,
+        250,
+        250,
+        250
+      ],
+      "selected_providers": [
+        "autonomousc"
+      ],
+      "route_candidate_providers": [
+        "autonomousc"
+      ],
+      "error_code": null,
+      "error_message": null,
+      "error_details": null
+    },
+    {
+      "size": 3000,
+      "http_status": 200,
+      "ok": true,
+      "quote_id": "qlock_40654da721214d48a8dea3ad7d2862bf",
+      "total_usd": 0.0333562,
+      "work_unit_item_counts": [
+        250,
+        250,
+        250,
+        250,
+        250,
+        250,
+        250,
+        250,
+        250,
+        250,
+        250,
+        250
+      ],
+      "selected_providers": [
+        "autonomousc"
+      ],
+      "route_candidate_providers": [
+        "autonomousc"
+      ],
+      "error_code": null,
+      "error_message": null,
+      "error_details": null
+    },
+    {
+      "size": 4000,
+      "http_status": 500,
+      "ok": false,
+      "quote_id": null,
+      "total_usd": null,
+      "work_unit_item_counts": [],
+      "selected_providers": [],
+      "route_candidate_providers": [],
+      "error_code": "internal_error",
+      "error_message": "Unexpected server error. Reference err_fed29a397a3d4e0399c48fdeee87467a.",
+      "error_details": {
+        "error_id": "err_fed29a397a3d4e0399c48fdeee87467a"
+      }
+    },
+    {
+      "size": 5000,
+      "http_status": 500,
+      "ok": false,
+      "quote_id": null,
+      "total_usd": null,
+      "work_unit_item_counts": [],
+      "selected_providers": [],
+      "route_candidate_providers": [],
+      "error_code": "internal_error",
+      "error_message": "Unexpected server error. Reference err_c63e82f9d60442359ec80841a290e9fd.",
+      "error_details": {
+        "error_id": "err_c63e82f9d60442359ec80841a290e9fd"
+      }
+    },
+    {
+      "size": 5250,
+      "http_status": 400,
+      "ok": false,
+      "quote_id": null,
+      "total_usd": null,
+      "work_unit_item_counts": [],
+      "selected_providers": [],
+      "route_candidate_providers": [],
+      "error_code": "invalid_request",
+      "error_message": "items: Array must contain at most 5000 element(s)",
+      "error_details": null
+    }
+  ],
+  "batches": [
+    {
+      "size": 1500,
+      "batch_id": "batch_cc19c625d93a4715910ada68d2ec9b4b",
+      "state": "completed",
+      "elapsed_seconds": 152,
+      "polls": 5,
+      "counts": {
+        "total": 1500,
+        "pending": 0,
+        "running": 0,
+        "completed": 1500,
+        "failed": 0,
+        "canceled": 0
+      },
+      "provider_breakdown": {
+        "autonomousc": 1500
+      },
+      "preview_rows": 5,
+      "output_file_present": true,
+      "quote_total_usd": 0.0166762,
+      "billing_receipt_present": true,
+      "success_rate": 1,
+      "failed_items": 0
+    },
+    {
+      "size": 3000,
+      "batch_id": "batch_21fad47f0eb44081959d55ff15e9dc41",
+      "state": "completed",
+      "elapsed_seconds": 214,
+      "polls": 7,
+      "counts": {
+        "total": 3000,
+        "pending": 0,
+        "running": 0,
+        "completed": 3000,
+        "failed": 0,
+        "canceled": 0
+      },
+      "provider_breakdown": {
+        "autonomousc": 3000
+      },
+      "preview_rows": 5,
+      "output_file_present": true,
+      "quote_total_usd": 0.0333562,
+      "billing_receipt_present": true,
+      "success_rate": 1,
+      "failed_items": 0
+    },
+    {
+      "size": 5000,
+      "skipped": true,
+      "reason": "quote_failed",
+      "quote_error_code": "internal_error"
+    }
+  ],
+  "spent_quoted_usd": 0.050032,
+  "passed": true
+}

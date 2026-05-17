@@ -1,0 +1,39 @@
+{
+  "batch_id": "batch_150c225b751c45f39c401590a4e2a218",
+  "work_order_id": "wo_3f15b5fdc3a24c219a6bc8cbfe63018a",
+  "state": "running",
+  "counts": {
+    "total": 1,
+    "pending": 1,
+    "running": 0,
+    "completed": 0,
+    "failed": 0,
+    "canceled": 0
+  },
+  "deadline_at": "2026-05-16T19:17:46.058Z",
+  "route_version": "rv_default",
+  "output_file": null,
+  "review_file": null,
+  "error_file": null,
+  "retry_file": null,
+  "route_receipt_file": null,
+  "output_preview_rows": [],
+  "review_preview_rows": [],
+  "error_preview_rows": [],
+  "retry_preview_rows": [],
+  "confidence_gating": {
+    "auto_deliver_count": 0,
+    "review_count": 0,
+    "retry_count": 0,
+    "auto_delivery_threshold": 0.8,
+    "approval_rule": "auto_deliver_high_confidence",
+    "summary": "No rows have been classified for delivery yet."
+  },
+  "retry_recommendations": [],
+  "preview_limit": 5,
+  "execution_summary": {
+    "routed_providers": [],
+    "final_provider_breakdown": {}
+  },
+  "sample_run": null
+}

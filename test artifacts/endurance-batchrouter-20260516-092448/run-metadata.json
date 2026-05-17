@@ -1,0 +1,15 @@
+{
+  "run_id": "endurance-batchrouter-20260516-092448",
+  "node_id": "node_endurance_ad82dc790cf372939b938ba17cd1a49d",
+  "created_at": "2026-05-16T09:24:48.821Z",
+  "image": "anirdarrazi/autonomousc-ai-edge-runtime@sha256:0ff31a43748bca1287fcc1ab2657e85e9f9bc853c0302cb1c15cccde74fa3247",
+  "planned_batches": [
+    100,
+    250,
+    500
+  ],
+  "quote_boundary_probe": [
+    520,
+    600
+  ]
+}

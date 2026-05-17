@@ -237,7 +237,7 @@ def build_item_results(
         {
             "batch_item_id": batch_item_id,
             "customer_item_id": customer_item_id,
-            "provider": "autonomousc_edge",
+            "provider": "autonomousc",
             "provider_model": model,
             "status": "completed",
             "usage": usage,

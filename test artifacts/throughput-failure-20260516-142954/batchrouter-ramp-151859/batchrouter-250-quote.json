@@ -1,0 +1,11 @@
+{
+  "status": 401,
+  "ok": false,
+  "payload": {
+    "error": {
+      "code": "unauthorized",
+      "message": "Missing or invalid user credentials."
+    }
+  },
+  "text": "{\"error\":{\"code\":\"unauthorized\",\"message\":\"Missing or invalid user credentials.\"}}"
+}

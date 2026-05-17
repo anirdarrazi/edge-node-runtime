@@ -1,0 +1,117 @@
+{
+  "batch_id": "batch_e96f25b7342b48ff964601159a8f858d",
+  "work_order_id": "wo_2bbf9fc21a6f487287cf129b0e41d677",
+  "state": "completed",
+  "counts": {
+    "total": 1,
+    "pending": 0,
+    "running": 0,
+    "completed": 1,
+    "failed": 0,
+    "canceled": 0
+  },
+  "deadline_at": "2026-05-17T08:32:58.992Z",
+  "route_version": "rv_default",
+  "output_file": {
+    "id": "file_f45e070b844f4a47b411f39d08138eb6",
+    "url": "https://batchrouter.com/v1/files/file_f45e070b844f4a47b411f39d08138eb6?expires=1778921365&signature=uMl9q6E_7D1foXtxr5acLBDlkVmE0gcG2VJdWYUQ998"
+  },
+  "review_file": null,
+  "error_file": null,
+  "retry_file": null,
+  "route_receipt_file": null,
+  "output_preview_rows": [
+    {
+      "custom_id": "autonomousc_live_20260516_083257",
+      "customer_item_id": "autonomousc_live_20260516_083257",
+      "batch_item_id": "item_34cda351446a404da578a4ff30f86f67",
+      "sequence_no": 0,
+      "operation": "responses",
+      "status": "completed",
+      "provider": "autonomousc",
+      "provider_model": "google/gemma-4-E4B-it",
+      "attempt": 1,
+      "usage": {
+        "input_tokens": 21,
+        "output_tokens": 9,
+        "total_tokens": 30
+      },
+      "cost": {
+        "provider_cost": {
+          "currency": "usd",
+          "amount": "0.0010"
+        },
+        "customer_charge": {
+          "currency": "usd",
+          "amount": "0.001059"
+        },
+        "platform_margin": {
+          "currency": "usd",
+          "amount": "0.000059"
+        },
+        "pricing_source": "provider_usage_rate_card",
+        "provider_execution_ref": "pexec_ee6010dece8d4c2185504844383cc3ff"
+      },
+      "output": {
+        "id": "chatcmpl-85a874fc65860ab0",
+        "object": "chat.completion",
+        "created": 1778920402,
+        "model": "google/gemma-4-E4B-it",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "autonomousc-new-image-ok",
+              "refusal": null,
+              "annotations": null,
+              "audio": null,
+              "function_call": null,
+              "tool_calls": [],
+              "reasoning": null
+            },
+            "logprobs": null,
+            "finish_reason": "stop",
+            "stop_reason": 106,
+            "token_ids": null
+          }
+        ],
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": {
+          "prompt_tokens": 21,
+          "total_tokens": 30,
+          "completion_tokens": 9,
+          "prompt_tokens_details": null
+        },
+        "prompt_logprobs": null,
+        "prompt_token_ids": null,
+        "kv_transfer_params": null
+      },
+      "error": null,
+      "completed_at": "2026-05-16T08:33:22.425068+00:00"
+    }
+  ],
+  "review_preview_rows": [],
+  "error_preview_rows": [],
+  "retry_preview_rows": [],
+  "confidence_gating": {
+    "auto_deliver_count": 1,
+    "review_count": 0,
+    "retry_count": 0,
+    "auto_delivery_threshold": 0.8,
+    "approval_rule": "auto_deliver_high_confidence",
+    "summary": "1 row auto-delivered."
+  },
+  "retry_recommendations": [],
+  "preview_limit": 5,
+  "execution_summary": {
+    "routed_providers": [
+      "autonomousc"
+    ],
+    "final_provider_breakdown": {
+      "autonomousc": 1
+    }
+  },
+  "sample_run": null
+}

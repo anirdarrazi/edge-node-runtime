@@ -166,6 +166,8 @@ class EdgeControlClient:
             "gpu_memory_gb": self.settings.gpu_memory_gb,
             "max_context_tokens": runtime_tuple.effective_context_tokens or self.settings.max_context_tokens,
             "max_batch_tokens": self.settings.max_batch_tokens,
+            "capacity_status": "active",
+            "heartbeat_ttl_seconds": self.settings.heartbeat_ttl_seconds,
             "max_concurrent_assignments": self.settings.max_concurrent_assignments,
             "max_local_queue_assignments": local_queue_limit,
             "max_pull_bundle_assignments": pull_bundle_limit,
@@ -175,6 +177,20 @@ class EdgeControlClient:
             "target_gpu_utilization_pct": self.settings.target_gpu_utilization_pct,
             "min_gpu_memory_headroom_pct": self.settings.min_gpu_memory_headroom_pct,
         }
+        for key in (
+            "target_batch_items",
+            "max_batch_items",
+            "target_batch_tokens",
+            "max_concurrent_chunks",
+            "available_queue_items",
+            "available_queue_tokens",
+            "max_queued_items",
+            "recommended_batch_items",
+            "batchrouter_capacity_tier",
+        ):
+            value = getattr(self.settings, key)
+            if value is not None:
+                payload[key] = value
         if embedding_concurrency_limit is not None:
             payload["max_concurrent_assignments_embeddings"] = embedding_concurrency_limit
         if embedding_microbatch_limit is not None:

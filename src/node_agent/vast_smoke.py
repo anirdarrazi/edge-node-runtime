@@ -70,14 +70,22 @@ DEFAULT_BENCHMARK_PROFILE = "balanced"
 DEFAULT_DURABLE_NODE_REGION = "eu-se-1"
 DEFAULT_DURABLE_MAX_CONTEXT_TOKENS = 32768
 DEFAULT_DURABLE_MAX_BATCH_TOKENS = 32768
-DEFAULT_DURABLE_MAX_CONCURRENT_ASSIGNMENTS = 12
-DEFAULT_DURABLE_MAX_LOCAL_QUEUE_ASSIGNMENTS = 24
-DEFAULT_DURABLE_PULL_BUNDLE_SIZE = 40
+DEFAULT_DURABLE_TARGET_BATCH_ITEMS = 100
+DEFAULT_DURABLE_MAX_BATCH_ITEMS = 250
+DEFAULT_DURABLE_TARGET_BATCH_TOKENS = 12000
+DEFAULT_DURABLE_MAX_CONCURRENT_CHUNKS = 4
+DEFAULT_DURABLE_MAX_CONCURRENT_ASSIGNMENTS = 8
+DEFAULT_DURABLE_MAX_LOCAL_QUEUE_ASSIGNMENTS = 64
+DEFAULT_DURABLE_PULL_BUNDLE_SIZE = 64
+DEFAULT_DURABLE_AVAILABLE_QUEUE_ITEMS = 5000
+DEFAULT_DURABLE_AVAILABLE_QUEUE_TOKENS = 262144
+DEFAULT_DURABLE_MAX_QUEUED_ITEMS = 5000
+DEFAULT_DURABLE_HEARTBEAT_TTL_SECONDS = 120
 DEFAULT_DURABLE_RUNTIME_PROFILE = "rtx_5060_ti_16gb_gemma4_e4b_it"
 DEFAULT_DURABLE_GEMMA_E4B_VLLM_STARTUP_TIMEOUT_SECONDS = 1800
 DEFAULT_GEMMA_E4B_VLLM_EXTRA_ARGS = (
     "--quantization fp8 --kv-cache-dtype fp8 --gpu-memory-utilization 0.913 "
-    "--max-num-seqs 12 --generation-config vllm --skip-mm-profiling"
+    "--max-num-seqs 8 --generation-config vllm --skip-mm-profiling"
 )
 DEFAULT_BENCHMARK_RESPONSES_INPUT = (
     "Write exactly 180 plain-text words about keeping GPU inference cheap on rented nodes. "
@@ -155,9 +163,17 @@ class VastSmokeConfig:
     node_region: str = DEFAULT_DURABLE_NODE_REGION
     runtime_profile: str = DEFAULT_DURABLE_RUNTIME_PROFILE
     max_batch_tokens: int = DEFAULT_DURABLE_MAX_BATCH_TOKENS
+    target_batch_items: int = DEFAULT_DURABLE_TARGET_BATCH_ITEMS
+    max_batch_items: int = DEFAULT_DURABLE_MAX_BATCH_ITEMS
+    target_batch_tokens: int = DEFAULT_DURABLE_TARGET_BATCH_TOKENS
+    max_concurrent_chunks: int = DEFAULT_DURABLE_MAX_CONCURRENT_CHUNKS
     max_concurrent_assignments: int = DEFAULT_DURABLE_MAX_CONCURRENT_ASSIGNMENTS
     max_local_queue_assignments: int = DEFAULT_DURABLE_MAX_LOCAL_QUEUE_ASSIGNMENTS
     pull_bundle_size: int = DEFAULT_DURABLE_PULL_BUNDLE_SIZE
+    available_queue_items: int = DEFAULT_DURABLE_AVAILABLE_QUEUE_ITEMS
+    available_queue_tokens: int = DEFAULT_DURABLE_AVAILABLE_QUEUE_TOKENS
+    max_queued_items: int = DEFAULT_DURABLE_MAX_QUEUED_ITEMS
+    heartbeat_ttl_seconds: int = DEFAULT_DURABLE_HEARTBEAT_TTL_SECONDS
     vllm_startup_timeout_seconds: int | None = None
 
     def __post_init__(self) -> None:
@@ -746,6 +762,16 @@ def build_launch_env(config: VastSmokeConfig) -> dict[str, str]:
                 "GPU_NAME": "RTX 5060 Ti",
                 "GPU_MEMORY_GB": "16",
                 "MAX_BATCH_TOKENS": str(max(1, int(config.max_batch_tokens))),
+                "TARGET_BATCH_ITEMS": str(max(1, int(config.target_batch_items))),
+                "MAX_BATCH_ITEMS": str(max(1, int(config.max_batch_items))),
+                "TARGET_BATCH_TOKENS": str(max(1, int(config.target_batch_tokens))),
+                "MAX_CONCURRENT_CHUNKS": str(max(1, int(config.max_concurrent_chunks))),
+                "AVAILABLE_QUEUE_ITEMS": str(max(0, int(config.available_queue_items))),
+                "AVAILABLE_QUEUE_TOKENS": str(max(0, int(config.available_queue_tokens))),
+                "MAX_QUEUED_ITEMS": str(max(0, int(config.max_queued_items))),
+                "RECOMMENDED_BATCH_ITEMS": str(max(1, int(config.target_batch_items))),
+                "BATCHROUTER_CAPACITY_TIER": "edge",
+                "HEARTBEAT_TTL_SECONDS": str(max(30, int(config.heartbeat_ttl_seconds))),
                 "MAX_CONCURRENT_ASSIGNMENTS": str(max(1, int(config.max_concurrent_assignments))),
                 "MAX_CONCURRENT_ASSIGNMENTS_CAP": str(max(1, int(config.max_concurrent_assignments))),
                 "MAX_LOCAL_QUEUE_ASSIGNMENTS": str(max(1, int(config.max_local_queue_assignments))),
@@ -1592,6 +1618,13 @@ class VastSmokeRunner:
                 "durable_node": config.durable_node,
                 "max_context_tokens": config.effective_max_context_tokens,
                 "max_batch_tokens": config.max_batch_tokens if config.durable_node else None,
+                "target_batch_items": config.target_batch_items if config.durable_node else None,
+                "max_batch_items": config.max_batch_items if config.durable_node else None,
+                "target_batch_tokens": config.target_batch_tokens if config.durable_node else None,
+                "max_concurrent_chunks": config.max_concurrent_chunks if config.durable_node else None,
+                "available_queue_items": config.available_queue_items if config.durable_node else None,
+                "available_queue_tokens": config.available_queue_tokens if config.durable_node else None,
+                "max_queued_items": config.max_queued_items if config.durable_node else None,
                 "max_concurrent_assignments": config.max_concurrent_assignments if config.durable_node else None,
                 "max_local_queue_assignments": config.max_local_queue_assignments if config.durable_node else None,
                 "pull_bundle_size": config.pull_bundle_size if config.durable_node else None,
@@ -1846,12 +1879,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--runtype", default=DEFAULT_VAST_LAUNCH_PROFILE.runtype, help="Vast runtype to use. Defaults to the runtime profile launch metadata.")
     parser.add_argument("--max-context-tokens", type=int, default=32768, help="Requested max context tokens before model-safe clamping.")
     parser.add_argument("--durable-node", action="store_true", help="Launch full node-agent mode and keep the Vast instance alive after smoke success.")
-    parser.add_argument("--edge-control-url", default="", help="Control-plane URL for durable node mode. Defaults to EDGE_CONTROL_URL or AUTONOMOUSC_EDGE_BASE_URL.")
+    parser.add_argument("--edge-control-url", default="", help="Control-plane URL for durable node mode. Defaults to EDGE_CONTROL_URL or AUTONOMOUSC_BASE_URL.")
     parser.add_argument("--node-id", default="", help="Pre-registered AUTONOMOUSc node id for durable node mode. Defaults to NODE_ID.")
     parser.add_argument("--node-key", default="", help="Pre-registered AUTONOMOUSc node key for durable node mode. Defaults to NODE_KEY.")
     parser.add_argument("--node-region", default=DEFAULT_DURABLE_NODE_REGION, help="Concrete scheduler region for durable node mode.")
     parser.add_argument("--runtime-profile", default=DEFAULT_DURABLE_RUNTIME_PROFILE, help="Runtime profile advertised by durable node mode.")
     parser.add_argument("--max-batch-tokens", type=int, default=DEFAULT_DURABLE_MAX_BATCH_TOKENS, help="Durable node assignment token budget cap.")
+    parser.add_argument("--target-batch-items", type=int, default=DEFAULT_DURABLE_TARGET_BATCH_ITEMS, help="Preferred BatchRouter chunk item count advertised by durable node mode.")
+    parser.add_argument("--max-batch-items", type=int, default=DEFAULT_DURABLE_MAX_BATCH_ITEMS, help="Hard BatchRouter chunk item cap advertised by durable node mode.")
+    parser.add_argument("--target-batch-tokens", type=int, default=DEFAULT_DURABLE_TARGET_BATCH_TOKENS, help="Preferred BatchRouter chunk token budget advertised by durable node mode.")
+    parser.add_argument("--max-concurrent-chunks", type=int, default=DEFAULT_DURABLE_MAX_CONCURRENT_CHUNKS, help="Provider chunks this durable node lane can process concurrently.")
+    parser.add_argument("--available-queue-items", type=int, default=DEFAULT_DURABLE_AVAILABLE_QUEUE_ITEMS, help="Immediate BatchRouter queue item capacity advertised by durable node mode.")
+    parser.add_argument("--available-queue-tokens", type=int, default=DEFAULT_DURABLE_AVAILABLE_QUEUE_TOKENS, help="Immediate BatchRouter queue token capacity advertised by durable node mode.")
+    parser.add_argument("--max-queued-items", type=int, default=DEFAULT_DURABLE_MAX_QUEUED_ITEMS, help="Maximum queued BatchRouter items accepted by durable node mode.")
     parser.add_argument(
         "--max-concurrent-assignments",
         type=int,
@@ -1931,8 +1971,8 @@ def build_config_from_args(args: argparse.Namespace) -> VastSmokeConfig:
     edge_control_url = first_nonempty(
         str(getattr(args, "edge_control_url", "") or ""),
         os.getenv("EDGE_CONTROL_URL"),
-        os.getenv("AUTONOMOUSC_EDGE_BASE_URL"),
-        _config_value(config_values, "edge_control_url", "autonomousc_edge_base_url"),
+        os.getenv("AUTONOMOUSC_BASE_URL"),
+        _config_value(config_values, "edge_control_url", "autonomousc_base_url"),
     )
     node_id = first_nonempty(
         str(getattr(args, "node_id", "") or ""),
@@ -1981,6 +2021,13 @@ def build_config_from_args(args: argparse.Namespace) -> VastSmokeConfig:
         node_region=str(getattr(args, "node_region", DEFAULT_DURABLE_NODE_REGION) or DEFAULT_DURABLE_NODE_REGION).strip(),
         runtime_profile=str(getattr(args, "runtime_profile", DEFAULT_DURABLE_RUNTIME_PROFILE) or DEFAULT_DURABLE_RUNTIME_PROFILE).strip(),
         max_batch_tokens=max(1, int(getattr(args, "max_batch_tokens", DEFAULT_DURABLE_MAX_BATCH_TOKENS))),
+        target_batch_items=max(1, int(getattr(args, "target_batch_items", DEFAULT_DURABLE_TARGET_BATCH_ITEMS))),
+        max_batch_items=max(1, int(getattr(args, "max_batch_items", DEFAULT_DURABLE_MAX_BATCH_ITEMS))),
+        target_batch_tokens=max(1, int(getattr(args, "target_batch_tokens", DEFAULT_DURABLE_TARGET_BATCH_TOKENS))),
+        max_concurrent_chunks=max(1, int(getattr(args, "max_concurrent_chunks", DEFAULT_DURABLE_MAX_CONCURRENT_CHUNKS))),
+        available_queue_items=max(0, int(getattr(args, "available_queue_items", DEFAULT_DURABLE_AVAILABLE_QUEUE_ITEMS))),
+        available_queue_tokens=max(0, int(getattr(args, "available_queue_tokens", DEFAULT_DURABLE_AVAILABLE_QUEUE_TOKENS))),
+        max_queued_items=max(0, int(getattr(args, "max_queued_items", DEFAULT_DURABLE_MAX_QUEUED_ITEMS))),
         max_concurrent_assignments=max(
             1,
             int(getattr(args, "max_concurrent_assignments", DEFAULT_DURABLE_MAX_CONCURRENT_ASSIGNMENTS)),

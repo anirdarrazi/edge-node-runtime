@@ -1,0 +1,14 @@
+﻿[
+    {
+        "index":  1,
+        "pid":  20200,
+        "stdout":  "C:\\Users\\Anir\\Documents\\AI eco future\\AUTONOMOUSc Edge Node Network\\edge-node-runtime\\test artifacts\\fleet-batchrouter-20260517-000102\\fleet-node-1.stdout.txt",
+        "stderr":  "C:\\Users\\Anir\\Documents\\AI eco future\\AUTONOMOUSc Edge Node Network\\edge-node-runtime\\test artifacts\\fleet-batchrouter-20260517-000102\\fleet-node-1.stderr.txt"
+    },
+    {
+        "index":  2,
+        "pid":  21196,
+        "stdout":  "C:\\Users\\Anir\\Documents\\AI eco future\\AUTONOMOUSc Edge Node Network\\edge-node-runtime\\test artifacts\\fleet-batchrouter-20260517-000102\\fleet-node-2.stdout.txt",
+        "stderr":  "C:\\Users\\Anir\\Documents\\AI eco future\\AUTONOMOUSc Edge Node Network\\edge-node-runtime\\test artifacts\\fleet-batchrouter-20260517-000102\\fleet-node-2.stderr.txt"
+    }
+]

@@ -85,6 +85,16 @@ class NodeAgentSettings(BaseSettings):
     gpu_memory_gb: float = 24.0
     max_context_tokens: int = 32768
     max_batch_tokens: int = 50000
+    target_batch_items: int | None = None
+    max_batch_items: int | None = None
+    target_batch_tokens: int | None = None
+    max_concurrent_chunks: int | None = None
+    available_queue_items: int | None = None
+    available_queue_tokens: int | None = None
+    max_queued_items: int | None = None
+    recommended_batch_items: int | None = None
+    batchrouter_capacity_tier: Literal["trusted", "proven", "standard", "edge"] | None = None
+    heartbeat_ttl_seconds: int = 120
     max_concurrent_assignments: int = 2
     max_concurrent_assignments_cap: int | None = None
     max_concurrent_assignments_embeddings: int | None = None
@@ -161,6 +171,15 @@ class NodeAgentSettings(BaseSettings):
         "estimated_heat_output_watts",
         "max_power_cap_watts",
         "energy_price_kwh",
+        "target_batch_items",
+        "max_batch_items",
+        "target_batch_tokens",
+        "max_concurrent_chunks",
+        "available_queue_items",
+        "available_queue_tokens",
+        "max_queued_items",
+        "recommended_batch_items",
+        "batchrouter_capacity_tier",
         "model_manifest_digest",
         "tokenizer_digest",
         mode="before",

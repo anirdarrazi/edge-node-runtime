@@ -1,0 +1,22 @@
+﻿{
+    "node_key_sha256":  "ffc497df9f2aedd30030018ce14cfbebea63463771bbc76d6165942dc7a5b1df",
+    "boundary_probes":  [
+                            501,
+                            520,
+                            600
+                        ],
+    "org_id":  "org_2bae74f86c454cfaafafc1ea2f52a1fd",
+    "image_tag":  "anirdarrazi/autonomousc-ai-edge-runtime:single-cuda-endurance-20260516-pricingfix",
+    "created_at":  "2026-05-16T11:08:01.3040912Z",
+    "node_id":  "node_endurance_5923602bfeebec4adaff677da167e98b",
+    "planned_batches":  [
+                            100,
+                            250,
+                            500,
+                            750,
+                            1000
+                        ],
+    "artifact_root":  "C:\\Users\\Anir\\Documents\\AI eco future\\AUTONOMOUSc Edge Node Network\\edge-node-runtime\\test artifacts\\endurance-batchrouter-20260516-130801-pricingfix",
+    "run_id":  "endurance-batchrouter-20260516-130801-pricingfix",
+    "image_digest":  "anirdarrazi/autonomousc-ai-edge-runtime@sha256:b760aca5e247b2016dedc3b51a0c8557738ea8a7d62cc5bee9e473eb9f5f2111"
+}

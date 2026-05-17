@@ -1158,7 +1158,7 @@ def test_complete_assignment_uploads_result_artifact_before_completion(
         {
             "batch_item_id": "item-1",
             "customer_item_id": "customer-item-1",
-            "provider": "autonomousc_edge",
+            "provider": "autonomousc",
             "provider_model": "BAAI/bge-large-en-v1.5",
             "status": "completed",
             "usage": {"input_tokens": 3, "total_tokens": 3},
@@ -1303,7 +1303,7 @@ def test_complete_assignment_uploads_sharded_result_artifact_manifest(
         {
             "batch_item_id": "item-1",
             "customer_item_id": "customer-item-1",
-            "provider": "autonomousc_edge",
+            "provider": "autonomousc",
             "provider_model": "BAAI/bge-large-en-v1.5",
             "status": "completed",
             "usage": {"input_tokens": 3, "total_tokens": 3},
@@ -1391,7 +1391,7 @@ def test_complete_assignment_falls_back_to_worker_uploaded_artifact_when_direct_
         {
             "batch_item_id": "item-1",
             "customer_item_id": "customer-item-1",
-            "provider": "autonomousc_edge",
+            "provider": "autonomousc",
             "provider_model": "BAAI/bge-large-en-v1.5",
             "status": "completed",
             "usage": {"input_tokens": 3, "total_tokens": 3},
@@ -1546,7 +1546,7 @@ def test_complete_assignment_refreshes_upload_plan_after_direct_upload_failure(
             {
                 "batch_item_id": "item-1",
                 "customer_item_id": "customer-item-1",
-                "provider": "autonomousc_edge",
+                "provider": "autonomousc",
                 "provider_model": "BAAI/bge-large-en-v1.5",
                 "status": "completed",
                 "usage": {"input_tokens": 3, "total_tokens": 3},
@@ -1618,7 +1618,7 @@ def test_complete_assignment_raises_artifact_flow_error_when_direct_upload_keeps
                 {
                     "batch_item_id": "item-1",
                     "customer_item_id": "customer-item-1",
-                    "provider": "autonomousc_edge",
+                    "provider": "autonomousc",
                     "provider_model": "BAAI/bge-large-en-v1.5",
                     "status": "completed",
                     "usage": {"input_tokens": 3, "total_tokens": 3},
@@ -1684,7 +1684,7 @@ def test_complete_assignment_classifies_result_upload_dns_failure_as_retryable(
                 {
                     "batch_item_id": "item-1",
                     "customer_item_id": "customer-item-1",
-                    "provider": "autonomousc_edge",
+                    "provider": "autonomousc",
                     "provider_model": "BAAI/bge-large-en-v1.5",
                     "status": "completed",
                     "usage": {"input_tokens": 3, "total_tokens": 3},

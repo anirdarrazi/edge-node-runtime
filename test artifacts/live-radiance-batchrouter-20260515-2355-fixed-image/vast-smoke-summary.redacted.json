@@ -1,0 +1,46 @@
+{
+  "returncode": 0,
+  "status": "ok",
+  "instance": {
+    "id": 36842471,
+    "runtype": "args",
+    "public_ip": "99.213.88.59",
+    "host_port": 40449,
+    "startup_status_host_port": 40412,
+    "base_url": "http://99.213.88.59:40449",
+    "gpu_name": "RTX 5060 Ti",
+    "gpu_ram_gb": 15.9,
+    "dph_total": 0.115556,
+    "geolocation": "Ontario, CA"
+  },
+  "runtime_status": "ready",
+  "probe": {
+    "api": "responses",
+    "path": "/v1/responses",
+    "status": 200,
+    "output_text": "ready",
+    "usage": {
+      "input_tokens": 16,
+      "input_tokens_details": {
+        "cached_tokens": 0,
+        "input_tokens_per_turn": [],
+        "cached_tokens_per_turn": []
+      },
+      "output_tokens": 2,
+      "output_tokens_details": {
+        "reasoning_tokens": 0,
+        "tool_output_tokens": 0,
+        "output_tokens_per_turn": [],
+        "tool_output_tokens_per_turn": []
+      },
+      "total_tokens": 18
+    }
+  },
+  "cleanup": {
+    "destroyed": false,
+    "kept_alive": true,
+    "instance_id": 36842471
+  },
+  "candidate_failures": [],
+  "artifacts": "C:\\Users\\Anir\\Documents\\AI eco future\\AUTONOMOUSc Edge Node Network\\edge-node-runtime\\test artifacts\\live-radiance-batchrouter-20260515-2355-fixed-image"
+}

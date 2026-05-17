@@ -1,0 +1,405 @@
+{
+  "status": 200,
+  "ok": true,
+  "payload": {
+    "batch_id": "batch_192a310ac55444f9ab57bc0ac825b50e",
+    "work_order_id": "wo_279f18e7ba5849cf926e0199f9925835",
+    "state": "completed",
+    "counts": {
+      "total": 5000,
+      "pending": 0,
+      "running": 0,
+      "completed": 5000,
+      "failed": 0,
+      "canceled": 0
+    },
+    "deadline_at": "2026-05-17T14:07:21.839Z",
+    "route_version": "rv_default",
+    "output_file": {
+      "id": "file_6336b680794f4664a82ea696f7c330dd",
+      "url": "https://batchrouter.com/v1/files/file_6336b680794f4664a82ea696f7c330dd?expires=1778942788&signature=f_-FFZlFlhWx0kGKIsujblv0QoKi3Sa99OkgmzDnxto"
+    },
+    "review_file": null,
+    "error_file": null,
+    "retry_file": null,
+    "route_receipt_file": {
+      "id": "file_e55315a5d880435abc8ff1966205a089",
+      "url": "https://batchrouter.com/v1/files/file_e55315a5d880435abc8ff1966205a089?expires=1778942788&signature=h-wJq0X4eGKNHdpdpURKkjm-7eKwYs4Rw2licexsrfw"
+    },
+    "output_preview_rows": [
+      {
+        "custom_id": "autonomousc_5060_ti_5000_postfix_20260516_160720_5000_0000",
+        "customer_item_id": "autonomousc_5060_ti_5000_postfix_20260516_160720_5000_0000",
+        "batch_item_id": "item_eed25c029de1431880a231b3956f4c7f",
+        "sequence_no": 0,
+        "operation": "responses",
+        "status": "completed",
+        "provider": "autonomousc",
+        "provider_model": "google/gemma-4-E4B-it",
+        "attempt": 1,
+        "usage": {
+          "input_tokens": 18,
+          "output_tokens": 7,
+          "total_tokens": 25
+        },
+        "cost": {
+          "provider_cost": {
+            "currency": "usd",
+            "amount": "0.000009"
+          },
+          "customer_charge": {
+            "currency": "usd",
+            "amount": "0.00001"
+          },
+          "platform_margin": {
+            "currency": "usd",
+            "amount": "0.000001"
+          },
+          "pricing_source": "catalog",
+          "provider_execution_ref": "pexec_b80e4095bfa54339822b116733c0be4d"
+        },
+        "output": {
+          "id": "chatcmpl-b407aa58b7c93d04",
+          "object": "chat.completion",
+          "created": 1778940840,
+          "model": "google/gemma-4-E4B-it",
+          "choices": [
+            {
+              "index": 0,
+              "message": {
+                "role": "assistant",
+                "content": "endurance-ok-0",
+                "refusal": null,
+                "annotations": null,
+                "audio": null,
+                "function_call": null,
+                "tool_calls": [],
+                "reasoning": null
+              },
+              "logprobs": null,
+              "finish_reason": "stop",
+              "stop_reason": 106,
+              "token_ids": null
+            }
+          ],
+          "service_tier": null,
+          "system_fingerprint": null,
+          "usage": {
+            "prompt_tokens": 18,
+            "total_tokens": 25,
+            "completion_tokens": 7,
+            "prompt_tokens_details": null
+          },
+          "prompt_logprobs": null,
+          "prompt_token_ids": null,
+          "kv_transfer_params": null
+        },
+        "error": null,
+        "completed_at": "2026-05-16T14:14:00.428098+00:00"
+      },
+      {
+        "custom_id": "autonomousc_5060_ti_5000_postfix_20260516_160720_5000_0001",
+        "customer_item_id": "autonomousc_5060_ti_5000_postfix_20260516_160720_5000_0001",
+        "batch_item_id": "item_7f65e77ae1b04b8abfbb08dfe8571714",
+        "sequence_no": 1,
+        "operation": "responses",
+        "status": "completed",
+        "provider": "autonomousc",
+        "provider_model": "google/gemma-4-E4B-it",
+        "attempt": 1,
+        "usage": {
+          "input_tokens": 18,
+          "output_tokens": 7,
+          "total_tokens": 25
+        },
+        "cost": {
+          "provider_cost": {
+            "currency": "usd",
+            "amount": "0.000009"
+          },
+          "customer_charge": {
+            "currency": "usd",
+            "amount": "0.00001"
+          },
+          "platform_margin": {
+            "currency": "usd",
+            "amount": "0.000001"
+          },
+          "pricing_source": "catalog",
+          "provider_execution_ref": "pexec_b80e4095bfa54339822b116733c0be4d"
+        },
+        "output": {
+          "id": "chatcmpl-95ffbd825dfced45",
+          "object": "chat.completion",
+          "created": 1778940840,
+          "model": "google/gemma-4-E4B-it",
+          "choices": [
+            {
+              "index": 0,
+              "message": {
+                "role": "assistant",
+                "content": "endurance-ok-1",
+                "refusal": null,
+                "annotations": null,
+                "audio": null,
+                "function_call": null,
+                "tool_calls": [],
+                "reasoning": null
+              },
+              "logprobs": null,
+              "finish_reason": "stop",
+              "stop_reason": 106,
+              "token_ids": null
+            }
+          ],
+          "service_tier": null,
+          "system_fingerprint": null,
+          "usage": {
+            "prompt_tokens": 18,
+            "total_tokens": 25,
+            "completion_tokens": 7,
+            "prompt_tokens_details": null
+          },
+          "prompt_logprobs": null,
+          "prompt_token_ids": null,
+          "kv_transfer_params": null
+        },
+        "error": null,
+        "completed_at": "2026-05-16T14:14:00.575336+00:00"
+      },
+      {
+        "custom_id": "autonomousc_5060_ti_5000_postfix_20260516_160720_5000_0002",
+        "customer_item_id": "autonomousc_5060_ti_5000_postfix_20260516_160720_5000_0002",
+        "batch_item_id": "item_a307c926b0584b0497445be19dbc412c",
+        "sequence_no": 2,
+        "operation": "responses",
+        "status": "completed",
+        "provider": "autonomousc",
+        "provider_model": "google/gemma-4-E4B-it",
+        "attempt": 1,
+        "usage": {
+          "input_tokens": 18,
+          "output_tokens": 7,
+          "total_tokens": 25
+        },
+        "cost": {
+          "provider_cost": {
+            "currency": "usd",
+            "amount": "0.000009"
+          },
+          "customer_charge": {
+            "currency": "usd",
+            "amount": "0.00001"
+          },
+          "platform_margin": {
+            "currency": "usd",
+            "amount": "0.000001"
+          },
+          "pricing_source": "catalog",
+          "provider_execution_ref": "pexec_b80e4095bfa54339822b116733c0be4d"
+        },
+        "output": {
+          "id": "chatcmpl-be35bc182085cf54",
+          "object": "chat.completion",
+          "created": 1778940840,
+          "model": "google/gemma-4-E4B-it",
+          "choices": [
+            {
+              "index": 0,
+              "message": {
+                "role": "assistant",
+                "content": "endurance-ok-2",
+                "refusal": null,
+                "annotations": null,
+                "audio": null,
+                "function_call": null,
+                "tool_calls": [],
+                "reasoning": null
+              },
+              "logprobs": null,
+              "finish_reason": "stop",
+              "stop_reason": 106,
+              "token_ids": null
+            }
+          ],
+          "service_tier": null,
+          "system_fingerprint": null,
+          "usage": {
+            "prompt_tokens": 18,
+            "total_tokens": 25,
+            "completion_tokens": 7,
+            "prompt_tokens_details": null
+          },
+          "prompt_logprobs": null,
+          "prompt_token_ids": null,
+          "kv_transfer_params": null
+        },
+        "error": null,
+        "completed_at": "2026-05-16T14:14:00.722172+00:00"
+      },
+      {
+        "custom_id": "autonomousc_5060_ti_5000_postfix_20260516_160720_5000_0003",
+        "customer_item_id": "autonomousc_5060_ti_5000_postfix_20260516_160720_5000_0003",
+        "batch_item_id": "item_d0218907fb8547188b12b1c86f0cb4a1",
+        "sequence_no": 3,
+        "operation": "responses",
+        "status": "completed",
+        "provider": "autonomousc",
+        "provider_model": "google/gemma-4-E4B-it",
+        "attempt": 1,
+        "usage": {
+          "input_tokens": 18,
+          "output_tokens": 7,
+          "total_tokens": 25
+        },
+        "cost": {
+          "provider_cost": {
+            "currency": "usd",
+            "amount": "0.000009"
+          },
+          "customer_charge": {
+            "currency": "usd",
+            "amount": "0.00001"
+          },
+          "platform_margin": {
+            "currency": "usd",
+            "amount": "0.000001"
+          },
+          "pricing_source": "catalog",
+          "provider_execution_ref": "pexec_b80e4095bfa54339822b116733c0be4d"
+        },
+        "output": {
+          "id": "chatcmpl-93b457df70439a18",
+          "object": "chat.completion",
+          "created": 1778940840,
+          "model": "google/gemma-4-E4B-it",
+          "choices": [
+            {
+              "index": 0,
+              "message": {
+                "role": "assistant",
+                "content": "endurance-ok-3",
+                "refusal": null,
+                "annotations": null,
+                "audio": null,
+                "function_call": null,
+                "tool_calls": [],
+                "reasoning": null
+              },
+              "logprobs": null,
+              "finish_reason": "stop",
+              "stop_reason": 106,
+              "token_ids": null
+            }
+          ],
+          "service_tier": null,
+          "system_fingerprint": null,
+          "usage": {
+            "prompt_tokens": 18,
+            "total_tokens": 25,
+            "completion_tokens": 7,
+            "prompt_tokens_details": null
+          },
+          "prompt_logprobs": null,
+          "prompt_token_ids": null,
+          "kv_transfer_params": null
+        },
+        "error": null,
+        "completed_at": "2026-05-16T14:14:00.869016+00:00"
+      },
+      {
+        "custom_id": "autonomousc_5060_ti_5000_postfix_20260516_160720_5000_0004",
+        "customer_item_id": "autonomousc_5060_ti_5000_postfix_20260516_160720_5000_0004",
+        "batch_item_id": "item_d12185ae3bdb400dac3c7bdc865d938c",
+        "sequence_no": 4,
+        "operation": "responses",
+        "status": "completed",
+        "provider": "autonomousc",
+        "provider_model": "google/gemma-4-E4B-it",
+        "attempt": 1,
+        "usage": {
+          "input_tokens": 18,
+          "output_tokens": 7,
+          "total_tokens": 25
+        },
+        "cost": {
+          "provider_cost": {
+            "currency": "usd",
+            "amount": "0.000009"
+          },
+          "customer_charge": {
+            "currency": "usd",
+            "amount": "0.00001"
+          },
+          "platform_margin": {
+            "currency": "usd",
+            "amount": "0.000001"
+          },
+          "pricing_source": "catalog",
+          "provider_execution_ref": "pexec_b80e4095bfa54339822b116733c0be4d"
+        },
+        "output": {
+          "id": "chatcmpl-96df27064e8bbfe7",
+          "object": "chat.completion",
+          "created": 1778940840,
+          "model": "google/gemma-4-E4B-it",
+          "choices": [
+            {
+              "index": 0,
+              "message": {
+                "role": "assistant",
+                "content": "endurance-ok-4",
+                "refusal": null,
+                "annotations": null,
+                "audio": null,
+                "function_call": null,
+                "tool_calls": [],
+                "reasoning": null
+              },
+              "logprobs": null,
+              "finish_reason": "stop",
+              "stop_reason": 106,
+              "token_ids": null
+            }
+          ],
+          "service_tier": null,
+          "system_fingerprint": null,
+          "usage": {
+            "prompt_tokens": 18,
+            "total_tokens": 25,
+            "completion_tokens": 7,
+            "prompt_tokens_details": null
+          },
+          "prompt_logprobs": null,
+          "prompt_token_ids": null,
+          "kv_transfer_params": null
+        },
+        "error": null,
+        "completed_at": "2026-05-16T14:14:01.015836+00:00"
+      }
+    ],
+    "review_preview_rows": [],
+    "error_preview_rows": [],
+    "retry_preview_rows": [],
+    "confidence_gating": {
+      "auto_deliver_count": 5000,
+      "review_count": 0,
+      "retry_count": 0,
+      "auto_delivery_threshold": 0.8,
+      "approval_rule": "auto_deliver_high_confidence",
+      "summary": "5000 rows auto-delivered."
+    },
+    "retry_recommendations": [],
+    "preview_limit": 5,
+    "execution_summary": {
+      "routed_providers": [
+        "autonomousc"
+      ],
+      "final_provider_breakdown": {
+        "autonomousc": 5000
+      }
+    },
+    "sample_run": null
+  },
+  "text": "{\"batch_id\":\"batch_192a310ac55444f9ab57bc0ac825b50e\",\"work_order_id\":\"wo_279f18e7ba5849cf926e0199f9925835\",\"state\":\"completed\",\"counts\":{\"total\":5000,\"pending\":0,\"running\":0,\"completed\":5000,\"failed\":0,\"canceled\":0},\"deadline_at\":\"2026-05-17T14:07:21.839Z\",\"route_version\":\"rv_default\",\"output_file\":{\"id\":\"file_6336b680794f4664a82ea696f7c330dd\",\"url\":\"https://batchrouter.com/v1/files/file_6336b680794f4664a82ea696f7c330dd?expires=1778942788&signature=f_-FFZlFlhWx0kGKIsujblv0QoKi3Sa99OkgmzDnxto\"},\"review_file\":null,\"error_file\":null,\"retry_file\":null,\"route_receipt_file\":{\"id\":\"file_e55315a5d880435abc8ff1966205a089\",\"url\":\"https://batchrouter.com/v1/files/file_e55315a5d880435abc8ff1966205a089?expires=1778942788&signature=h-wJq0X4eGKNHdpdpURKkjm-7eKwYs4Rw2licexsrfw\"},\"output_preview_rows\":[{\"custom_id\":\"autonomousc_5060_ti_5000_postfix_20260516_160720_5000_0000\",\"customer_item_id\":\"autonomousc_5060_ti_5000_postfix_20260516_160720_5000_0000\",\"batch_item_id\":\"item_eed25c029de1431880a231b3956f4c7f\",\"sequence_no\":0,\"operation\":\"responses\",\"status\":\"completed\",\"provider\":\"autonomousc\",\"provider_model\":\"google/gemma-4-E4B-it\",\"attempt\":1,\"usage\":{\"input_tokens\":18,\"output_tokens\":7,\"total_tokens\":25},\"cost\":{\"provider_cost\":{\"currency\":\"usd\",\"amount\":\"0.000009\"},\"customer_charge\":{\"currency\":\"usd\",\"amount\":\"0.00001\"},\"platform_margin\":{\"currency\":\"usd\",\"amount\":\"0.000001\"},\"pricing_source\":\"catalog\",\"provider_execution_ref\":\"pexec_b80e4095bfa54339822b116733c0be4d\"},\"output\":{\"id\":\"chatcmpl-b407aa58b7c93d04\",\"object\":\"chat.completion\",\"created\":1778940840,\"model\":\"google/gemma-4-E4B-it\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"endurance-ok-0\",\"refusal\":null,\"annotations\":null,\"audio\":null,\"function_call\":null,\"tool_calls\":[],\"reasoning\":null},\"logprobs\":null,\"finish_reason\":\"stop\",\"stop_reason\":106,\"token_ids\":null}],\"service_tier\":null,\"system_fingerprint\":null,\"usage\":{\"prompt_tokens\":18,\"total_tokens\":25,\"completion_tokens\":7,\"prompt_tokens_details\":null},\"prompt_logprobs\":null,\"prompt_token_ids\":null,\"kv_transfer_params\":null},\"error\":null,\"completed_at\":\"2026-05-16T14:14:00.428098+00:00\"},{\"custom_id\":\"autonomousc_5060_ti_5000_postfix_20260516_160720_5000_0001\",\"customer_item_id\":\"autonomousc_5060_ti_5000_postfix_20260516_160720_5000_0001\",\"batch_item_id\":\"item_7f65e77ae1b04b8abfbb08dfe8571714\",\"sequence_no\":1,\"operation\":\"responses\",\"status\":\"completed\",\"provider\":\"autonomousc\",\"provider_model\":\"google/gemma-4-E4B-it\",\"attempt\":1,\"usage\":{\"input_tokens\":18,\"output_tokens\":7,\"total_tokens\":25},\"cost\":{\"provider_cost\":{\"currency\":\"usd\",\"amount\":\"0.000009\"},\"customer_charge\":{\"currency\":\"usd\",\"amount\":\"0.00001\"},\"platform_margin\":{\"currency\":\"usd\",\"amount\":\"0.000001\"},\"pricing_source\":\"catalog\",\"provider_execution_ref\":\"pexec_b80e4095bfa54339822b116733c0be4d\"},\"output\":{\"id\":\"chatcmpl-95ffbd825dfced45\",\"object\":\"chat.completion\",\"created\":1778940840,\"model\":\"google/gemma-4-E4B-it\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"endurance-ok-1\",\"refusal\":null,\"annotations\":null,\"audio\":null,\"function_call\":null,\"tool_calls\":[],\"reasoning\":null},\"logprobs\":null,\"finish_reason\":\"stop\",\"stop_reason\":106,\"token_ids\":null}],\"service_tier\":null,\"system_fingerprint\":null,\"usage\":{\"prompt_tokens\":18,\"total_tokens\":25,\"completion_tokens\":7,\"prompt_tokens_details\":null},\"prompt_logprobs\":null,\"prompt_token_ids\":null,\"kv_transfer_params\":null},\"error\":null,\"completed_at\":\"2026-05-16T14:14:00.575336+00:00\"},{\"custom_id\":\"autonomousc_5060_ti_5000_postfix_20260516_160720_5000_0002\",\"customer_item_id\":\"autonomousc_5060_ti_5000_postfix_20260516_160720_5000_0002\",\"batch_item_id\":\"item_a307c926b0584b0497445be19dbc412c\",\"sequence_no\":2,\"operation\":\"responses\",\"status\":\"completed\",\"provider\":\"autonomousc\",\"provider_model\":\"google/gemma-4-E4B-it\",\"attempt\":1,\"usage\":{\"input_tokens\":18,\"output_tokens\":7,\"total_tokens\":25},\"cost\":{\"provider_cost\":{\"currency\":\"usd\",\"amount\":\"0.000009\"},\"customer_charge\":{\"currency\":\"usd\",\"amount\":\"0.00001\"},\"platform_margin\":{\"currency\":\"usd\",\"amount\":\"0.000001\"},\"pricing_source\":\"catalog\",\"provider_execution_ref\":\"pexec_b80e4095bfa54339822b116733c0be4d\"},\"output\":{\"id\":\"chatcmpl-be35bc182085cf54\",\"object\":\"chat.completion\",\"created\":1778940840,\"model\":\"google/gemma-4-E4B-it\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"endurance-ok-2\",\"refusal\":null,\"annotations\":null,\"audio\":null,\"function_call\":null,\"tool_calls\":[],\"reasoning\":null},\"logprobs\":null,\"finish_reason\":\"stop\",\"stop_reason\":106,\"token_ids\":null}],\"service_tier\":null,\"system_fingerprint\":null,\"usage\":{\"prompt_tokens\":18,\"total_tokens\":25,\"completion_tokens\":7,\"prompt_tokens_details\":null},\"prompt_logprobs\":null,\"prompt_token_ids\":null,\"kv_transfer_params\":null},\"error\":null,\"completed_at\":\"2026-05-16T14:14:00.722172+00:00\"},{\"custom_id\":\"autonomousc_5060_ti_5000_postfix_20260516_160720_5000_0003\",\"customer_item_id\":\"autonomousc_5060_ti_5000_postfix_20260516_160720_5000_0003\",\"batch_item_id\":\"item_d0218907fb8547188b12b1c86f0cb4a1\",\"sequence_no\":3,\"operation\":\"responses\",\"status\":\"completed\",\"provider\":\"autonomousc\",\"provider_model\":\"google/gemma-4-E4B-it\",\"attempt\":1,\"usage\":{\"input_tokens\":18,\"output_tokens\":7,\"total_tokens\":25},\"cost\":{\"provider_cost\":{\"currency\":\"usd\",\"amount\":\"0.000009\"},\"customer_charge\":{\"currency\":\"usd\",\"amount\":\"0.00001\"},\"platform_margin\":{\"currency\":\"usd\",\"amount\":\"0.000001\"},\"pricing_source\":\"catalog\",\"provider_execution_ref\":\"pexec_b80e4095bfa54339822b116733c0be4d\"},\"output\":{\"id\":\"chatcmpl-93b457df70439a18\",\"object\":\"chat.completion\",\"created\":1778940840,\"model\":\"google/gemma-4-E4B-it\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"endurance-ok-3\",\"refusal\":null,\"annotations\":null,\"audio\":null,\"function_call\":null,\"tool_calls\":[],\"reasoning\":null},\"logprobs\":null,\"finish_reason\":\"stop\",\"stop_reason\":106,\"token_ids\":null}],\"service_tier\":null,\"system_fingerprint\":null,\"usage\":{\"prompt_tokens\":18,\"total_tokens\":25,\"completion_tokens\":7,\"prompt_tokens_details\":null},\"prompt_logprobs\":null,\"prompt_token_ids\":null,\"kv_transfer_params\":null},\"error\":null,\"completed_at\":\"2026-05-16T14:14:00.869016+00:00\"},{\"custom_id\":\"autonomousc_5060_ti_5000_postfix_20260516_160720_5000_0004\",\"customer_item_id\":\"autonomousc_5060_ti_5000_postfix_20260516_160720_5000_0004\",\"batch_item_id\":\"item_d12185ae3bdb400dac3c7bdc865d938c\",\"sequence_no\":4,\"operation\":\"responses\",\"status\":\"completed\",\"provider\":\"autonomousc\",\"provider_model\":\"google/gemma-4-E4B-it\",\"attempt\":1,\"usage\":{\"input_tokens\":18,\"output_tokens\":7,\"total_tokens\":25},\"cost\":{\"provider_cost\":{\"currency\":\"usd\",\"amount\":\"0.000009\"},\"customer_charge\":{\"currency\":\"usd\",\"amount\":\"0.00001\"},\"platform_margin\":{\"currency\":\"usd\",\"amount\":\"0.000001\"},\"pricing_source\":\"catalog\",\"provider_execution_ref\":\"pexec_b80e4095bfa54339822b116733c0be4d\"},\"output\":{\"id\":\"chatcmpl-96df27064e8bbfe7\",\"object\":\"chat.completion\",\"created\":1778940840,\"model\":\"google/gemma-4-E4B-it\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"endurance-ok-4\",\"refusal\":null,\"annotations\":null,\"audio\":null,\"function_call\":null,\"tool_calls\":[],\"reasoning\":null},\"logprobs\":null,\"finish_reason\":\"stop\",\"stop_reason\":106,\"token_ids\":null}],\"service_tier\":null,\"system_fingerprint\":null,\"usage\":{\"prompt_tokens\":18,\"total_tokens\":25,\"completion_tokens\":7,\"prompt_tokens_details\":null},\"prompt_logprobs\":null,\"prompt_token_ids\":null,\"kv_transfer_params\":null},\"error\":null,\"completed_at\":\"2026-05-16T14:14:01.015836+00:00\"}],\"review_preview_rows\":[],\"error_preview_rows\":[],\"retry_preview_rows\":[],\"confidence_gating\":{\"auto_deliver_count\":5000,\"review_count\":0,\"retry_count\":0,\"auto_delivery_threshold\":0.8,\"approval_rule\":\"auto_deliver_high_confidence\",\"summary\":\"5000 rows auto-delivered.\"},\"retry_recommendations\":[],\"preview_limit\":5,\"execution_summary\":{\"routed_providers\":[\"autonomousc\"],\"final_provider_breakdown\":{\"autonomousc\":5000}},\"sample_run\":null}"
+}

@@ -1233,6 +1233,8 @@ class AutopilotController:
             "max_context_tokens": runtime_tuple.effective_context_tokens
             or settings_int(self.settings, "max_context_tokens", 32768),
             "max_batch_tokens": settings_int(self.settings, "max_batch_tokens", 50000),
+            "capacity_status": "paused" if heat_governor_plan.paused else "active",
+            "heartbeat_ttl_seconds": settings_int(self.settings, "heartbeat_ttl_seconds", 120),
             "max_concurrent_assignments": max(1, advertised_concurrency),
             "max_local_queue_assignments": local_queue_limit,
             "target_gpu_utilization_pct": heat_governor_plan.effective_target_pct,
@@ -1253,6 +1255,20 @@ class AutopilotController:
                 "last_limit": memory.last_limit,
             },
         }
+        for key in (
+            "target_batch_items",
+            "max_batch_items",
+            "target_batch_tokens",
+            "max_concurrent_chunks",
+            "available_queue_items",
+            "available_queue_tokens",
+            "max_queued_items",
+            "recommended_batch_items",
+            "batchrouter_capacity_tier",
+        ):
+            value = getattr(self.settings, key, None)
+            if value is not None:
+                payload[key] = value
         if embedding_concurrency_limit is not None:
             payload["max_concurrent_assignments_embeddings"] = embedding_concurrency_limit
         if embedding_microbatch_limit is not None:

@@ -1,0 +1,921 @@
+{
+  "route_version": {
+    "id": "rv_default",
+    "name": "Default route",
+    "version": 1,
+    "is_active": true,
+    "activated_at": "2026-04-30T18:15:55.819Z",
+    "created_at": "2026-04-30T18:15:55.819Z"
+  },
+  "pricing_estimate": {
+    "currency": "usd",
+    "provider_subtotal": "0.0000",
+    "batchrouter_fee": "0.0000",
+    "total": "0.0000"
+  },
+  "price_range": {
+    "unit": "per_1m_tokens",
+    "currency": "usd",
+    "input": {
+      "from": null,
+      "to": null
+    },
+    "output": {
+      "from": null,
+      "to": null
+    },
+    "cached_input": {
+      "from": null,
+      "to": null
+    },
+    "best_case_provider": "autonomousc",
+    "worst_case_provider": "autonomousc",
+    "basis": "customer_token_rates_across_fallback_order"
+  },
+  "deadline_at": "2026-05-17T08:32:58.992Z",
+  "quote_explanation": {
+    "customer_safe": true,
+    "summary": "BatchRouter selected autonomousc for 1 item on the standard SLA as a single-lane quote.",
+    "lane_mode": "single_lane",
+    "sla_class": {
+      "tier": "standard",
+      "deadline_at": "2026-05-17T08:32:58.992Z",
+      "target_seconds": 86400,
+      "strategy": "autonomousc is selected as a single 24-hour lane because no staged fallback is available.",
+      "stages": [
+        {
+          "stage": 1,
+          "provider": "autonomousc",
+          "provider_label": "autonomousc",
+          "execution_class": "openweight_batch",
+          "window_seconds": 86400,
+          "starts_after_seconds": 0,
+          "description": "autonomousc receives a 24-hour OpenWeight batch window."
+        }
+      ]
+    },
+    "selected_lanes": [
+      {
+        "grouping_key": "workload:v2|workflow:custom|op:responses|model:google-gemma|task:responses|schema:none|tags:none|privacy:standard|sla:standard|responses|gemma-4-e4b-it|google/gemma|standard|global|standard|hybrid|{\"allow_fallbacks\":false,\"only\":[\"autonomousc\"]}|autonomousc",
+        "allocation_group_key": null,
+        "provider": "autonomousc",
+        "provider_label": "autonomousc",
+        "provider_offering_id": null,
+        "offering_version": null,
+        "model": "gemma-4-e4b-it",
+        "model_family": "google/gemma",
+        "operation": "responses",
+        "item_count": 1,
+        "item_sequence_numbers": [
+          0
+        ],
+        "allocation_percent": 100,
+        "quoted_price": {
+          "currency": "usd",
+          "provider_subtotal": "0.0000",
+          "batchrouter_fee": "0.0000",
+          "total": "0.0000"
+        },
+        "estimated_completion_seconds": 180,
+        "sla_strategy": "autonomousc is selected as a single 24-hour lane because no staged fallback is available.",
+        "fallback_order": [
+          "autonomousc"
+        ],
+        "fallback_behavior": "No fallback; pinned to autonomousc.",
+        "selection_reason": "Pinned to autonomousc by provider policy."
+      }
+    ],
+    "fallback_behavior": {
+      "enabled": false,
+      "summary": "No alternate provider lane is quoted for this request.",
+      "providers": [],
+      "stages": [
+        {
+          "stage": 1,
+          "provider": "autonomousc",
+          "provider_label": "autonomousc",
+          "execution_class": "openweight_batch",
+          "window_seconds": 86400,
+          "starts_after_seconds": 0
+        }
+      ]
+    },
+    "rejected_lanes": []
+  },
+  "quote_lock": {
+    "quote_id": "qlock_488efd8cfb7d483390d707946b2291f3",
+    "valid_until": "2026-05-16T08:43:00.891Z",
+    "reserved_capacity": {
+      "mode": "hard_hold_until_quote_expiry",
+      "work_units": 1,
+      "providers": [
+        {
+          "provider": "autonomousc",
+          "work_units": 1
+        }
+      ],
+      "windows": []
+    },
+    "max_price": {
+      "currency": "usd",
+      "amount": "0.0000"
+    },
+    "price_protection_policy": "lock_total_and_fallback",
+    "fallback_price_ceiling": {
+      "currency": "usd",
+      "amount": "0.00"
+    },
+    "status": "active"
+  },
+  "quote_id": "qlock_488efd8cfb7d483390d707946b2291f3",
+  "quote_options": [
+    {
+      "option_key": "workload:v2|workflow:custom|op:responses|model:google-gemma|task:responses|schema:none|tags:none|privacy:standard|sla:standard|responses|gemma-4-e4b-it|google/gemma|standard|global|standard|hybrid|{\"allow_fallbacks\":false,\"only\":[\"autonomousc\"]}|autonomousc",
+      "sequence_no": 0,
+      "kind": "model_option",
+      "operation": "responses",
+      "model": "gemma-4-e4b-it",
+      "model_options": [
+        "gemma-4-e4b-it"
+      ],
+      "workflow_plan": null,
+      "item_count": 1,
+      "estimated_cost": {
+        "currency": "usd",
+        "provider_subtotal": "0.0000",
+        "batchrouter_fee": "0.0000",
+        "total": "0.0000"
+      }
+    }
+  ],
+  "quote_lanes": [
+    {
+      "option_key": "workload:v2|workflow:custom|op:responses|model:google-gemma|task:responses|schema:none|tags:none|privacy:standard|sla:standard|responses|gemma-4-e4b-it|google/gemma|standard|global|standard|hybrid|{\"allow_fallbacks\":false,\"only\":[\"autonomousc\"]}|autonomousc",
+      "grouping_key": "workload:v2|workflow:custom|op:responses|model:google-gemma|task:responses|schema:none|tags:none|privacy:standard|sla:standard|responses|gemma-4-e4b-it|google/gemma|standard|global|standard|hybrid|{\"allow_fallbacks\":false,\"only\":[\"autonomousc\"]}|autonomousc",
+      "lane_rank": 1,
+      "selected": true,
+      "provider": "autonomousc",
+      "provider_offering_id": null,
+      "offering_version": null,
+      "model": "gemma-4-e4b-it",
+      "customer_model": "gemma-4-e4b-it",
+      "resolved_alias": "gemma-4-e4b-it",
+      "provider_model": "gemma-4-e4b-it",
+      "model_alias_resolution": {
+        "customer_model": "gemma-4-e4b-it",
+        "resolved_alias": "gemma-4-e4b-it",
+        "accepted_aliases": [
+          "gemma-4-e4b-it",
+          "google/gemma",
+          "Gemma 4 E4B it"
+        ],
+        "provider_model": "gemma-4-e4b-it",
+        "provider_model_family": "google/gemma",
+        "provider_offering_id": null,
+        "offering_version": null,
+        "context_window": 32768,
+        "max_input_tokens": 28672,
+        "max_output_tokens": 4096,
+        "match_type": "identity"
+      },
+      "context_window": 32768,
+      "max_input_tokens": 28672,
+      "max_output_tokens": 4096,
+      "model_family": "google/gemma",
+      "operation": "responses",
+      "item_sequence_numbers": [
+        0
+      ],
+      "price": {
+        "currency": "usd",
+        "provider_subtotal": "0.0000",
+        "batchrouter_fee": "0.0000",
+        "total": "0.0000"
+      },
+      "capacity": {
+        "capacity_window": null,
+        "market_bid": null
+      },
+      "capacity_reservation": {
+        "status": "active",
+        "provider": "autonomousc",
+        "provider_offering_id": null,
+        "offering_version": null,
+        "reserved_units": 1,
+        "capacity_window_id": null,
+        "expires_at": "2026-05-16T08:43:00.891Z"
+      },
+      "score": {
+        "rank": 1,
+        "quoted_cost": "0.0000",
+        "price_delta": "0.00",
+        "latency_seconds": 180,
+        "latency_fit": {
+          "status": "within_target",
+          "target_seconds": 86400,
+          "estimated_seconds": 180,
+          "delta_seconds": -86220
+        },
+        "quality_score": null,
+        "reliability_prior_score": 0.91,
+        "observed_confidence_score": null,
+        "observed_confidence_basis": "none",
+        "trust_score": 0.91,
+        "market_performance": null,
+        "benchmark_gate": null
+      }
+    }
+  ],
+  "valid_until": "2026-05-16T08:43:00.891Z",
+  "reserved_capacity": {
+    "mode": "hard_hold_until_quote_expiry",
+    "work_units": 1,
+    "providers": [
+      {
+        "provider": "autonomousc",
+        "work_units": 1
+      }
+    ],
+    "windows": []
+  },
+  "max_price": {
+    "currency": "usd",
+    "amount": "0.0000"
+  },
+  "price_protection_policy": "lock_total_and_fallback",
+  "fallback_price_ceiling": {
+    "currency": "usd",
+    "amount": "0.00"
+  },
+  "funding_preview": {
+    "available": {
+      "currency": "usd",
+      "amount": "109.928941"
+    },
+    "reserved": {
+      "currency": "usd",
+      "amount": "0.00"
+    },
+    "estimated_total": {
+      "currency": "usd",
+      "amount": "0.0000"
+    },
+    "quote_total": {
+      "currency": "usd",
+      "amount": "0.00"
+    },
+    "billable_total": {
+      "currency": "usd",
+      "amount": "0.00"
+    },
+    "reservation_amount": {
+      "currency": "usd",
+      "amount": "0.00"
+    },
+    "minimum_charge": {
+      "currency": "usd",
+      "amount": "0.00"
+    },
+    "minimum_charge_applied": false,
+    "billable_rounding_applied": false,
+    "shortfall": {
+      "currency": "usd",
+      "amount": "0.00"
+    },
+    "can_fund": true
+  },
+  "sample_run": {
+    "eligible": false,
+    "applied": false,
+    "limit_items": 5,
+    "preview_rows": 5,
+    "reason": "Billing is already active for this workspace, so new runs use the normal credit flow.",
+    "full_downloads_locked": false
+  },
+  "work_units": [
+    {
+      "grouping_key": "workload:v2|workflow:custom|op:responses|model:google-gemma|task:responses|schema:none|tags:none|privacy:standard|sla:standard|responses|gemma-4-e4b-it|google/gemma|standard|global|standard|hybrid|{\"allow_fallbacks\":false,\"only\":[\"autonomousc\"]}|autonomousc",
+      "allocation_group_key": null,
+      "allocation": null,
+      "operation": "responses",
+      "model_family": "google/gemma",
+      "selected_model": "gemma-4-e4b-it",
+      "model_options": [
+        "gemma-4-e4b-it"
+      ],
+      "item_sequence_numbers": [
+        0
+      ],
+      "customer_item_ids": [
+        "autonomousc_live_20260516_083257"
+      ],
+      "item_count": 1,
+      "allowed_regions": [
+        "global"
+      ],
+      "eligible_providers": [
+        "autonomousc"
+      ],
+      "candidate_providers": [
+        "autonomousc"
+      ],
+      "selected_provider": "autonomousc",
+      "selection_reason": "Pinned to autonomousc by provider policy.",
+      "fallback_plan": "No fallback; pinned to autonomousc.",
+      "quality_risk": "low",
+      "route_decision": {
+        "selected_provider": "autonomousc",
+        "selected_provider_offering_id": null,
+        "selected_offering_version": null,
+        "selected_model_alias_resolution": {
+          "customer_model": "gemma-4-e4b-it",
+          "resolved_alias": "gemma-4-e4b-it",
+          "accepted_aliases": [
+            "gemma-4-e4b-it",
+            "google/gemma",
+            "Gemma 4 E4B it"
+          ],
+          "provider_model": "gemma-4-e4b-it",
+          "provider_model_family": "google/gemma",
+          "provider_offering_id": null,
+          "offering_version": null,
+          "context_window": 32768,
+          "max_input_tokens": 28672,
+          "max_output_tokens": 4096,
+          "match_type": "identity"
+        },
+        "rejected_providers": [],
+        "latency_fit": {
+          "status": "within_target",
+          "target_seconds": 86400,
+          "estimated_seconds": 180,
+          "delta_seconds": -86220
+        },
+        "quality_score": null,
+        "reliability_prior_score": 0.91,
+        "observed_confidence_score": null,
+        "observed_confidence_basis": "none",
+        "trust_score": 0.91,
+        "market_performance": null,
+        "fallback_order": [
+          "autonomousc"
+        ],
+        "price_range": {
+          "unit": "per_1m_tokens",
+          "currency": "usd",
+          "input": {
+            "from": null,
+            "to": null
+          },
+          "output": {
+            "from": null,
+            "to": null
+          },
+          "cached_input": {
+            "from": null,
+            "to": null
+          },
+          "best_case_provider": "autonomousc",
+          "worst_case_provider": "autonomousc",
+          "basis": "customer_token_rates_across_fallback_order"
+        },
+        "sla_strategy": {
+          "kind": "best_effort_24h",
+          "customer_sla_seconds": 86400,
+          "requires_fallback": false,
+          "summary": "autonomousc is selected as a single 24-hour lane because no staged fallback is available.",
+          "stages": [
+            {
+              "stage": 1,
+              "provider": "autonomousc",
+              "execution_class": "openweight_batch",
+              "window_seconds": 86400,
+              "starts_after_seconds": 0,
+              "deadline_offset_seconds": 86400,
+              "description": "autonomousc receives a 24-hour OpenWeight batch window."
+            }
+          ]
+        }
+      },
+      "route_candidates": [
+        {
+          "provider": "autonomousc",
+          "provider_offering_id": null,
+          "offering_version": null,
+          "model_alias_resolution": {
+            "customer_model": "gemma-4-e4b-it",
+            "resolved_alias": "gemma-4-e4b-it",
+            "accepted_aliases": [
+              "gemma-4-e4b-it",
+              "google/gemma",
+              "Gemma 4 E4B it"
+            ],
+            "provider_model": "gemma-4-e4b-it",
+            "provider_model_family": "google/gemma",
+            "provider_offering_id": null,
+            "offering_version": null,
+            "context_window": 32768,
+            "max_input_tokens": 28672,
+            "max_output_tokens": 4096,
+            "match_type": "identity"
+          },
+          "context_window": 32768,
+          "max_input_tokens": 28672,
+          "max_output_tokens": 4096,
+          "rank": 1,
+          "selected": true,
+          "status": "selected",
+          "reason": "Selected as the execution lane for this quote.",
+          "rejection_code": null,
+          "quoted_cost": "0.0000",
+          "price_delta": "0.00",
+          "latency_seconds": 180,
+          "latency_fit": {
+            "status": "within_target",
+            "target_seconds": 86400,
+            "estimated_seconds": 180,
+            "delta_seconds": -86220
+          },
+          "quality_score": null,
+          "reliability_prior_score": 0.91,
+          "observed_confidence_score": null,
+          "observed_confidence_basis": "none",
+          "trust_score": 0.91,
+          "market_performance": null,
+          "capacity_window": null,
+          "market_bid": null,
+          "benchmark_gate": null
+        }
+      ],
+      "execution_lane": {
+        "provider": "autonomousc",
+        "provider_offering_id": null,
+        "offering_version": null,
+        "model_alias_resolution": {
+          "customer_model": "gemma-4-e4b-it",
+          "resolved_alias": "gemma-4-e4b-it",
+          "accepted_aliases": [
+            "gemma-4-e4b-it",
+            "google/gemma",
+            "Gemma 4 E4B it"
+          ],
+          "provider_model": "gemma-4-e4b-it",
+          "provider_model_family": "google/gemma",
+          "provider_offering_id": null,
+          "offering_version": null,
+          "context_window": 32768,
+          "max_input_tokens": 28672,
+          "max_output_tokens": 4096,
+          "match_type": "identity"
+        },
+        "context_window": 32768,
+        "max_input_tokens": 28672,
+        "max_output_tokens": 4096,
+        "state": "quoted",
+        "estimated_cost": {
+          "currency": "usd",
+          "provider_subtotal": "0.0000",
+          "batchrouter_fee": "0.0000",
+          "total": "0.0000"
+        },
+        "estimated_completion_seconds": 180,
+        "fallback_order": [
+          "autonomousc"
+        ],
+        "price_range": {
+          "unit": "per_1m_tokens",
+          "currency": "usd",
+          "input": {
+            "from": null,
+            "to": null
+          },
+          "output": {
+            "from": null,
+            "to": null
+          },
+          "cached_input": {
+            "from": null,
+            "to": null
+          },
+          "best_case_provider": "autonomousc",
+          "worst_case_provider": "autonomousc",
+          "basis": "customer_token_rates_across_fallback_order"
+        },
+        "sla_strategy": {
+          "kind": "best_effort_24h",
+          "customer_sla_seconds": 86400,
+          "requires_fallback": false,
+          "summary": "autonomousc is selected as a single 24-hour lane because no staged fallback is available.",
+          "stages": [
+            {
+              "stage": 1,
+              "provider": "autonomousc",
+              "execution_class": "openweight_batch",
+              "window_seconds": 86400,
+              "starts_after_seconds": 0,
+              "deadline_offset_seconds": 86400,
+              "description": "autonomousc receives a 24-hour OpenWeight batch window."
+            }
+          ]
+        }
+      },
+      "price_range": {
+        "unit": "per_1m_tokens",
+        "currency": "usd",
+        "input": {
+          "from": null,
+          "to": null
+        },
+        "output": {
+          "from": null,
+          "to": null
+        },
+        "cached_input": {
+          "from": null,
+          "to": null
+        },
+        "best_case_provider": "autonomousc",
+        "worst_case_provider": "autonomousc",
+        "basis": "customer_token_rates_across_fallback_order"
+      },
+      "sla_strategy": {
+        "kind": "best_effort_24h",
+        "customer_sla_seconds": 86400,
+        "requires_fallback": false,
+        "summary": "autonomousc is selected as a single 24-hour lane because no staged fallback is available.",
+        "stages": [
+          {
+            "stage": 1,
+            "provider": "autonomousc",
+            "execution_class": "openweight_batch",
+            "window_seconds": 86400,
+            "starts_after_seconds": 0,
+            "deadline_offset_seconds": 86400,
+            "description": "autonomousc receives a 24-hour OpenWeight batch window."
+          }
+        ]
+      },
+      "estimated_cost": {
+        "currency": "usd",
+        "provider_subtotal": "0.0000",
+        "batchrouter_fee": "0.0000",
+        "total": "0.0000"
+      },
+      "estimated_completion_seconds": 180
+    }
+  ],
+  "route_candidates": [
+    {
+      "grouping_key": "workload:v2|workflow:custom|op:responses|model:google-gemma|task:responses|schema:none|tags:none|privacy:standard|sla:standard|responses|gemma-4-e4b-it|google/gemma|standard|global|standard|hybrid|{\"allow_fallbacks\":false,\"only\":[\"autonomousc\"]}|autonomousc",
+      "provider": "autonomousc",
+      "provider_offering_id": null,
+      "offering_version": null,
+      "model_alias_resolution": {
+        "customer_model": "gemma-4-e4b-it",
+        "resolved_alias": "gemma-4-e4b-it",
+        "accepted_aliases": [
+          "gemma-4-e4b-it",
+          "google/gemma",
+          "Gemma 4 E4B it"
+        ],
+        "provider_model": "gemma-4-e4b-it",
+        "provider_model_family": "google/gemma",
+        "provider_offering_id": null,
+        "offering_version": null,
+        "context_window": 32768,
+        "max_input_tokens": 28672,
+        "max_output_tokens": 4096,
+        "match_type": "identity"
+      },
+      "context_window": 32768,
+      "max_input_tokens": 28672,
+      "max_output_tokens": 4096,
+      "rank": 1,
+      "selected": true,
+      "status": "selected",
+      "reason": "Selected as the execution lane for this quote.",
+      "rejection_code": null,
+      "quoted_cost": "0.0000",
+      "price_delta": "0.00",
+      "latency_seconds": 180,
+      "latency_fit": {
+        "status": "within_target",
+        "target_seconds": 86400,
+        "estimated_seconds": 180,
+        "delta_seconds": -86220
+      },
+      "quality_score": null,
+      "reliability_prior_score": 0.91,
+      "observed_confidence_score": null,
+      "observed_confidence_basis": "none",
+      "trust_score": 0.91,
+      "market_performance": null,
+      "capacity_window": null,
+      "market_bid": null,
+      "benchmark_gate": null
+    }
+  ],
+  "execution_lanes": [
+    {
+      "grouping_key": "workload:v2|workflow:custom|op:responses|model:google-gemma|task:responses|schema:none|tags:none|privacy:standard|sla:standard|responses|gemma-4-e4b-it|google/gemma|standard|global|standard|hybrid|{\"allow_fallbacks\":false,\"only\":[\"autonomousc\"]}|autonomousc",
+      "provider": "autonomousc",
+      "provider_offering_id": null,
+      "offering_version": null,
+      "model_alias_resolution": {
+        "customer_model": "gemma-4-e4b-it",
+        "resolved_alias": "gemma-4-e4b-it",
+        "accepted_aliases": [
+          "gemma-4-e4b-it",
+          "google/gemma",
+          "Gemma 4 E4B it"
+        ],
+        "provider_model": "gemma-4-e4b-it",
+        "provider_model_family": "google/gemma",
+        "provider_offering_id": null,
+        "offering_version": null,
+        "context_window": 32768,
+        "max_input_tokens": 28672,
+        "max_output_tokens": 4096,
+        "match_type": "identity"
+      },
+      "context_window": 32768,
+      "max_input_tokens": 28672,
+      "max_output_tokens": 4096,
+      "state": "quoted",
+      "estimated_cost": {
+        "currency": "usd",
+        "provider_subtotal": "0.0000",
+        "batchrouter_fee": "0.0000",
+        "total": "0.0000"
+      },
+      "estimated_completion_seconds": 180,
+      "fallback_order": [
+        "autonomousc"
+      ],
+      "price_range": {
+        "unit": "per_1m_tokens",
+        "currency": "usd",
+        "input": {
+          "from": null,
+          "to": null
+        },
+        "output": {
+          "from": null,
+          "to": null
+        },
+        "cached_input": {
+          "from": null,
+          "to": null
+        },
+        "best_case_provider": "autonomousc",
+        "worst_case_provider": "autonomousc",
+        "basis": "customer_token_rates_across_fallback_order"
+      },
+      "sla_strategy": {
+        "kind": "best_effort_24h",
+        "customer_sla_seconds": 86400,
+        "requires_fallback": false,
+        "summary": "autonomousc is selected as a single 24-hour lane because no staged fallback is available.",
+        "stages": [
+          {
+            "stage": 1,
+            "provider": "autonomousc",
+            "execution_class": "openweight_batch",
+            "window_seconds": 86400,
+            "starts_after_seconds": 0,
+            "deadline_offset_seconds": 86400,
+            "description": "autonomousc receives a 24-hour OpenWeight batch window."
+          }
+        ]
+      }
+    }
+  ],
+  "verification_gates": [],
+  "delivery_contracts": [],
+  "settlement_records": [
+    {
+      "kind": "quote_estimate",
+      "currency": "usd",
+      "total": "0.0000",
+      "workflow_fee_total": "0.00",
+      "workflow_fees": [],
+      "max_price": null
+    }
+  ],
+  "provider_capacity_windows": [],
+  "routable_inventory": {
+    "work_units": [
+      {
+        "grouping_key": "workload:v2|workflow:custom|op:responses|model:google-gemma|task:responses|schema:none|tags:none|privacy:standard|sla:standard|responses|gemma-4-e4b-it|google/gemma|standard|global|standard|hybrid|{\"allow_fallbacks\":false,\"only\":[\"autonomousc\"]}|autonomousc",
+        "allocation_group_key": null,
+        "allocation": null,
+        "operation": "responses",
+        "model_family": "google/gemma",
+        "selected_model": "gemma-4-e4b-it",
+        "model_options": [
+          "gemma-4-e4b-it"
+        ],
+        "item_sequence_numbers": [
+          0
+        ],
+        "customer_item_ids": [
+          "autonomousc_live_20260516_083257"
+        ],
+        "item_count": 1,
+        "selected_provider": "autonomousc",
+        "provider_offering_id": null,
+        "offering_version": null,
+        "model_alias_resolution": {
+          "customer_model": "gemma-4-e4b-it",
+          "resolved_alias": "gemma-4-e4b-it",
+          "accepted_aliases": [
+            "gemma-4-e4b-it",
+            "google/gemma",
+            "Gemma 4 E4B it"
+          ],
+          "provider_model": "gemma-4-e4b-it",
+          "provider_model_family": "google/gemma",
+          "provider_offering_id": null,
+          "offering_version": null,
+          "context_window": 32768,
+          "max_input_tokens": 28672,
+          "max_output_tokens": 4096,
+          "match_type": "identity"
+        },
+        "estimated_cost": {
+          "currency": "usd",
+          "provider_subtotal": "0.0000",
+          "batchrouter_fee": "0.0000",
+          "total": "0.0000"
+        }
+      }
+    ],
+    "route_candidates": [
+      {
+        "grouping_key": "workload:v2|workflow:custom|op:responses|model:google-gemma|task:responses|schema:none|tags:none|privacy:standard|sla:standard|responses|gemma-4-e4b-it|google/gemma|standard|global|standard|hybrid|{\"allow_fallbacks\":false,\"only\":[\"autonomousc\"]}|autonomousc",
+        "provider": "autonomousc",
+        "provider_offering_id": null,
+        "offering_version": null,
+        "model_alias_resolution": {
+          "customer_model": "gemma-4-e4b-it",
+          "resolved_alias": "gemma-4-e4b-it",
+          "accepted_aliases": [
+            "gemma-4-e4b-it",
+            "google/gemma",
+            "Gemma 4 E4B it"
+          ],
+          "provider_model": "gemma-4-e4b-it",
+          "provider_model_family": "google/gemma",
+          "provider_offering_id": null,
+          "offering_version": null,
+          "context_window": 32768,
+          "max_input_tokens": 28672,
+          "max_output_tokens": 4096,
+          "match_type": "identity"
+        },
+        "context_window": 32768,
+        "max_input_tokens": 28672,
+        "max_output_tokens": 4096,
+        "rank": 1,
+        "selected": true,
+        "status": "selected",
+        "reason": "Selected as the execution lane for this quote.",
+        "rejection_code": null,
+        "quoted_cost": "0.0000",
+        "price_delta": "0.00",
+        "latency_seconds": 180,
+        "latency_fit": {
+          "status": "within_target",
+          "target_seconds": 86400,
+          "estimated_seconds": 180,
+          "delta_seconds": -86220
+        },
+        "quality_score": null,
+        "reliability_prior_score": 0.91,
+        "observed_confidence_score": null,
+        "observed_confidence_basis": "none",
+        "trust_score": 0.91,
+        "market_performance": null,
+        "capacity_window": null,
+        "market_bid": null,
+        "benchmark_gate": null
+      }
+    ],
+    "execution_lanes": [
+      {
+        "grouping_key": "workload:v2|workflow:custom|op:responses|model:google-gemma|task:responses|schema:none|tags:none|privacy:standard|sla:standard|responses|gemma-4-e4b-it|google/gemma|standard|global|standard|hybrid|{\"allow_fallbacks\":false,\"only\":[\"autonomousc\"]}|autonomousc",
+        "provider": "autonomousc",
+        "provider_offering_id": null,
+        "offering_version": null,
+        "model_alias_resolution": {
+          "customer_model": "gemma-4-e4b-it",
+          "resolved_alias": "gemma-4-e4b-it",
+          "accepted_aliases": [
+            "gemma-4-e4b-it",
+            "google/gemma",
+            "Gemma 4 E4B it"
+          ],
+          "provider_model": "gemma-4-e4b-it",
+          "provider_model_family": "google/gemma",
+          "provider_offering_id": null,
+          "offering_version": null,
+          "context_window": 32768,
+          "max_input_tokens": 28672,
+          "max_output_tokens": 4096,
+          "match_type": "identity"
+        },
+        "context_window": 32768,
+        "max_input_tokens": 28672,
+        "max_output_tokens": 4096,
+        "state": "quoted",
+        "estimated_cost": {
+          "currency": "usd",
+          "provider_subtotal": "0.0000",
+          "batchrouter_fee": "0.0000",
+          "total": "0.0000"
+        },
+        "estimated_completion_seconds": 180,
+        "fallback_order": [
+          "autonomousc"
+        ],
+        "price_range": {
+          "unit": "per_1m_tokens",
+          "currency": "usd",
+          "input": {
+            "from": null,
+            "to": null
+          },
+          "output": {
+            "from": null,
+            "to": null
+          },
+          "cached_input": {
+            "from": null,
+            "to": null
+          },
+          "best_case_provider": "autonomousc",
+          "worst_case_provider": "autonomousc",
+          "basis": "customer_token_rates_across_fallback_order"
+        },
+        "sla_strategy": {
+          "kind": "best_effort_24h",
+          "customer_sla_seconds": 86400,
+          "requires_fallback": false,
+          "summary": "autonomousc is selected as a single 24-hour lane because no staged fallback is available.",
+          "stages": [
+            {
+              "stage": 1,
+              "provider": "autonomousc",
+              "execution_class": "openweight_batch",
+              "window_seconds": 86400,
+              "starts_after_seconds": 0,
+              "deadline_offset_seconds": 86400,
+              "description": "autonomousc receives a 24-hour OpenWeight batch window."
+            }
+          ]
+        }
+      }
+    ],
+    "verification_gates": [],
+    "delivery_contracts": [],
+    "settlement_records": [
+      {
+        "kind": "quote_estimate",
+        "currency": "usd",
+        "total": "0.0000",
+        "workflow_fee_total": "0.00",
+        "workflow_fees": [],
+        "max_price": null
+      }
+    ],
+    "provider_capacity_windows": [],
+    "reserved_capacity": {
+      "mode": "hard_hold_until_quote_expiry",
+      "work_units": 1,
+      "providers": [
+        {
+          "provider": "autonomousc",
+          "work_units": 1
+        }
+      ],
+      "windows": []
+    },
+    "workflow_benchmark": null
+  },
+  "provider_capacity": {},
+  "routing_notices": [],
+  "applied_route_policy": null,
+  "intent": null,
+  "workflow_contract": null,
+  "migration_analysis": null,
+  "correction_memory": {
+    "examples_count": 0,
+    "latest_correction_at": null,
+    "guidance": null,
+    "examples": [],
+    "applied": false,
+    "applied_item_count": 0
+  },
+  "workflow_benchmark": null,
+  "workflow_version": null
+}

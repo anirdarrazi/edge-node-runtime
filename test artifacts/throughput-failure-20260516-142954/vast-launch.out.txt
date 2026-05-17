@@ -1,0 +1,48 @@
+{
+  "status": "error",
+  "requested": {
+    "model": "google/gemma-4-E4B-it",
+    "max_price": 0.25,
+    "image": "anirdarrazi/autonomousc-ai-edge-runtime:single-cuda-batchrouter-20260516-throughput",
+    "api": "responses",
+    "runtype": "args",
+    "run_mode": "full",
+    "durable_node": true,
+    "max_context_tokens": 32768,
+    "max_batch_tokens": 32768,
+    "target_batch_items": 100,
+    "max_batch_items": 250,
+    "target_batch_tokens": 12000,
+    "max_concurrent_chunks": 4,
+    "available_queue_items": 5000,
+    "available_queue_tokens": 262144,
+    "max_queued_items": 5000,
+    "max_concurrent_assignments": 8,
+    "max_local_queue_assignments": 64,
+    "pull_bundle_size": 64,
+    "node_region": "eu-se-1",
+    "runtime_profile": "rtx_5060_ti_16gb_gemma4_e4b_it",
+    "min_cuda_max_good": 12.9,
+    "expected_api_path": "/v1/responses",
+    "readiness_path": "/v1/models",
+    "startup_status_path": "/startup-status",
+    "benchmark_requests": 0,
+    "benchmark_concurrency": 1,
+    "benchmark_profile": "balanced",
+    "vllm_extra_args": "--quantization fp8 --kv-cache-dtype fp8 --gpu-memory-utilization 0.913 --max-num-seqs 8 --generation-config vllm --skip-mm-profiling"
+  },
+  "selected_offer": null,
+  "instance": null,
+  "runtime": null,
+  "probe": null,
+  "benchmark": null,
+  "candidate_failures": [],
+  "cleanup": {
+    "destroyed": false
+  },
+  "notes": [],
+  "error": "No suitable Vast offers were available at or below $0.25/hr after requiring an RTX 5060 Ti 16GB host with enough disk and direct ports for google/gemma-4-E4B-it.",
+  "timings": {
+    "total_seconds": 0.91
+  }
+}
