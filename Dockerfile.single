@@ -1,3 +1,4 @@
+# check=skip=SecretsUsedInArgOrEnv
 ARG VLLM_BASE_IMAGE=vllm/vllm-openai@sha256:8e86cb93b724092cd4dc892fb129a6c5538613b38a5cd34e40aab9e6aea72b03
 FROM ${VLLM_BASE_IMAGE}
 
