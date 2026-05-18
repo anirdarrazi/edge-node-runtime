@@ -62,7 +62,7 @@ def test_gemma_e4b_model_artifact_is_bundled_for_vllm_responses() -> None:
     artifact = find_model_artifact("google/gemma-4-E4B-it", "responses", runtime_engine="vllm")
 
     assert artifact is not None
-    assert artifact.revision == "c53e9d33178b12afbad4a48334d21e19b8c29761"
+    assert artifact.revision == "3555bddc93a623db8887dd2e52123facc45ade77"
     assert artifact.model_manifest_digest.startswith("sha256:")
     assert artifact.tokenizer_digest.startswith("sha256:")
     assert any(file.path == "model.safetensors" for file in artifact.model_manifest.files)

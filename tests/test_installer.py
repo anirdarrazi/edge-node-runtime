@@ -68,6 +68,8 @@ def write_example_env(runtime_dir: Path) -> None:
 
 @pytest.fixture(autouse=True)
 def stable_machine_inference(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in ("EDGE_CONTROL_URL", "HUGGING_FACE_HUB_TOKEN", "HF_TOKEN"):
+        monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr(
         installer_module,
         "infer_node_region",

@@ -7,4 +7,5 @@ node-agent-launcher = node_agent.launcher:main
 node-agent-service = node_agent.service:main
 node-agent-single-container = node_agent.single_container:main
 node-agent-staging-smoke = node_agent.staging_smoke:main
+node-agent-vast-fleet-plan = node_agent.vast_fleet_plan:main
 node-agent-vast-smoke = node_agent.vast_smoke:main
