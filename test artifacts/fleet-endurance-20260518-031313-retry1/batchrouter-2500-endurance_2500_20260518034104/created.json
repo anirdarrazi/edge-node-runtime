@@ -1,0 +1,138 @@
+{
+  "status": 202,
+  "ok": true,
+  "elapsed_ms": 223537,
+  "bytes": 2874,
+  "payload": {
+    "work_order": {
+      "id": "wo_a2a2264178504a5197a289e052d6cd5d",
+      "org_id": "org_27d0e22d025c47c0844c66617427a79c",
+      "status": "running",
+      "execution_strategy": {
+        "kind": "batch",
+        "batch_id": "batch_f036ec34b1a44fa7bc9e93f80652a4aa",
+        "route_version": "rv_default"
+      },
+      "batch_id": "batch_f036ec34b1a44fa7bc9e93f80652a4aa",
+      "route_receipt_file_id": null,
+      "created_at": "2026-05-18T01:41:15.752Z",
+      "updated_at": "2026-05-18T01:41:15.752Z",
+      "completed_at": null
+    },
+    "work_order_url": "/v1/work-orders/wo_a2a2264178504a5197a289e052d6cd5d",
+    "batch": {
+      "id": "batch_f036ec34b1a44fa7bc9e93f80652a4aa",
+      "org_id": "org_27d0e22d025c47c0844c66617427a79c",
+      "work_order_id": "wo_a2a2264178504a5197a289e052d6cd5d",
+      "sla_tier": "standard",
+      "routing_mode": "hybrid",
+      "privacy_tier": "standard",
+      "provider_preferences": {
+        "allow_fallbacks": false,
+        "only": [
+          "autonomousc"
+        ]
+      },
+      "allowed_regions": [
+        "global"
+      ],
+      "metadata": {
+        "fleet_test": true,
+        "endurance_test": true,
+        "fleet_run_id": "endurance_2500_20260518034104",
+        "requested_item_count": 2500,
+        "provider_under_test": "autonomousc",
+        "prompt_words": 3,
+        "max_output_tokens": 8
+      },
+      "workflow_contract": null,
+      "state": "priced",
+      "counts": {
+        "total": 2500,
+        "pending": 2500,
+        "running": 0,
+        "completed": 0,
+        "failed": 0,
+        "canceled": 0
+      },
+      "pricing_estimate": {
+        "currency": "usd",
+        "provider_subtotal": "0.00163818",
+        "batchrouter_fee": "0.00009673",
+        "total": "0.00173491"
+      },
+      "deadline_at": "2026-05-19T01:41:04.852Z",
+      "input_file_id": "file_e37db73285ce48eb908ff24a4be2e2aa",
+      "output_file_id": null,
+      "review_file_id": null,
+      "error_file_id": null,
+      "retry_file_id": null,
+      "route_receipt_file_id": null,
+      "route_version": "rv_default",
+      "webhook": null,
+      "routable_inventory": {
+        "work_units": [
+          {
+            "batch_id": "batch_f036ec34b1a44fa7bc9e93f80652a4aa",
+            "state": "priced",
+            "item_count": 2500,
+            "state_counts": {
+              "total": 2500,
+              "pending": 2500,
+              "running": 0,
+              "completed": 0,
+              "failed": 0,
+              "canceled": 0
+            },
+            "route_version": "rv_default"
+          }
+        ],
+        "route_candidates": [],
+        "execution_lanes": [],
+        "verification_gates": [],
+        "delivery_contracts": [],
+        "settlement_records": [
+          {
+            "kind": "pricing_estimate",
+            "batch_id": "batch_f036ec34b1a44fa7bc9e93f80652a4aa",
+            "state": "priced",
+            "currency": "usd",
+            "workflow_fee_total": "0.00",
+            "workflow_fees": [],
+            "total": "0.00173491",
+            "funding_preview": null
+          }
+        ],
+        "workflow_benchmark": null
+      },
+      "execution_summary": {
+        "routed_providers": [],
+        "final_provider_breakdown": {}
+      },
+      "output_file_url": null,
+      "review_file_url": null,
+      "error_file_url": null,
+      "retry_file_url": null,
+      "route_receipt_file_url": null,
+      "work_order": {
+        "id": "wo_a2a2264178504a5197a289e052d6cd5d",
+        "org_id": "org_27d0e22d025c47c0844c66617427a79c",
+        "status": "running",
+        "execution_strategy": {
+          "kind": "batch",
+          "batch_id": "batch_f036ec34b1a44fa7bc9e93f80652a4aa",
+          "route_version": "rv_default"
+        },
+        "batch_id": "batch_f036ec34b1a44fa7bc9e93f80652a4aa",
+        "route_receipt_file_id": null,
+        "created_at": "2026-05-18T01:41:15.752Z",
+        "updated_at": "2026-05-18T01:41:15.752Z",
+        "completed_at": null
+      },
+      "sample_run": null,
+      "created_at": "2026-05-18T01:41:16.310Z",
+      "updated_at": "2026-05-18T01:44:54.746Z",
+      "completed_at": null
+    }
+  }
+}

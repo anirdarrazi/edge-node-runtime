@@ -1,0 +1,62 @@
+﻿{
+  "status": "ok",
+  "requested": {
+    "nodes": 2,
+    "model": "google/gemma-4-E4B-it",
+    "max_price": 0.25,
+    "min_cuda_max_good": 12.8,
+    "offer_limit": 120,
+    "allow_same_machine": false
+  },
+  "candidate_count": 6,
+  "selected_count": 2,
+  "selected_offers": [
+    {
+      "node_index": 1,
+      "offer": {
+        "id": 31748540,
+        "gpu_name": "RTX 5060 Ti",
+        "gpu_ram_gb": 15.9,
+        "dph_total": 0.149926,
+        "reliability": 0.996303,
+        "inet_down": 1885.2,
+        "disk_space": 318.9,
+        "cuda_max_good": 13.1,
+        "geolocation": "Denmark, DK",
+        "verification": "verified",
+        "machine_ids": [
+          "55659",
+          "57929"
+        ]
+      },
+      "launch_args": [
+        "--preferred-offer-id",
+        "31748540"
+      ]
+    },
+    {
+      "node_index": 2,
+      "offer": {
+        "id": 32665031,
+        "gpu_name": "RTX 5060 Ti",
+        "gpu_ram_gb": 15.9,
+        "dph_total": 0.187407,
+        "reliability": 0.987355,
+        "inet_down": 932.0,
+        "disk_space": 376.2,
+        "cuda_max_good": 13.2,
+        "geolocation": "Texas, US",
+        "verification": "verified",
+        "machine_ids": [
+          "31841",
+          "59017"
+        ]
+      },
+      "launch_args": [
+        "--preferred-offer-id",
+        "32665031"
+      ]
+    }
+  ],
+  "notes": []
+}

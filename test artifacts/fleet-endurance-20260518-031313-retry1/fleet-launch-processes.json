@@ -1,0 +1,34 @@
+﻿[
+    {
+        "node_index":  1,
+        "offer_id":  31748534,
+        "pid":  8336,
+        "stdout":  "C:\\Users\\Anir\\Documents\\AI eco future\\AUTONOMOUSc Edge Node Network\\edge-node-runtime\\test artifacts\\fleet-endurance-20260518-031313-retry1\\fleet-node-1.stdout.txt",
+        "stderr":  "C:\\Users\\Anir\\Documents\\AI eco future\\AUTONOMOUSc Edge Node Network\\edge-node-runtime\\test artifacts\\fleet-endurance-20260518-031313-retry1\\fleet-node-1.stderr.txt",
+        "started_at":  "2026-05-18T01:13:15.7579509Z"
+    },
+    {
+        "node_index":  2,
+        "offer_id":  32665031,
+        "pid":  7896,
+        "stdout":  "C:\\Users\\Anir\\Documents\\AI eco future\\AUTONOMOUSc Edge Node Network\\edge-node-runtime\\test artifacts\\fleet-endurance-20260518-031313-retry1\\fleet-node-2.stdout.txt",
+        "stderr":  "C:\\Users\\Anir\\Documents\\AI eco future\\AUTONOMOUSc Edge Node Network\\edge-node-runtime\\test artifacts\\fleet-endurance-20260518-031313-retry1\\fleet-node-2.stderr.txt",
+        "started_at":  "2026-05-18T01:13:15.7869562Z"
+    },
+    {
+        "node_index":  3,
+        "offer_id":  30897899,
+        "pid":  2168,
+        "stdout":  "C:\\Users\\Anir\\Documents\\AI eco future\\AUTONOMOUSc Edge Node Network\\edge-node-runtime\\test artifacts\\fleet-endurance-20260518-031313-retry1\\fleet-node-3.stdout.txt",
+        "stderr":  "C:\\Users\\Anir\\Documents\\AI eco future\\AUTONOMOUSc Edge Node Network\\edge-node-runtime\\test artifacts\\fleet-endurance-20260518-031313-retry1\\fleet-node-3.stderr.txt",
+        "started_at":  "2026-05-18T01:13:15.8110891Z"
+    },
+    {
+        "node_index":  4,
+        "offer_id":  29276169,
+        "pid":  22356,
+        "stdout":  "C:\\Users\\Anir\\Documents\\AI eco future\\AUTONOMOUSc Edge Node Network\\edge-node-runtime\\test artifacts\\fleet-endurance-20260518-031313-retry1\\fleet-node-4.stdout.txt",
+        "stderr":  "C:\\Users\\Anir\\Documents\\AI eco future\\AUTONOMOUSc Edge Node Network\\edge-node-runtime\\test artifacts\\fleet-endurance-20260518-031313-retry1\\fleet-node-4.stderr.txt",
+        "started_at":  "2026-05-18T01:13:15.8360856Z"
+    }
+]

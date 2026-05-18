@@ -1,0 +1,50 @@
+{
+  "run_id": "endurance_probe_1000_20260518032656",
+  "size": 1000,
+  "model": "gemma-4-e4b-it",
+  "operation": "responses",
+  "prompt_words": 3,
+  "max_output_tokens": 8,
+  "approx_input_tokens": 3000,
+  "approx_max_output_tokens": 8000,
+  "approx_total_token_budget": 11000,
+  "request_body_bytes": 212283,
+  "stringify_ms": 1,
+  "quote_only": false,
+  "check_results_endpoint": true,
+  "batch_id": "batch_11674243977940a79737a373a1d009a7",
+  "quote_id": "qlock_582651c5db114dc09cc7f3f8134e8009",
+  "state": "completed",
+  "counts": {
+    "total": 1000,
+    "pending": 0,
+    "running": 0,
+    "completed": 1000,
+    "failed": 0,
+    "canceled": 0
+  },
+  "elapsed_seconds": 103,
+  "polls": 9,
+  "work_unit_count": 4,
+  "work_unit_item_counts": [
+    250,
+    250,
+    250,
+    250
+  ],
+  "selected_providers": [
+    "autonomousc"
+  ],
+  "execution_summary": {
+    "routed_providers": [
+      "autonomousc"
+    ],
+    "final_provider_breakdown": {
+      "autonomousc": 1000
+    }
+  },
+  "billing_receipt_ok": true,
+  "results_probe_status": 200,
+  "results_probe_elapsed_ms": 647,
+  "results_probe_bytes": 7805
+}

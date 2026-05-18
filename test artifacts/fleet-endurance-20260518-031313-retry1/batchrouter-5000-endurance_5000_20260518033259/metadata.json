@@ -1,0 +1,15 @@
+{
+  "run_id": "endurance_5000_20260518033259",
+  "size": 5000,
+  "model": "gemma-4-e4b-it",
+  "operation": "responses",
+  "prompt_words": 3,
+  "max_output_tokens": 8,
+  "approx_input_tokens": 15000,
+  "approx_max_output_tokens": 40000,
+  "approx_total_token_budget": 55000,
+  "request_body_bytes": 1034277,
+  "stringify_ms": 4,
+  "quote_only": false,
+  "check_results_endpoint": false
+}

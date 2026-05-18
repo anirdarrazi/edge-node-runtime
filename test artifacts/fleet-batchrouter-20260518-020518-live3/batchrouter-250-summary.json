@@ -1,0 +1,28 @@
+{
+  "run_id": "fleet_live3_250_20260518022703",
+  "size": 250,
+  "batch_id": "batch_1c9a1303c93a4941b46623be7bab98ef",
+  "state": "completed",
+  "counts": {
+    "total": 250,
+    "pending": 0,
+    "running": 0,
+    "completed": 250,
+    "failed": 0,
+    "canceled": 0
+  },
+  "elapsed_seconds": 96,
+  "polls": 9,
+  "quote_id": "qlock_8e30995278424bf0a001d50362730879",
+  "quote_work_unit_item_counts": [
+    250
+  ],
+  "selected_providers": [
+    "autonomousc"
+  ],
+  "provider_breakdown": {
+    "autonomousc": 250
+  },
+  "output_preview_rows": 5,
+  "receipt_ok": true
+}

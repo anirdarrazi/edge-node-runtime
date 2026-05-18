@@ -1,0 +1,400 @@
+{
+  "batch_id": "batch_89f99034b29a47eb865d8d4d2b2c5216",
+  "work_order_id": "wo_6cdb21ee68344507b8a634800e827a4a",
+  "state": "completed",
+  "counts": {
+    "total": 500,
+    "pending": 0,
+    "running": 0,
+    "completed": 500,
+    "failed": 0,
+    "canceled": 0
+  },
+  "deadline_at": "2026-05-18T17:49:16.234Z",
+  "route_version": "rv_default",
+  "output_file": {
+    "id": "file_a90bd70dbcfe48a1a9efc55d698080d7",
+    "url": "https://batchrouter.com/v1/files/file_a90bd70dbcfe48a1a9efc55d698080d7?expires=1779041182&signature=4_8o8sKoIhyr-p1h6vMoMz5UBTLYhkDel05d7fOrnXE"
+  },
+  "review_file": null,
+  "error_file": null,
+  "retry_file": null,
+  "route_receipt_file": {
+    "id": "file_e005486b709943e290d5ca69c0ac8f06",
+    "url": "https://batchrouter.com/v1/files/file_e005486b709943e290d5ca69c0ac8f06?expires=1779041182&signature=3nrBZtN4JQuHmZGsIGKmwl8li7zs5WYvGUpEpuSlUDU"
+  },
+  "output_preview_rows": [
+    {
+      "custom_id": "fleet_live2_500_20260517_500_00000",
+      "customer_item_id": "fleet_live2_500_20260517_500_00000",
+      "batch_item_id": "item_44fdf3b50f5b41ee8a71e804562dd865",
+      "sequence_no": 0,
+      "operation": "responses",
+      "status": "completed",
+      "provider": "autonomousc",
+      "provider_model": "google/gemma-4-E4B-it",
+      "attempt": 1,
+      "usage": {
+        "input_tokens": 18,
+        "output_tokens": 6,
+        "total_tokens": 24
+      },
+      "cost": {
+        "provider_cost": {
+          "currency": "usd",
+          "amount": "0.00"
+        },
+        "customer_charge": {
+          "currency": "usd",
+          "amount": "0.00"
+        },
+        "platform_margin": {
+          "currency": "usd",
+          "amount": "0.00"
+        },
+        "pricing_source": "catalog",
+        "provider_execution_ref": "pexec_a5cf7260076746fcb9c00d6affee6bc3"
+      },
+      "output": {
+        "id": "chatcmpl-8b4ede75c96e0883",
+        "object": "chat.completion",
+        "created": 1779040218,
+        "model": "google/gemma-4-E4B-it",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "fleet-ok-0",
+              "refusal": null,
+              "annotations": null,
+              "audio": null,
+              "function_call": null,
+              "tool_calls": [],
+              "reasoning": null
+            },
+            "logprobs": null,
+            "finish_reason": "stop",
+            "stop_reason": 106,
+            "token_ids": null
+          }
+        ],
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": {
+          "prompt_tokens": 18,
+          "total_tokens": 24,
+          "completion_tokens": 6,
+          "prompt_tokens_details": null
+        },
+        "prompt_logprobs": null,
+        "prompt_token_ids": null,
+        "kv_transfer_params": null
+      },
+      "error": null,
+      "completed_at": "2026-05-17T17:50:19.502139+00:00"
+    },
+    {
+      "custom_id": "fleet_live2_500_20260517_500_00001",
+      "customer_item_id": "fleet_live2_500_20260517_500_00001",
+      "batch_item_id": "item_cbe0d0d1c3b84680888f1bc6cfcfacd0",
+      "sequence_no": 1,
+      "operation": "responses",
+      "status": "completed",
+      "provider": "autonomousc",
+      "provider_model": "google/gemma-4-E4B-it",
+      "attempt": 1,
+      "usage": {
+        "input_tokens": 18,
+        "output_tokens": 6,
+        "total_tokens": 24
+      },
+      "cost": {
+        "provider_cost": {
+          "currency": "usd",
+          "amount": "0.00"
+        },
+        "customer_charge": {
+          "currency": "usd",
+          "amount": "0.00"
+        },
+        "platform_margin": {
+          "currency": "usd",
+          "amount": "0.00"
+        },
+        "pricing_source": "catalog",
+        "provider_execution_ref": "pexec_a5cf7260076746fcb9c00d6affee6bc3"
+      },
+      "output": {
+        "id": "chatcmpl-9633fc99b576beb2",
+        "object": "chat.completion",
+        "created": 1779040219,
+        "model": "google/gemma-4-E4B-it",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "fleet-ok-1",
+              "refusal": null,
+              "annotations": null,
+              "audio": null,
+              "function_call": null,
+              "tool_calls": [],
+              "reasoning": null
+            },
+            "logprobs": null,
+            "finish_reason": "stop",
+            "stop_reason": 106,
+            "token_ids": null
+          }
+        ],
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": {
+          "prompt_tokens": 18,
+          "total_tokens": 24,
+          "completion_tokens": 6,
+          "prompt_tokens_details": null
+        },
+        "prompt_logprobs": null,
+        "prompt_token_ids": null,
+        "kv_transfer_params": null
+      },
+      "error": null,
+      "completed_at": "2026-05-17T17:50:19.610447+00:00"
+    },
+    {
+      "custom_id": "fleet_live2_500_20260517_500_00002",
+      "customer_item_id": "fleet_live2_500_20260517_500_00002",
+      "batch_item_id": "item_d96db22b98e94d48875f3d3c28eda2b0",
+      "sequence_no": 2,
+      "operation": "responses",
+      "status": "completed",
+      "provider": "autonomousc",
+      "provider_model": "google/gemma-4-E4B-it",
+      "attempt": 1,
+      "usage": {
+        "input_tokens": 18,
+        "output_tokens": 6,
+        "total_tokens": 24
+      },
+      "cost": {
+        "provider_cost": {
+          "currency": "usd",
+          "amount": "0.00"
+        },
+        "customer_charge": {
+          "currency": "usd",
+          "amount": "0.00"
+        },
+        "platform_margin": {
+          "currency": "usd",
+          "amount": "0.00"
+        },
+        "pricing_source": "catalog",
+        "provider_execution_ref": "pexec_a5cf7260076746fcb9c00d6affee6bc3"
+      },
+      "output": {
+        "id": "chatcmpl-b8b71c424516dba0",
+        "object": "chat.completion",
+        "created": 1779040219,
+        "model": "google/gemma-4-E4B-it",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "fleet-ok-2",
+              "refusal": null,
+              "annotations": null,
+              "audio": null,
+              "function_call": null,
+              "tool_calls": [],
+              "reasoning": null
+            },
+            "logprobs": null,
+            "finish_reason": "stop",
+            "stop_reason": 106,
+            "token_ids": null
+          }
+        ],
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": {
+          "prompt_tokens": 18,
+          "total_tokens": 24,
+          "completion_tokens": 6,
+          "prompt_tokens_details": null
+        },
+        "prompt_logprobs": null,
+        "prompt_token_ids": null,
+        "kv_transfer_params": null
+      },
+      "error": null,
+      "completed_at": "2026-05-17T17:50:19.732497+00:00"
+    },
+    {
+      "custom_id": "fleet_live2_500_20260517_500_00003",
+      "customer_item_id": "fleet_live2_500_20260517_500_00003",
+      "batch_item_id": "item_1a3a1aebf13246d0b402abcb6b6d4a9b",
+      "sequence_no": 3,
+      "operation": "responses",
+      "status": "completed",
+      "provider": "autonomousc",
+      "provider_model": "google/gemma-4-E4B-it",
+      "attempt": 1,
+      "usage": {
+        "input_tokens": 18,
+        "output_tokens": 6,
+        "total_tokens": 24
+      },
+      "cost": {
+        "provider_cost": {
+          "currency": "usd",
+          "amount": "0.00"
+        },
+        "customer_charge": {
+          "currency": "usd",
+          "amount": "0.00"
+        },
+        "platform_margin": {
+          "currency": "usd",
+          "amount": "0.00"
+        },
+        "pricing_source": "catalog",
+        "provider_execution_ref": "pexec_a5cf7260076746fcb9c00d6affee6bc3"
+      },
+      "output": {
+        "id": "chatcmpl-88b60fb32e249380",
+        "object": "chat.completion",
+        "created": 1779040219,
+        "model": "google/gemma-4-E4B-it",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "fleet-ok-3",
+              "refusal": null,
+              "annotations": null,
+              "audio": null,
+              "function_call": null,
+              "tool_calls": [],
+              "reasoning": null
+            },
+            "logprobs": null,
+            "finish_reason": "stop",
+            "stop_reason": 106,
+            "token_ids": null
+          }
+        ],
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": {
+          "prompt_tokens": 18,
+          "total_tokens": 24,
+          "completion_tokens": 6,
+          "prompt_tokens_details": null
+        },
+        "prompt_logprobs": null,
+        "prompt_token_ids": null,
+        "kv_transfer_params": null
+      },
+      "error": null,
+      "completed_at": "2026-05-17T17:50:19.854597+00:00"
+    },
+    {
+      "custom_id": "fleet_live2_500_20260517_500_00004",
+      "customer_item_id": "fleet_live2_500_20260517_500_00004",
+      "batch_item_id": "item_8f673cfaae1f4588b7cfc7e4a56999c7",
+      "sequence_no": 4,
+      "operation": "responses",
+      "status": "completed",
+      "provider": "autonomousc",
+      "provider_model": "google/gemma-4-E4B-it",
+      "attempt": 1,
+      "usage": {
+        "input_tokens": 18,
+        "output_tokens": 6,
+        "total_tokens": 24
+      },
+      "cost": {
+        "provider_cost": {
+          "currency": "usd",
+          "amount": "0.00"
+        },
+        "customer_charge": {
+          "currency": "usd",
+          "amount": "0.00"
+        },
+        "platform_margin": {
+          "currency": "usd",
+          "amount": "0.00"
+        },
+        "pricing_source": "catalog",
+        "provider_execution_ref": "pexec_a5cf7260076746fcb9c00d6affee6bc3"
+      },
+      "output": {
+        "id": "chatcmpl-84f55eb235463af7",
+        "object": "chat.completion",
+        "created": 1779040219,
+        "model": "google/gemma-4-E4B-it",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "fleet-ok-4",
+              "refusal": null,
+              "annotations": null,
+              "audio": null,
+              "function_call": null,
+              "tool_calls": [],
+              "reasoning": null
+            },
+            "logprobs": null,
+            "finish_reason": "stop",
+            "stop_reason": 106,
+            "token_ids": null
+          }
+        ],
+        "service_tier": null,
+        "system_fingerprint": null,
+        "usage": {
+          "prompt_tokens": 18,
+          "total_tokens": 24,
+          "completion_tokens": 6,
+          "prompt_tokens_details": null
+        },
+        "prompt_logprobs": null,
+        "prompt_token_ids": null,
+        "kv_transfer_params": null
+      },
+      "error": null,
+      "completed_at": "2026-05-17T17:50:19.976713+00:00"
+    }
+  ],
+  "review_preview_rows": [],
+  "error_preview_rows": [],
+  "retry_preview_rows": [],
+  "confidence_gating": {
+    "auto_deliver_count": 500,
+    "review_count": 0,
+    "retry_count": 0,
+    "auto_delivery_threshold": 0.8,
+    "approval_rule": "auto_deliver_high_confidence",
+    "summary": "500 rows auto-delivered."
+  },
+  "retry_recommendations": [],
+  "preview_limit": 5,
+  "execution_summary": {
+    "routed_providers": [
+      "autonomousc"
+    ],
+    "final_provider_breakdown": {
+      "autonomousc": 500
+    }
+  },
+  "sample_run": null
+}

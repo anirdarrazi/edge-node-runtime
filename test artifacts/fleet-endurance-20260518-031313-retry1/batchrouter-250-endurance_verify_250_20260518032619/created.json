@@ -1,0 +1,44 @@
+{
+  "status": 409,
+  "ok": false,
+  "elapsed_ms": 327,
+  "bytes": 655,
+  "payload": {
+    "error": {
+      "code": "quote_lock_fallback_ceiling_exceeded",
+      "message": "Fallback quote lanes exceed the locked fallback price ceiling.",
+      "details": {
+        "quote": {
+          "quote_id": "qlock_45028e7d1fcb4c07bc6396da61aedd25",
+          "valid_until": "2026-05-18T01:36:23.824Z",
+          "reserved_capacity": {
+            "mode": "hard_hold_until_quote_expiry",
+            "work_units": 250,
+            "providers": [
+              {
+                "provider": "autonomousc",
+                "work_units": 250
+              }
+            ],
+            "windows": []
+          },
+          "max_price": {
+            "currency": "usd",
+            "amount": "0.0001735"
+          },
+          "price_protection_policy": "lock_total_and_fallback",
+          "fallback_price_ceiling": {
+            "currency": "usd",
+            "amount": "0.000173"
+          },
+          "status": "active",
+          "batch_id": null
+        },
+        "fallback_ceiling": {
+          "currency": "usd",
+          "amount": "0.000173"
+        }
+      }
+    }
+  }
+}

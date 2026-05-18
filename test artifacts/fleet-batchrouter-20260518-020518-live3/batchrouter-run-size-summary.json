@@ -1,0 +1,58 @@
+﻿[
+    {
+        "size":  250,
+        "state":  "completed",
+        "batch_id":  "batch_1c9a1303c93a4941b46623be7bab98ef",
+        "chunks":  1,
+        "elapsed_seconds":  96,
+        "quote_bytes":  74528,
+        "created_bytes":  4130,
+        "results_bytes":  11657,
+        "receipt_bytes":  9120,
+        "receipt_ok":  true,
+        "total_cost":  null,
+        "tokens":  null
+    },
+    {
+        "size":  1200,
+        "state":  "completed",
+        "batch_id":  "batch_1b6d98201b044067b1cd26de44ec1b78",
+        "chunks":  5,
+        "elapsed_seconds":  108,
+        "quote_bytes":  357975,
+        "created_bytes":  4141,
+        "results_bytes":  11682,
+        "receipt_bytes":  33359,
+        "receipt_ok":  true,
+        "total_cost":  null,
+        "tokens":  null
+    },
+    {
+        "size":  3000,
+        "state":  "completed",
+        "batch_id":  "batch_7b9d82103651451686b74d2de7500a01",
+        "chunks":  12,
+        "elapsed_seconds":  119,
+        "quote_bytes":  877379,
+        "created_bytes":  4141,
+        "results_bytes":  11473,
+        "receipt_bytes":  79509,
+        "receipt_ok":  true,
+        "total_cost":  null,
+        "tokens":  null
+    },
+    {
+        "size":  5000,
+        "state":  null,
+        "batch_id":  null,
+        "chunks":  null,
+        "elapsed_seconds":  null,
+        "quote_bytes":  1460361,
+        "created_bytes":  null,
+        "results_bytes":  null,
+        "receipt_bytes":  null,
+        "receipt_ok":  null,
+        "total_cost":  null,
+        "tokens":  null
+    }
+]

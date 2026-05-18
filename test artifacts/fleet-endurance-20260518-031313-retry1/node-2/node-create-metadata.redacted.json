@@ -1,0 +1,12 @@
+﻿{
+    "node_id":  "node_fleet_57ca8cffff2246c38d0bb1beed1df8e4",
+    "node_key_hash":  "0ad3e385b76587594359d9a914e700efaf4e0f4f44b3d1b977d1274097255756",
+    "created_at":  "2026-05-18T01:15:01.2334385Z",
+    "capacity":  {
+                     "available_queue_tokens":  262144,
+                     "max_concurrent_chunks":  4,
+                     "target_batch_items":  100,
+                     "max_batch_items":  250,
+                     "available_queue_items":  5000
+                 }
+}

@@ -1,0 +1,108 @@
+﻿{
+  "status": "ok",
+  "requested": {
+    "nodes": 4,
+    "model": "google/gemma-4-E4B-it",
+    "max_price": 0.25,
+    "min_cuda_max_good": 12.8,
+    "offer_limit": 160,
+    "allow_same_machine": false
+  },
+  "candidate_count": 6,
+  "selected_count": 4,
+  "selected_offers": [
+    {
+      "node_index": 1,
+      "offer": {
+        "id": 31748534,
+        "gpu_name": "RTX 5060 Ti",
+        "gpu_ram_gb": 15.9,
+        "dph_total": 0.149926,
+        "reliability": 0.996339,
+        "inet_down": 1885.2,
+        "disk_space": 313.7,
+        "cuda_max_good": 13.1,
+        "geolocation": "Denmark, DK",
+        "verification": "verified",
+        "machine_ids": [
+          "55659",
+          "57929"
+        ]
+      },
+      "launch_args": [
+        "--preferred-offer-id",
+        "31748534"
+      ]
+    },
+    {
+      "node_index": 2,
+      "offer": {
+        "id": 32097994,
+        "gpu_name": "RTX 5060 Ti",
+        "gpu_ram_gb": 15.9,
+        "dph_total": 0.187111,
+        "reliability": 0.997856,
+        "inet_down": 925.4,
+        "disk_space": 1387.3,
+        "cuda_max_good": 13.0,
+        "geolocation": "Texas, US",
+        "verification": "verified",
+        "machine_ids": [
+          "49879",
+          "59017"
+        ]
+      },
+      "launch_args": [
+        "--preferred-offer-id",
+        "32097994"
+      ]
+    },
+    {
+      "node_index": 3,
+      "offer": {
+        "id": 30897899,
+        "gpu_name": "RTX 5060 Ti",
+        "gpu_ram_gb": 15.9,
+        "dph_total": 0.191556,
+        "reliability": 0.998286,
+        "inet_down": 7619.1,
+        "disk_space": 269.1,
+        "cuda_max_good": 13.0,
+        "geolocation": "Germany, DE",
+        "verification": "verified",
+        "machine_ids": [
+          "50929",
+          "62819"
+        ]
+      },
+      "launch_args": [
+        "--preferred-offer-id",
+        "30897899"
+      ]
+    },
+    {
+      "node_index": 4,
+      "offer": {
+        "id": 29276174,
+        "gpu_name": "RTX 5060 Ti",
+        "gpu_ram_gb": 15.9,
+        "dph_total": 0.202222,
+        "reliability": 0.998557,
+        "inet_down": 924.9,
+        "disk_space": 481.0,
+        "cuda_max_good": 12.8,
+        "geolocation": "Texas, US",
+        "verification": "verified",
+        "machine_ids": [
+          "152538",
+          "33638"
+        ]
+      },
+      "launch_args": [
+        "--preferred-offer-id",
+        "29276174"
+      ]
+    }
+  ],
+  "notes": []
+}

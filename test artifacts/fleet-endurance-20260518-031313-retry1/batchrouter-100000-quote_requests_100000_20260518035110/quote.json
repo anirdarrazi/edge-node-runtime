@@ -1,0 +1,15 @@
+{
+  "status": 413,
+  "ok": false,
+  "elapsed_ms": 1165,
+  "bytes": 130,
+  "payload": {
+    "error": {
+      "code": "request_too_large",
+      "message": "Request body exceeds the maximum allowed size.",
+      "details": {
+        "max_bytes": 20971520
+      }
+    }
+  }
+}

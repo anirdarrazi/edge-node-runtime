@@ -1,0 +1,34 @@
+﻿[
+    {
+        "node_index":  1,
+        "offer_id":  31748534,
+        "pid":  31864,
+        "stdout":  "C:\\Users\\Anir\\Documents\\AI eco future\\AUTONOMOUSc Edge Node Network\\edge-node-runtime\\test artifacts\\fleet-endurance-20260518-031209\\fleet-node-1.stdout.txt",
+        "stderr":  "C:\\Users\\Anir\\Documents\\AI eco future\\AUTONOMOUSc Edge Node Network\\edge-node-runtime\\test artifacts\\fleet-endurance-20260518-031209\\fleet-node-1.stderr.txt",
+        "started_at":  "2026-05-18T01:12:12.5362177Z"
+    },
+    {
+        "node_index":  2,
+        "offer_id":  32097994,
+        "pid":  23820,
+        "stdout":  "C:\\Users\\Anir\\Documents\\AI eco future\\AUTONOMOUSc Edge Node Network\\edge-node-runtime\\test artifacts\\fleet-endurance-20260518-031209\\fleet-node-2.stdout.txt",
+        "stderr":  "C:\\Users\\Anir\\Documents\\AI eco future\\AUTONOMOUSc Edge Node Network\\edge-node-runtime\\test artifacts\\fleet-endurance-20260518-031209\\fleet-node-2.stderr.txt",
+        "started_at":  "2026-05-18T01:12:12.5596486Z"
+    },
+    {
+        "node_index":  3,
+        "offer_id":  30897899,
+        "pid":  13460,
+        "stdout":  "C:\\Users\\Anir\\Documents\\AI eco future\\AUTONOMOUSc Edge Node Network\\edge-node-runtime\\test artifacts\\fleet-endurance-20260518-031209\\fleet-node-3.stdout.txt",
+        "stderr":  "C:\\Users\\Anir\\Documents\\AI eco future\\AUTONOMOUSc Edge Node Network\\edge-node-runtime\\test artifacts\\fleet-endurance-20260518-031209\\fleet-node-3.stderr.txt",
+        "started_at":  "2026-05-18T01:12:12.5858876Z"
+    },
+    {
+        "node_index":  4,
+        "offer_id":  29276174,
+        "pid":  11428,
+        "stdout":  "C:\\Users\\Anir\\Documents\\AI eco future\\AUTONOMOUSc Edge Node Network\\edge-node-runtime\\test artifacts\\fleet-endurance-20260518-031209\\fleet-node-4.stdout.txt",
+        "stderr":  "C:\\Users\\Anir\\Documents\\AI eco future\\AUTONOMOUSc Edge Node Network\\edge-node-runtime\\test artifacts\\fleet-endurance-20260518-031209\\fleet-node-4.stderr.txt",
+        "started_at":  "2026-05-18T01:12:12.6101566Z"
+    }
+]

@@ -1,0 +1,152 @@
+{
+  "batch": {
+    "id": "batch_11674243977940a79737a373a1d009a7",
+    "org_id": "org_27d0e22d025c47c0844c66617427a79c",
+    "work_order_id": "wo_e46299cba755402a8213cb52f0e3ac81",
+    "sla_tier": "standard",
+    "routing_mode": "hybrid",
+    "privacy_tier": "standard",
+    "provider_preferences": {
+      "allow_fallbacks": false,
+      "only": [
+        "autonomousc"
+      ]
+    },
+    "allowed_regions": [
+      "global"
+    ],
+    "metadata": {
+      "fleet_test": true,
+      "endurance_test": true,
+      "fleet_run_id": "endurance_probe_1000_20260518032656",
+      "requested_item_count": 1000,
+      "provider_under_test": "autonomousc",
+      "prompt_words": 3,
+      "max_output_tokens": 8
+    },
+    "workflow_contract": null,
+    "state": "completed",
+    "counts": {
+      "total": 1000,
+      "pending": 0,
+      "running": 0,
+      "completed": 1000,
+      "failed": 0,
+      "canceled": 0
+    },
+    "pricing_estimate": {
+      "currency": "usd",
+      "provider_subtotal": "0.00065526",
+      "batchrouter_fee": "0.00003871",
+      "total": "0.00069397"
+    },
+    "deadline_at": "2026-05-19T01:26:56.770Z",
+    "input_file_id": "file_ca4665c607ac4a4d8157670036ab43f4",
+    "output_file_id": "file_70b5c43e2866429095bb8f53f76490b5",
+    "review_file_id": null,
+    "error_file_id": null,
+    "retry_file_id": null,
+    "route_receipt_file_id": "file_6d8a344972654ceeaf4a328162fd2132",
+    "route_version": "rv_default",
+    "webhook": null,
+    "routable_inventory": {
+      "work_units": [
+        {
+          "batch_id": "batch_11674243977940a79737a373a1d009a7",
+          "state": "completed",
+          "item_count": 1000,
+          "state_counts": {
+            "total": 1000,
+            "pending": 0,
+            "running": 0,
+            "completed": 1000,
+            "failed": 0,
+            "canceled": 0
+          },
+          "route_version": "rv_default"
+        }
+      ],
+      "route_candidates": [
+        {
+          "provider": "autonomousc",
+          "rank": 1,
+          "selected": true,
+          "source": "execution_summary"
+        }
+      ],
+      "execution_lanes": [
+        {
+          "provider": "autonomousc",
+          "state": "completed",
+          "item_count": 1000,
+          "route_version": "rv_default"
+        }
+      ],
+      "verification_gates": [],
+      "delivery_contracts": [],
+      "settlement_records": [
+        {
+          "kind": "pricing_estimate",
+          "batch_id": "batch_11674243977940a79737a373a1d009a7",
+          "state": "completed",
+          "currency": "usd",
+          "workflow_fee_total": "0.00",
+          "workflow_fees": [],
+          "total": "0.00069397",
+          "funding_preview": null
+        }
+      ],
+      "workflow_benchmark": null
+    },
+    "execution_summary": {
+      "routed_providers": [
+        "autonomousc"
+      ],
+      "final_provider_breakdown": {
+        "autonomousc": 1000
+      }
+    },
+    "output_file_url": "https://batchrouter.com/v1/files/file_70b5c43e2866429095bb8f53f76490b5?expires=1779068716&signature=-MKAwYAcDEUM3fsU8utZFgk9zNAVw-mPpdy2ubSIEhM",
+    "review_file_url": null,
+    "error_file_url": null,
+    "retry_file_url": null,
+    "route_receipt_file_url": "https://batchrouter.com/v1/files/file_6d8a344972654ceeaf4a328162fd2132?expires=1779068716&signature=HBQZWoCG-Sup5AU8jBQYP8cCZNsVtkjBPYSZPWs_xjU",
+    "work_order": {
+      "id": "wo_e46299cba755402a8213cb52f0e3ac81",
+      "org_id": "org_27d0e22d025c47c0844c66617427a79c",
+      "status": "completed",
+      "execution_strategy": {
+        "kind": "batch",
+        "batch_id": "batch_11674243977940a79737a373a1d009a7",
+        "route_version": "rv_default"
+      },
+      "batch_id": "batch_11674243977940a79737a373a1d009a7",
+      "route_receipt_file_id": "file_6d8a344972654ceeaf4a328162fd2132",
+      "created_at": "2026-05-18T01:27:03.483Z",
+      "updated_at": "2026-05-18T01:30:12.689Z",
+      "completed_at": "2026-05-18T01:30:12.502Z"
+    },
+    "sample_run": null,
+    "created_at": "2026-05-18T01:27:03.906Z",
+    "updated_at": "2026-05-18T01:30:12.566Z",
+    "completed_at": "2026-05-18T01:30:06.790Z"
+  },
+  "id": "batch_11674243977940a79737a373a1d009a7",
+  "state": "completed",
+  "counts": {
+    "total": 1000,
+    "pending": 0,
+    "running": 0,
+    "completed": 1000,
+    "failed": 0,
+    "canceled": 0
+  },
+  "execution_summary": {
+    "routed_providers": [
+      "autonomousc"
+    ],
+    "final_provider_breakdown": {
+      "autonomousc": 1000
+    }
+  }
+}

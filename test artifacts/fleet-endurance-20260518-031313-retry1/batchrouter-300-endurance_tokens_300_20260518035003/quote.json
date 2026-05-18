@@ -1,0 +1,15 @@
+{
+  "status": 500,
+  "ok": false,
+  "elapsed_ms": 17848,
+  "bytes": 182,
+  "payload": {
+    "error": {
+      "code": "internal_error",
+      "message": "Unexpected server error. Reference err_8072338fcc794944b1780c32e5cf367e.",
+      "details": {
+        "error_id": "err_8072338fcc794944b1780c32e5cf367e"
+      }
+    }
+  }
+}

@@ -1,0 +1,9 @@
+﻿{
+    "node_index":  4,
+    "offer_id":  0,
+    "pid":  31084,
+    "stdout":  "C:\\Users\\Anir\\Documents\\AI eco future\\AUTONOMOUSc Edge Node Network\\edge-node-runtime\\test artifacts\\fleet-endurance-20260518-031313-retry1\\fleet-node-4.auto.stdout.txt",
+    "stderr":  "C:\\Users\\Anir\\Documents\\AI eco future\\AUTONOMOUSc Edge Node Network\\edge-node-runtime\\test artifacts\\fleet-endurance-20260518-031313-retry1\\fleet-node-4.auto.stderr.txt",
+    "started_at":  "2026-05-18T01:17:06.2604145Z",
+    "mode":  "direct_d1_auto_replacement"
+}

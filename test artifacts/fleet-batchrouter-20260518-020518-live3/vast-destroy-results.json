@@ -1,0 +1,20 @@
+[
+  {
+    "node_dir": "node-1",
+    "instance_id": 36974303,
+    "destroyed": true,
+    "error": null
+  },
+  {
+    "node_dir": "node-2",
+    "instance_id": 36974588,
+    "destroyed": true,
+    "error": null
+  },
+  {
+    "node_dir": "node-3",
+    "instance_id": 36974302,
+    "destroyed": true,
+    "error": null
+  }
+]

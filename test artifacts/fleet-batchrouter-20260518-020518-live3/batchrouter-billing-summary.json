@@ -1,0 +1,35 @@
+﻿[
+    {
+        "size":  250,
+        "batch_id":  "batch_1c9a1303c93a4941b46623be7bab98ef",
+        "quoted_total":  "0.0001735",
+        "settled_total":  "0.000174",
+        "lanes":  1,
+        "input_tokens":  4890,
+        "output_tokens":  1890,
+        "total_tokens":  6780,
+        "receipt_bytes":  9120
+    },
+    {
+        "size":  1200,
+        "batch_id":  "batch_1b6d98201b044067b1cd26de44ec1b78",
+        "quoted_total":  "0.00083275",
+        "settled_total":  "0.000832",
+        "lanes":  5,
+        "input_tokens":  24090,
+        "output_tokens":  9490,
+        "total_tokens":  33580,
+        "receipt_bytes":  33359
+    },
+    {
+        "size":  3000,
+        "batch_id":  "batch_7b9d82103651451686b74d2de7500a01",
+        "quoted_total":  "0.00208189",
+        "settled_total":  "0.002077",
+        "lanes":  12,
+        "input_tokens":  61890,
+        "output_tokens":  23890,
+        "total_tokens":  85780,
+        "receipt_bytes":  79509
+    }
+]
