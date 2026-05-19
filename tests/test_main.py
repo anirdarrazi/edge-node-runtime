@@ -13,6 +13,7 @@ import node_agent.main as main_module
 from node_agent.concurrency import (
     max_local_queue_assignments_from_capabilities,
     max_worker_assignments_from_capabilities,
+    resolved_local_queue_assignment_limit,
 )
 from node_agent.gguf_artifacts import find_gguf_artifact
 from node_agent.model_artifacts import find_model_artifact
@@ -363,6 +364,20 @@ def test_local_queue_limit_prefers_explicit_local_queue_depth():
             }
         )
         == 24
+    )
+
+
+def test_resolved_local_queue_override_can_be_shallower_than_worker_concurrency():
+    assert (
+        resolved_local_queue_assignment_limit(
+            supported_models="google/gemma-4-E4B-it",
+            operations=["responses"],
+            gpu_memory_gb=16,
+            max_concurrent_assignments=8,
+            pull_bundle_size=4,
+            override=4,
+        )
+        == 4
     )
 
 

@@ -99,7 +99,7 @@ def resolved_local_queue_assignment_limit(
 ) -> int:
     configured_override = _safe_positive_int(override)
     if configured_override is not None:
-        return max(max_concurrent_assignments, min(64, configured_override))
+        return min(64, configured_override)
 
     configured_bundle = _safe_positive_int(pull_bundle_size) or 1
     embedding_microbatch_limit = resolved_embeddings_microbatch_assignment_limit(

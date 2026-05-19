@@ -110,6 +110,34 @@ def test_autopilot_uses_tuned_gemma_5060_profile_concurrency_targets(tmp_path: P
     assert capabilities["dynamic_concurrency"]["effective_ceiling"] == 12
 
 
+def test_autopilot_preserves_explicit_shallow_local_queue_for_small_batch_fairness(
+    tmp_path: Path,
+) -> None:
+    model = "google/gemma-4-E4B-it"
+    settings = NodeAgentSettings(
+        vllm_model=model,
+        supported_models=model,
+        runtime_profile="rtx_5060_ti_16gb_gemma4_e4b_it",
+        max_concurrent_assignments=8,
+        max_concurrent_assignments_cap=8,
+        max_local_queue_assignments=4,
+        pull_bundle_size=4,
+        gpu_memory_gb=16.0,
+        allow_high_gpu_memory_pressure=True,
+        min_gpu_memory_headroom_pct=5,
+        target_gpu_utilization_pct=100,
+        autopilot_state_path=str(tmp_path / "autopilot-gemma-5060-shallow-reservoir.json"),
+    )
+    autopilot = AutopilotController(settings)
+
+    autopilot.observe_idle(queue_depth=8, active_assignments=8)
+
+    capabilities = autopilot.capabilities_payload()
+    assert capabilities["max_concurrent_assignments"] == 8
+    assert capabilities["max_local_queue_assignments"] == 4
+    assert capabilities["max_pull_bundle_assignments"] == 4
+
+
 def test_tuned_gemma_5060_profile_advertises_configured_capacity_from_stale_state(tmp_path: Path) -> None:
     model = "google/gemma-4-E4B-it"
     settings = NodeAgentSettings(

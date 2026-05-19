@@ -1219,7 +1219,7 @@ class AutopilotController:
                     round(embedding_microbatch_limit * heat_governor_plan.microbatch_scale),
                 )
             local_queue_limit = max(
-                advertised_concurrency,
+                1,
                 round(local_queue_limit * max(0.25, heat_governor_plan.microbatch_scale)),
             )
         pull_bundle_limit = max(local_queue_limit, settings_int(self.settings, "pull_bundle_size", 16))

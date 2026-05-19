@@ -88,16 +88,21 @@ GPU_NAME=RTX 5060 Ti
 GPU_MEMORY_GB=16
 MAX_CONTEXT_TOKENS=32768
 MAX_BATCH_TOKENS=32768
-MAX_CONCURRENT_ASSIGNMENTS=12
-MAX_CONCURRENT_ASSIGNMENTS_CAP=12
-MAX_LOCAL_QUEUE_ASSIGNMENTS=24
+TARGET_BATCH_ITEMS=100
+MAX_BATCH_ITEMS=250
+TARGET_BATCH_TOKENS=12000
+MAX_CONCURRENT_CHUNKS=4
+MAX_CONCURRENT_ASSIGNMENTS=8
+MAX_CONCURRENT_ASSIGNMENTS_CAP=8
+MAX_LOCAL_QUEUE_ASSIGNMENTS=4
+PULL_BUNDLE_SIZE=4
 VLLM_STARTUP_TIMEOUT_SECONDS=1800
 VLLM_MODEL=google/gemma-4-E4B-it
 SUPPORTED_MODELS=google/gemma-4-E4B-it
 VLLM_EXTRA_ARGS=--quantization fp8 --kv-cache-dtype fp8 --gpu-memory-utilization 0.913 --max-num-seqs 12 --generation-config vllm --skip-mm-profiling
 ```
 
-The control plane catalogs this profile as exact-model, audited-safetensors, `restricted`-eligible, and `elastic_exact_vast`. The durable Vast launcher uses a 32k context on 16 GB RTX 5060 Ti nodes, treats `MAX_CONCURRENT_ASSIGNMENTS_CAP=12` as the owner scheduling cap, runs vLLM with FP8 weight quantization and FP8 KV cache over the BF16 safetensors source repo, allows a long first-load Gemma warmup, and keeps the contract alive after smoke success. Offer selection is intentionally narrow for this profile: one RTX 5060 Ti 16GB GPU, `cuda_max_good >= 12.9`, at least 80 GB disk, a basic reliability floor, and direct mappings for the runtime/status ports. Failed smoke candidates are destroyed before the launcher tries the next cheapest viable host.
+The control plane catalogs this profile as exact-model, audited-safetensors, `restricted`-eligible, and `elastic_exact_vast`. The durable Vast launcher uses a 32k context on 16 GB RTX 5060 Ti nodes, advertises 250-item hard BatchRouter chunks with four concurrent chunk lanes, and keeps the local pull reservoir capped at four assignments so slower hosts do not hoard queued chunks from faster fleet peers. It runs vLLM with FP8 weight quantization and FP8 KV cache over the BF16 safetensors source repo, allows a long first-load Gemma warmup, and keeps the contract alive after smoke success. Offer selection is intentionally narrow for this profile: one RTX 5060 Ti 16GB GPU, `cuda_max_good >= 12.9`, at least 80 GB disk, a basic reliability floor, and direct mappings for the runtime/status ports. Failed smoke candidates are destroyed before the launcher tries the next cheapest viable host.
 
 Durable Vast launch helper:
 

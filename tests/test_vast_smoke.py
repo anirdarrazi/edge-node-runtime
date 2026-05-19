@@ -510,8 +510,8 @@ def test_runner_durable_gemma_node_uses_full_mode_and_stays_live() -> None:
     assert env["BATCHROUTER_CAPACITY_TIER"] == "edge"
     assert env["MAX_CONCURRENT_ASSIGNMENTS"] == "8"
     assert env["MAX_CONCURRENT_ASSIGNMENTS_CAP"] == "8"
-    assert env["MAX_LOCAL_QUEUE_ASSIGNMENTS"] == "64"
-    assert env["PULL_BUNDLE_SIZE"] == "64"
+    assert env["MAX_LOCAL_QUEUE_ASSIGNMENTS"] == "4"
+    assert env["PULL_BUNDLE_SIZE"] == "4"
     assert env["VLLM_STARTUP_TIMEOUT_SECONDS"] == "1800"
     assert env["VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS"] == "1"
     assert env["HEAT_GOVERNOR_MODE"] == "100"
@@ -1306,6 +1306,34 @@ def test_build_config_defaults_follow_vast_launch_profile() -> None:
     assert config.smoke_test_api_path == vast_smoke.DEFAULT_VAST_LAUNCH_PROFILE.smoke_test_api_path
     assert config.min_inet_down_mbps == 250.0
     assert config.min_cuda_max_good == 12.9
+
+
+def test_durable_gemma_defaults_keep_the_local_reservoir_shallow() -> None:
+    config = vast_smoke.build_config_from_args(
+        vast_smoke.parse_args(
+            [
+                "--api-key",
+                "secret",
+                "--durable-node",
+                "--edge-control-url",
+                "https://edge.example.test",
+                "--node-id",
+                "node_test",
+                "--node-key",
+                "node-key-test",
+                "--model",
+                "google/gemma-4-E4B-it",
+            ]
+        )
+    )
+
+    assert config.target_batch_items == 100
+    assert config.max_batch_items == 250
+    assert config.target_batch_tokens == 12000
+    assert config.max_concurrent_chunks == 4
+    assert config.max_concurrent_assignments == 8
+    assert config.max_local_queue_assignments == 4
+    assert config.pull_bundle_size == 4
 
 
 def test_build_config_accepts_fleet_offer_controls() -> None:
