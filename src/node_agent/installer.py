@@ -192,7 +192,7 @@ RTX_5060_TI_16GB_VLLM_EXTRA_ARGS = (
     "--quantization fp8 "
     "--kv-cache-dtype fp8 "
     "--gpu-memory-utilization 0.913 "
-    "--max-num-seqs 12 "
+    "--max-num-seqs 8 "
     "--generation-config vllm "
     "--skip-mm-profiling"
 )

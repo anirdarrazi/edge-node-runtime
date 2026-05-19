@@ -99,7 +99,7 @@ PULL_BUNDLE_SIZE=4
 VLLM_STARTUP_TIMEOUT_SECONDS=1800
 VLLM_MODEL=google/gemma-4-E4B-it
 SUPPORTED_MODELS=google/gemma-4-E4B-it
-VLLM_EXTRA_ARGS=--quantization fp8 --kv-cache-dtype fp8 --gpu-memory-utilization 0.913 --max-num-seqs 12 --generation-config vllm --skip-mm-profiling
+VLLM_EXTRA_ARGS=--quantization fp8 --kv-cache-dtype fp8 --gpu-memory-utilization 0.913 --max-num-seqs 8 --generation-config vllm --skip-mm-profiling
 ```
 
 The control plane catalogs this profile as exact-model, audited-safetensors, `restricted`-eligible, and `elastic_exact_vast`. The durable Vast launcher uses a 32k context on 16 GB RTX 5060 Ti nodes, advertises 250-item hard BatchRouter chunks with four concurrent chunk lanes, and keeps the local pull reservoir capped at four assignments so slower hosts do not hoard queued chunks from faster fleet peers. It runs vLLM with FP8 weight quantization and FP8 KV cache over the BF16 safetensors source repo, allows a long first-load Gemma warmup, and keeps the contract alive after smoke success. Offer selection is intentionally narrow for this profile: one RTX 5060 Ti 16GB GPU, `cuda_max_good >= 12.9`, at least 80 GB disk, a basic reliability floor, and direct mappings for the runtime/status ports. Failed smoke candidates are destroyed before the launcher tries the next cheapest viable host.
@@ -117,8 +117,9 @@ python -m node_agent.vast_smoke \
   --min-vram-gb 16 \
   --min-cuda-max-good 12.9 \
   --disk-gb 80 \
-  --max-concurrent-assignments 12 \
-  --max-local-queue-assignments 24 \
+  --max-concurrent-assignments 8 \
+  --max-local-queue-assignments 4 \
+  --pull-bundle-size 4 \
   --vllm-startup-timeout-seconds 1800 \
   --node-region eu-se-1
 ```
