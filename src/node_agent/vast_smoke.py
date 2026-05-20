@@ -1779,7 +1779,17 @@ class VastSmokeRunner:
                 exclude_machine_ids=config.exclude_machine_ids,
             )
             launch_errors: list[str] = []
+            failed_machine_ids: set[str] = set()
             for selected_offer in candidate_offers:
+                offer_machine_ids = offer_machine_id_values(selected_offer)
+                if offer_machine_ids & failed_machine_ids:
+                    report["notes"].append(
+                        "Skipping Vast offer "
+                        f"{_int_value(selected_offer, 'id')} because machine "
+                        f"{', '.join(sorted(offer_machine_ids & failed_machine_ids))} "
+                        "already failed during this launch run."
+                    )
+                    continue
                 candidate_summary = summarize_offer(selected_offer)
                 report["selected_offer"] = candidate_summary
                 report["instance"] = None
@@ -1895,6 +1905,7 @@ class VastSmokeRunner:
                         continue
                     raise
                 except Exception as error:
+                    failed_machine_ids.update(offer_machine_ids)
                     report["candidate_failures"].append(
                         {
                             "offer": candidate_summary,

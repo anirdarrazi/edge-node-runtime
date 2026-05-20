@@ -1692,6 +1692,128 @@ def test_affordable_offers_support_fleet_offer_and_machine_exclusions() -> None:
     assert [offer["id"] for offer in offers] == [1003]
 
 
+def test_vast_runner_skips_machine_after_runtime_readiness_failure() -> None:
+    class MachineFailingVastAPI:
+        def __init__(self) -> None:
+            self.created: list[int] = []
+            self.destroyed: list[int] = []
+
+        def search_offers(self, config: vast_smoke.VastSmokeConfig) -> list[dict[str, object]]:
+            return [
+                {
+                    "id": 1001,
+                    "machine_id": "host-a",
+                    "gpu_name": "RTX 3090",
+                    "gpu_ram": 24576,
+                    "dph_total": 0.11,
+                    "reliability": 0.997,
+                    "inet_down": 800,
+                    "disk_space": 80,
+                    "cuda_max_good": 13.0,
+                },
+                {
+                    "id": 1002,
+                    "machine_id": "host-a",
+                    "gpu_name": "RTX 3090",
+                    "gpu_ram": 24576,
+                    "dph_total": 0.12,
+                    "reliability": 0.996,
+                    "inet_down": 800,
+                    "disk_space": 80,
+                    "cuda_max_good": 13.0,
+                },
+                {
+                    "id": 1003,
+                    "machine_id": "host-b",
+                    "gpu_name": "RTX 3090",
+                    "gpu_ram": 24576,
+                    "dph_total": 0.13,
+                    "reliability": 0.995,
+                    "inet_down": 800,
+                    "disk_space": 80,
+                    "cuda_max_good": 13.0,
+                },
+            ]
+
+        def create_instance(
+            self,
+            offer_id: int,
+            *,
+            image: str,
+            env: dict[str, str],
+            disk_gb: int,
+            label: str,
+            runtype: str,
+        ) -> int:
+            self.created.append(offer_id)
+            return offer_id
+
+        def get_instance(self, instance_id: int) -> dict[str, object] | None:
+            if instance_id == 1001:
+                return {
+                    "actual_status": "running",
+                    "cur_state": "running",
+                    "public_ipaddr": "203.0.113.10",
+                    "ports": {},
+                }
+            return {
+                "actual_status": "running",
+                "cur_state": "running",
+                "public_ipaddr": "203.0.113.11",
+                "ports": {
+                    "8000/tcp": [{"HostPort": "18000"}],
+                    "8011/tcp": [{"HostPort": "18011"}],
+                },
+                "gpu_name": "RTX 3090",
+                "gpu_ram": 24576,
+                "dph_total": 0.13,
+            }
+
+        def destroy_instance(self, instance_id: int) -> None:
+            self.destroyed.append(instance_id)
+
+    clock = FakeClock()
+    api = MachineFailingVastAPI()
+    runtime = FakeRuntimeProbeClient(
+        get_responses=[
+            FakeResponse(200, {"status": "ready", "current_model": "Qwen/Qwen2.5-1.5B-Instruct"}),
+            FakeResponse(200, {"data": [{"id": "Qwen/Qwen2.5-1.5B-Instruct"}]}),
+        ],
+        post_responses=[
+            FakeResponse(
+                200,
+                {
+                    "id": "resp_ready",
+                    "output": [{"content": [{"text": "ready"}]}],
+                    "usage": {"input_tokens": 4, "output_tokens": 1, "total_tokens": 5},
+                },
+            )
+        ],
+    )
+    runner = vast_smoke.VastSmokeRunner(
+        api=api,  # type: ignore[arg-type]
+        runtime=runtime,
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+    )
+    config = vast_smoke.VastSmokeConfig(
+        api_key="secret",
+        model="Qwen/Qwen2.5-1.5B-Instruct",
+        max_price=0.20,
+        launch_timeout_seconds=1,
+        readiness_timeout_seconds=5,
+        poll_interval_seconds=1,
+        benchmark_requests=0,
+    )
+
+    report = runner.run(config)
+
+    assert report["status"] == "ok"
+    assert api.created == [1001, 1003]
+    assert api.destroyed == [1001, 1003]
+    assert "host-a" in " ".join(str(note) for note in report["notes"])
+
+
 def test_affordable_offers_preferred_offer_is_strict() -> None:
     offers = vast_smoke.affordable_offers(
         [
