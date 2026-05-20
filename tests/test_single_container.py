@@ -561,6 +561,7 @@ def test_main_starts_node_agent_without_nested_docker_when_vllm_is_external(monk
     monkeypatch.delenv("VLLM_BASE_URL", raising=False)
     monkeypatch.setenv("STARTUP_STATUS_PATH", str(tmp_path / "startup-status.json"))
     monkeypatch.setenv("STARTUP_STATUS_PORT", "0")
+    monkeypatch.setenv("SINGLE_CONTAINER_CHILD_RESTART_LIMIT", "0")
     monkeypatch.setattr(single_container.subprocess, "Popen", FakeProcess)
 
     exit_code = single_container.main()
@@ -595,6 +596,7 @@ def test_main_skips_node_agent_in_serve_only_mode(monkeypatch, tmp_path) -> None
     monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
     monkeypatch.setenv("STARTUP_STATUS_PATH", str(tmp_path / "startup-status.json"))
     monkeypatch.setenv("STARTUP_STATUS_PORT", "0")
+    monkeypatch.setenv("SINGLE_CONTAINER_CHILD_RESTART_LIMIT", "0")
     monkeypatch.setattr(single_container.subprocess, "Popen", FakeProcess)
     monkeypatch.setattr(single_container, "wait_for_inference_runtime_ready", lambda *args, **kwargs: None)
     monkeypatch.setattr(single_container, "wait_for_any_process", lambda processes: processes[0])
@@ -655,6 +657,7 @@ def test_main_recomputes_startup_model_after_defaults(monkeypatch, tmp_path) -> 
     monkeypatch.setenv("NODE_AGENT_COMMAND", "node-agent run")
     monkeypatch.setenv("STARTUP_STATUS_PATH", str(tmp_path / "startup-status.json"))
     monkeypatch.setenv("STARTUP_STATUS_PORT", "0")
+    monkeypatch.setenv("SINGLE_CONTAINER_CHILD_RESTART_LIMIT", "0")
     monkeypatch.setattr(single_container.subprocess, "Popen", FakeProcess)
     monkeypatch.setattr(single_container, "wait_for_inference_runtime_ready", lambda *args, **kwargs: None)
     monkeypatch.setattr(single_container, "wait_for_any_process", lambda processes: processes[1])
@@ -672,6 +675,43 @@ def test_main_recomputes_startup_model_after_defaults(monkeypatch, tmp_path) -> 
     saved = json.loads((tmp_path / "startup-status.json").read_text(encoding="utf-8"))
     assert saved["status"] == "failed"
     assert saved["failure_reason"] == "node-agent exited with status 0."
+
+
+def test_main_restarts_node_agent_before_exhausting_child_restart_budget(monkeypatch, tmp_path) -> None:
+    started: list[list[str]] = []
+
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self, command, text=False, **_kwargs) -> None:
+            started.append(list(command))
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self) -> None:
+            pass
+
+        def wait(self, timeout=None) -> int:
+            return self.returncode
+
+    monkeypatch.setenv("START_VLLM", "false")
+    monkeypatch.delenv("RUN_MODE", raising=False)
+    monkeypatch.delenv("START_NODE_AGENT", raising=False)
+    monkeypatch.setenv("NODE_AGENT_COMMAND", "node-agent run")
+    monkeypatch.setenv("STARTUP_STATUS_PATH", str(tmp_path / "startup-status.json"))
+    monkeypatch.setenv("STARTUP_STATUS_PORT", "0")
+    monkeypatch.setenv("SINGLE_CONTAINER_CHILD_RESTART_LIMIT", "1")
+    monkeypatch.setenv("SINGLE_CONTAINER_CHILD_RESTART_BACKOFF_SECONDS", "0")
+    monkeypatch.setattr(single_container.subprocess, "Popen", FakeProcess)
+
+    exit_code = single_container.main()
+
+    assert exit_code == 1
+    assert started == [["node-agent", "run"], ["node-agent", "run"]]
+    saved = json.loads((tmp_path / "startup-status.json").read_text(encoding="utf-8"))
+    assert saved["status"] == "failed"
+    assert "Restart budget exhausted" in saved["failure_reason"]
 
 
 def test_wait_for_vllm_fails_fast_when_process_exits() -> None:

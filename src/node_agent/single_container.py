@@ -41,6 +41,9 @@ DEFAULT_STARTUP_RESPONSES_PATH = "/v1/responses"
 DEFAULT_STARTUP_CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
 DEFAULT_STARTUP_EMBEDDINGS_INPUT = ["startup readiness probe"]
 DEFAULT_STARTUP_RESPONSES_INPUT = "Reply with the single word ready."
+DEFAULT_CHILD_RESTART_LIMIT = 12
+DEFAULT_CHILD_RESTART_WINDOW_SECONDS = 900
+DEFAULT_CHILD_RESTART_BACKOFF_SECONDS = 5
 KNOWN_SAFE_MAX_MODEL_LEN: dict[str, int] = {
     DEFAULT_PUBLIC_BOOTSTRAP_MODEL.lower(): 512,
     "google/gemma-4-e4b-it": 32768,
@@ -254,6 +257,9 @@ class SingleContainerConfig:
     startup_status_host: str = DEFAULT_STARTUP_STATUS_HOST
     startup_status_port: int = DEFAULT_STARTUP_STATUS_PORT
     startup_status_endpoint_path: str = DEFAULT_STARTUP_STATUS_ENDPOINT_PATH
+    child_restart_limit: int = DEFAULT_CHILD_RESTART_LIMIT
+    child_restart_window_seconds: int = DEFAULT_CHILD_RESTART_WINDOW_SECONDS
+    child_restart_backoff_seconds: float = DEFAULT_CHILD_RESTART_BACKOFF_SECONDS
 
     @classmethod
     def from_mapping(cls, env: Mapping[str, str] | None = None) -> "SingleContainerConfig":
@@ -295,6 +301,25 @@ class SingleContainerConfig:
             startup_status_port=nonnegative_int_from_mapping(values, "STARTUP_STATUS_PORT", DEFAULT_STARTUP_STATUS_PORT),
             startup_status_endpoint_path=normalized_endpoint_path(
                 values.get("STARTUP_STATUS_ENDPOINT_PATH", DEFAULT_STARTUP_STATUS_ENDPOINT_PATH)
+            ),
+            child_restart_limit=nonnegative_int_from_mapping(
+                values,
+                "SINGLE_CONTAINER_CHILD_RESTART_LIMIT",
+                DEFAULT_CHILD_RESTART_LIMIT,
+            ),
+            child_restart_window_seconds=nonnegative_int_from_mapping(
+                values,
+                "SINGLE_CONTAINER_CHILD_RESTART_WINDOW_SECONDS",
+                DEFAULT_CHILD_RESTART_WINDOW_SECONDS,
+            ),
+            child_restart_backoff_seconds=max(
+                0.0,
+                env_float_from_mapping(
+                    values,
+                    "SINGLE_CONTAINER_CHILD_RESTART_BACKOFF_SECONDS",
+                    DEFAULT_CHILD_RESTART_BACKOFF_SECONDS,
+                )
+                or 0.0,
             ),
         )
 
@@ -1533,30 +1558,122 @@ def main() -> int:
 
         publish_startup_status("ready", extra=startup_runtime_detail(config, startup_stage="ready"))
 
-        running = [process for process in (vllm_process, node_process) if process is not None]
-        if not running:
-            error = RuntimeError("Single-container runtime did not start any processes.")
-            publish_startup_status("failed", failure_reason=str(error))
-            raise error
-        exited = wait_for_any_process(running)
-        exited_service = "vllm" if exited is vllm_process else "node-agent" if exited is node_process else "runtime"
-        publish_startup_status(
-            "failed",
-            failure_reason=f"{exited_service} exited with status {exited.returncode}.",
-            extra=startup_runtime_detail(
-                config,
-                startup_stage="failed",
-                recent_vllm_output=vllm_output_relay.tail_text() if vllm_output_relay is not None else None,
-                vllm_process_exit_code=vllm_process.returncode if vllm_process is not None and vllm_process.poll() is not None else None,
-                failed_service=exited_service,
-                failure_kind=startup_failure_kind(
-                    f"{exited_service} exited with status {exited.returncode}.",
-                    vllm_output_relay.tail_text() if vllm_output_relay is not None else None,
+        restart_events: deque[float] = deque()
+        while True:
+            running = [process for process in (vllm_process, node_process) if process is not None]
+            if not running:
+                error = RuntimeError("Single-container runtime did not start any processes.")
+                publish_startup_status("failed", failure_reason=str(error))
+                raise error
+            exited = wait_for_any_process(running)
+            exited_service = "vllm" if exited is vllm_process else "node-agent" if exited is node_process else "runtime"
+            exit_code = int(exited.returncode or 0)
+            exit_message = f"{exited_service} exited with status {exited.returncode}."
+            now = time.monotonic()
+            restart_window = max(1, int(config.child_restart_window_seconds))
+            while restart_events and now - restart_events[0] > restart_window:
+                restart_events.popleft()
+            restart_events.append(now)
+            restart_budget_exhausted = (
+                config.child_restart_limit <= 0
+                or len(restart_events) > max(0, int(config.child_restart_limit))
+            )
+            if restart_budget_exhausted:
+                reason = exit_message
+                if config.child_restart_limit > 0:
+                    reason = (
+                        f"{exit_message} Restart budget exhausted after "
+                        f"{len(restart_events)} exits in {restart_window}s."
+                    )
+                publish_startup_status(
+                    "failed",
+                    failure_reason=reason,
+                    extra=startup_runtime_detail(
+                        config,
+                        startup_stage="failed",
+                        recent_vllm_output=vllm_output_relay.tail_text() if vllm_output_relay is not None else None,
+                        vllm_process_exit_code=(
+                            vllm_process.returncode
+                            if vllm_process is not None and vllm_process.poll() is not None
+                            else None
+                        ),
+                        failed_service=exited_service,
+                        failure_kind=startup_failure_kind(
+                            reason,
+                            vllm_output_relay.tail_text() if vllm_output_relay is not None else None,
+                        ),
+                    ),
+                )
+                print(f"{reason} Stopping the single-container runtime.", flush=True)
+                return exit_code if exit_code else 1 if config.child_restart_limit > 0 else 0
+
+            backoff_seconds = min(
+                60.0,
+                max(0.0, float(config.child_restart_backoff_seconds)) * len(restart_events),
+            )
+            publish_startup_status(
+                "warming",
+                failure_reason=f"{exit_message} Restarting {exited_service}.",
+                extra=startup_runtime_detail(
+                    config,
+                    startup_stage=f"restarting_{exited_service.replace('-', '_')}",
+                    recent_vllm_output=vllm_output_relay.tail_text() if vllm_output_relay is not None else None,
+                    vllm_process_exit_code=(
+                        vllm_process.returncode
+                        if vllm_process is not None and vllm_process.poll() is not None
+                        else None
+                    ),
+                    failed_service=exited_service,
                 ),
-            ),
-        )
-        print(f"Process exited with status {exited.returncode}; stopping the single-container runtime.", flush=True)
-        return int(exited.returncode or 0)
+            )
+            print(
+                f"{exit_message} Restarting {exited_service} in {backoff_seconds:.1f}s "
+                f"({len(restart_events)}/{config.child_restart_limit} restarts in window).",
+                flush=True,
+            )
+            if backoff_seconds > 0:
+                time.sleep(backoff_seconds)
+
+            if exited is vllm_process:
+                terminate_process(node_process)
+                node_process = None
+                vllm_command = build_vllm_command(config)
+                print(
+                    f"Restarting the local inference runtime: {' '.join(shlex.quote(part) for part in vllm_command)}",
+                    flush=True,
+                )
+                vllm_output_relay = ProcessOutputRelay()
+                vllm_process = subprocess.Popen(
+                    vllm_command,
+                    text=True,
+                    env=vllm_process_env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    bufsize=1,
+                )
+                vllm_output_relay.attach(vllm_process)
+                wait_for_inference_runtime_ready(
+                    config,
+                    vllm_process,
+                    output_tail=vllm_output_relay.tail_text,
+                    progress_callback=publish_warming_progress,
+                )
+                if config.start_node_agent:
+                    node_command = list(config.node_agent_command)
+                    print(
+                        f"Restarting node agent after vLLM recovery: "
+                        f"{' '.join(shlex.quote(part) for part in node_command)}",
+                        flush=True,
+                    )
+                    node_process = subprocess.Popen(node_command, text=True)
+            elif exited is node_process:
+                node_command = list(config.node_agent_command)
+                print(f"Restarting node agent: {' '.join(shlex.quote(part) for part in node_command)}", flush=True)
+                node_process = subprocess.Popen(node_command, text=True)
+            else:
+                raise RuntimeError(exit_message)
+
+            publish_startup_status("ready", extra=startup_runtime_detail(config, startup_stage="ready"))
     except Exception as error:
         recent_vllm_output = vllm_output_relay.tail_text() if vllm_output_relay is not None else None
         publish_startup_status(
