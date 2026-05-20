@@ -1279,6 +1279,30 @@ def test_build_config_accepts_api_key_from_local_config(tmp_path: Path, monkeypa
     assert config.hf_token == "hf-config-secret"
 
 
+def test_build_config_accepts_bom_prefixed_local_config(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "vast-smoke.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "api_key": "config-secret",
+                "node_id": "node_bom",
+                "node_key": "node-key-bom",
+            }
+        ),
+        encoding="utf-8-sig",
+    )
+    monkeypatch.setenv("NODE_AGENT_VAST_SMOKE_CONFIG", str(config_path))
+    monkeypatch.delenv("VAST_API_KEY", raising=False)
+
+    config = vast_smoke.build_config_from_args(
+        vast_smoke.parse_args(["--durable-node", "--edge-control-url", "https://edge.example.test"])
+    )
+
+    assert config.api_key == "config-secret"
+    assert config.node_id == "node_bom"
+    assert config.node_key == "node-key-bom"
+
+
 def test_build_config_prefers_cli_secret_over_local_config(tmp_path: Path, monkeypatch) -> None:
     config_path = tmp_path / "vast-smoke.json"
     config_path.write_text(json.dumps({"api_key": "config-secret"}), encoding="utf-8")
@@ -1359,6 +1383,14 @@ def test_build_config_accepts_fleet_offer_controls() -> None:
     assert config.preferred_offer_id == 2003
     assert config.exclude_offer_ids == (2001, 2002)
     assert config.exclude_machine_ids == ("42", "host-a", "host-b")
+
+
+def test_build_config_accepts_custom_vast_label() -> None:
+    config = vast_smoke.build_config_from_args(
+        vast_smoke.parse_args(["--api-key", "secret", "--label", "industrial-chain-node-1"])
+    )
+
+    assert config.label == "industrial-chain-node-1"
 
 
 def test_build_config_uses_response_probe_defaults_for_non_embedding_models() -> None:

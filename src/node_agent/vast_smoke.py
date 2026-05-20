@@ -387,7 +387,7 @@ def load_vast_smoke_config(explicit: str | None = None) -> tuple[dict[str, Any],
             )
         return {}, config_path
     try:
-        payload = json.loads(config_path.read_text(encoding="utf-8"))
+        payload = json.loads(config_path.read_text(encoding="utf-8-sig"))
     except OSError as error:
         raise VastSmokeError(f"Could not read Vast smoke config file {config_path}: {error}") from error
     except json.JSONDecodeError as error:
@@ -1979,6 +1979,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--model", default=DEFAULT_VAST_SMOKE_MODEL, help="Model to warm for the smoke test.")
     parser.add_argument("--image", default=DEFAULT_VAST_SMOKE_IMAGE, help="Container image to launch on Vast.ai.")
+    parser.add_argument("--label", default="", help="Human-readable Vast instance label for launch tracking and cleanup.")
     parser.add_argument("--max-price", type=float, default=DEFAULT_VAST_LAUNCH_PROFILE.safe_price_ceiling_usd, help="Maximum hourly price in USD.")
     parser.add_argument("--disk-gb", type=int, default=DEFAULT_DISK_GB, help="Requested disk size in GB.")
     parser.add_argument("--min-vram-gb", type=float, default=DEFAULT_MIN_VRAM_GB, help="Minimum GPU VRAM in GB.")
@@ -2134,6 +2135,12 @@ def build_config_from_args(args: argparse.Namespace) -> VastSmokeConfig:
     return VastSmokeConfig(
         api_key=api_key,
         model=model,
+        label=first_nonempty(
+            str(getattr(args, "label", "") or ""),
+            os.getenv("VAST_SMOKE_LABEL"),
+            _config_value(config_values, "label", "vast_label"),
+        )
+        or DEFAULT_VAST_SMOKE_LABEL,
         runtype=str(args.runtype).strip() or DEFAULT_VAST_LAUNCH_PROFILE.runtype,
         max_price=float(args.max_price),
         image=str(args.image).strip() or DEFAULT_VAST_SMOKE_IMAGE,
