@@ -1275,6 +1275,10 @@ class VastSmokeRunner:
                 except VastSmokeError as error:
                     last_status = str(error)
             elif actual_status in {"dead", "exited", "offline"} or cur_state in {"stopped", "deleted"}:
+                if status_msg and should_allow_launch_grace(status_msg):
+                    last_status = status_msg
+                    self.sleep(poll_interval_seconds)
+                    continue
                 raise VastSmokeError(status_msg or f"Vast instance entered terminal state {actual_status or cur_state}.")
             elif status_msg:
                 last_status = status_msg

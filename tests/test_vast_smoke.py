@@ -1181,6 +1181,38 @@ def test_should_allow_launch_grace_covers_common_vast_cold_start_statuses() -> N
     assert vast_smoke.should_allow_launch_grace("success, running anirdarrazi/autonomousc-ai-edge-runtime:single-cuda-latest")
 
 
+def test_wait_for_instance_treats_terminal_docker_pull_status_as_progress() -> None:
+    clock = FakeClock()
+    api = FakeVastAPI(
+        offers=[],
+        instances=[
+            {"actual_status": "exited", "cur_state": "running", "status_msg": "Verifying Checksum"},
+            {"actual_status": "dead", "cur_state": "running", "status_msg": "Pull complete"},
+            {
+                "actual_status": "running",
+                "cur_state": "running",
+                "public_ipaddr": "114.179.27.171",
+                "ports": {"8000/tcp": [{"HostPort": "40188"}], "8011/tcp": [{"HostPort": "40189"}]},
+            },
+        ],
+    )
+    runner = vast_smoke.VastSmokeRunner(
+        api,
+        FakeRuntimeProbeClient(get_responses=[], post_responses=[]),
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+    )
+
+    instance = runner.wait_for_instance(
+        424242,
+        timeout_seconds=1.0,
+        poll_interval_seconds=1.0,
+    )
+
+    assert instance["actual_status"] == "running"
+    assert clock.now > 1001.0
+
+
 def test_main_prints_json_report(monkeypatch) -> None:
     fake_report = {
         "status": "ok",
