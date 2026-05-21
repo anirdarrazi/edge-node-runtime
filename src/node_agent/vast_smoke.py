@@ -158,6 +158,7 @@ class VastSmokeConfig:
     exclude_offer_ids: tuple[int, ...] = ()
     exclude_machine_ids: tuple[str, ...] = ()
     launch_timeout_seconds: float = DEFAULT_LAUNCH_TIMEOUT_SECONDS
+    launch_progress_grace_seconds: float = DEFAULT_LAUNCH_PROGRESS_GRACE_SECONDS
     readiness_timeout_seconds: float = DEFAULT_READINESS_TIMEOUT_SECONDS
     poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS
     api_kind: str = "auto"
@@ -1246,12 +1247,13 @@ class VastSmokeRunner:
         instance_id: int,
         *,
         timeout_seconds: float,
+        progress_grace_seconds: float = DEFAULT_LAUNCH_PROGRESS_GRACE_SECONDS,
         poll_interval_seconds: float,
         required_container_ports: tuple[int, ...] = (8000, DEFAULT_STARTUP_STATUS_PORT),
     ) -> dict[str, Any]:
         start_time = self.monotonic()
         deadline = start_time + max(1.0, timeout_seconds)
-        hard_deadline = deadline + DEFAULT_LAUNCH_PROGRESS_GRACE_SECONDS
+        hard_deadline = deadline + max(0.0, progress_grace_seconds)
         last_status = "Vast instance is still starting."
         while self.monotonic() < hard_deadline:
             instance = self.api.get_instance(instance_id)
@@ -1751,6 +1753,9 @@ class VastSmokeRunner:
                 "expected_api_path": config.smoke_test_api_path,
                 "readiness_path": DEFAULT_MODELS_PATH,
                 "startup_status_path": DEFAULT_STARTUP_STATUS_ENDPOINT_PATH,
+                "launch_timeout_seconds": config.launch_timeout_seconds,
+                "launch_progress_grace_seconds": config.launch_progress_grace_seconds,
+                "readiness_timeout_seconds": config.readiness_timeout_seconds,
                 "benchmark_requests": int(config.benchmark_requests),
                 "benchmark_concurrency": int(config.benchmark_concurrency),
                 "benchmark_profile": config.benchmark_profile,
@@ -1814,6 +1819,7 @@ class VastSmokeRunner:
                     instance = self.wait_for_instance(
                         instance_id,
                         timeout_seconds=config.launch_timeout_seconds,
+                        progress_grace_seconds=config.launch_progress_grace_seconds,
                         poll_interval_seconds=config.poll_interval_seconds,
                     )
                     host_port = extract_host_port(instance)
@@ -2032,6 +2038,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Comma-separated Vast machine/host identities to skip when the offer payload exposes them.",
     )
     parser.add_argument("--launch-timeout-seconds", type=float, default=DEFAULT_LAUNCH_TIMEOUT_SECONDS, help="How long to wait for the Vast instance to boot.")
+    parser.add_argument(
+        "--launch-progress-grace-seconds",
+        type=float,
+        default=DEFAULT_LAUNCH_PROGRESS_GRACE_SECONDS,
+        help="Extra boot time allowed while Vast reports image pull or checksum progress after the launch timeout.",
+    )
     parser.add_argument("--readiness-timeout-seconds", type=float, default=DEFAULT_READINESS_TIMEOUT_SECONDS, help="How long to wait for /v1/models to come up.")
     parser.add_argument("--poll-interval-seconds", type=float, default=DEFAULT_POLL_INTERVAL_SECONDS, help="Polling interval for Vast and runtime readiness.")
     parser.add_argument("--api", choices=("auto", "embeddings", "responses", "chat_completions"), default="auto", help="Smoke probe type to run after /v1/models succeeds.")
@@ -2179,6 +2191,10 @@ def build_config_from_args(args: argparse.Namespace) -> VastSmokeConfig:
             csv_value=str(getattr(args, "exclude_machine_ids", "") or ""),
         ),
         launch_timeout_seconds=max(30.0, float(args.launch_timeout_seconds)),
+        launch_progress_grace_seconds=max(
+            0.0,
+            float(getattr(args, "launch_progress_grace_seconds", DEFAULT_LAUNCH_PROGRESS_GRACE_SECONDS)),
+        ),
         readiness_timeout_seconds=max(30.0, float(args.readiness_timeout_seconds)),
         poll_interval_seconds=max(1.0, float(args.poll_interval_seconds)),
         api_kind=str(args.api).strip().lower(),

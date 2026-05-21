@@ -6,6 +6,8 @@ from io import BytesIO
 from io import StringIO
 from pathlib import Path
 
+import pytest
+
 import node_agent.vast_smoke as vast_smoke
 import node_agent.vast_fleet_plan as vast_fleet_plan
 
@@ -1211,6 +1213,35 @@ def test_wait_for_instance_treats_terminal_docker_pull_status_as_progress() -> N
 
     assert instance["actual_status"] == "running"
     assert clock.now > 1001.0
+
+
+def test_wait_for_instance_respects_custom_launch_progress_grace() -> None:
+    clock = FakeClock()
+    api = FakeVastAPI(
+        offers=[],
+        instances=[
+            {"actual_status": "loading", "cur_state": "running", "status_msg": "Verifying Checksum"},
+            {"actual_status": "loading", "cur_state": "running", "status_msg": "Verifying Checksum"},
+            {"actual_status": "loading", "cur_state": "running", "status_msg": "Verifying Checksum"},
+            {"actual_status": "loading", "cur_state": "running", "status_msg": "Verifying Checksum"},
+        ],
+    )
+    runner = vast_smoke.VastSmokeRunner(
+        api,
+        FakeRuntimeProbeClient(get_responses=[], post_responses=[]),
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+    )
+
+    with pytest.raises(vast_smoke.VastSmokeError, match="did not become ready in time"):
+        runner.wait_for_instance(
+            424242,
+            timeout_seconds=1.0,
+            progress_grace_seconds=2.0,
+            poll_interval_seconds=1.0,
+        )
+
+    assert clock.now == 1003.0
 
 
 def test_main_prints_json_report(monkeypatch) -> None:
