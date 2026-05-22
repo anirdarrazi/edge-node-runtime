@@ -1688,6 +1688,16 @@ def test_should_retry_candidate_after_startup_failure_for_memory_like_runtime_er
     assert vast_smoke.should_retry_candidate_after_error(RuntimeError("startup failed"), runtime_report) is True
 
 
+def test_should_retry_candidate_after_early_vast_terminal_state() -> None:
+    assert (
+        vast_smoke.should_retry_candidate_after_error(
+            RuntimeError("Vast instance entered terminal state stopped."),
+            None,
+        )
+        is True
+    )
+
+
 def test_normalized_usage_from_probe_tracks_cached_input_tokens() -> None:
     usage = vast_smoke.normalized_usage_from_probe(
         {
@@ -2001,6 +2011,87 @@ def test_vast_runner_skips_machine_after_runtime_readiness_failure() -> None:
     assert api.created == [1001, 1003]
     assert api.destroyed == [1001, 1003]
     assert "host-a" in " ".join(str(note) for note in report["notes"])
+
+
+def test_vast_runner_retries_after_early_terminal_instance_state() -> None:
+    clock = FakeClock()
+    api = FakeVastAPI(
+        offers=[
+            {
+                "id": 1001,
+                "gpu_name": "RTX 4090",
+                "gpu_ram": 24576,
+                "dph_total": 0.11,
+                "reliability": 0.997,
+                "inet_down": 800,
+                "disk_space": 80,
+                "cuda_max_good": 13.0,
+            },
+            {
+                "id": 1002,
+                "gpu_name": "RTX 4090",
+                "gpu_ram": 24576,
+                "dph_total": 0.12,
+                "reliability": 0.996,
+                "inet_down": 800,
+                "disk_space": 80,
+                "cuda_max_good": 13.0,
+            },
+        ],
+        instances=[
+            {"actual_status": "stopped", "cur_state": "stopped"},
+            {
+                "actual_status": "running",
+                "cur_state": "running",
+                "public_ipaddr": "203.0.113.20",
+                "ports": {
+                    "8000/tcp": [{"HostPort": "28000"}],
+                    "8011/tcp": [{"HostPort": "28011"}],
+                },
+                "gpu_name": "RTX 4090",
+                "gpu_ram": 24576,
+                "dph_total": 0.12,
+            },
+        ],
+    )
+    runtime = FakeRuntimeProbeClient(
+        get_responses=[
+            FakeResponse(200, {"status": "ready", "current_model": "Qwen/Qwen2.5-1.5B-Instruct"}),
+            FakeResponse(200, {"data": [{"id": "Qwen/Qwen2.5-1.5B-Instruct"}]}),
+        ],
+        post_responses=[
+            FakeResponse(
+                200,
+                {
+                    "id": "resp_ready",
+                    "output": [{"content": [{"text": "ready"}]}],
+                    "usage": {"input_tokens": 4, "output_tokens": 1, "total_tokens": 5},
+                },
+            )
+        ],
+    )
+    report = vast_smoke.VastSmokeRunner(
+        api,
+        runtime,
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+    ).run(
+        vast_smoke.VastSmokeConfig(
+            api_key="secret",
+            model="Qwen/Qwen2.5-1.5B-Instruct",
+            max_price=0.20,
+            launch_timeout_seconds=1,
+            readiness_timeout_seconds=5,
+            poll_interval_seconds=1,
+            benchmark_requests=0,
+        )
+    )
+
+    assert report["status"] == "ok"
+    assert [created["offer_id"] for created in api.created] == [1001, 1002]
+    assert len(report["candidate_failures"]) == 1
+    assert "terminal state stopped" in report["candidate_failures"][0]["error"]
+    assert any("Trying the next suitable Vast host." in note for note in report["notes"])
 
 
 def test_affordable_offers_preferred_offer_is_strict() -> None:
