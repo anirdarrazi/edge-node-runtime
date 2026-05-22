@@ -7,7 +7,12 @@ import sys
 from typing import Any, Mapping
 
 from .vast_smoke import (
+    DEFAULT_DISK_GB,
+    DEFAULT_DURABLE_RUNTIME_PROFILE,
     DEFAULT_MIN_CUDA_MAX_GOOD,
+    DEFAULT_MIN_INET_DOWN_MBPS,
+    DEFAULT_MIN_RELIABILITY,
+    DEFAULT_MIN_VRAM_GB,
     DEFAULT_OFFER_LIMIT,
     DEFAULT_VAST_LAUNCH_PROFILE,
     DEFAULT_VAST_SMOKE_MODEL,
@@ -21,6 +26,8 @@ from .vast_smoke import (
     first_nonempty,
     load_vast_smoke_config,
     offer_machine_id_values,
+    parse_identity_list,
+    parse_int_list,
     summarize_offer,
 )
 
@@ -70,8 +77,22 @@ def build_config_from_args(args: argparse.Namespace) -> VastSmokeConfig:
         api_key=api_key,
         model=str(args.model or DEFAULT_VAST_SMOKE_MODEL).strip() or DEFAULT_VAST_SMOKE_MODEL,
         max_price=float(args.max_price),
+        disk_gb=max(1, int(args.disk_gb)),
+        min_vram_gb=max(1.0, float(args.min_vram_gb)),
         min_cuda_max_good=float(args.min_cuda_max_good) if args.min_cuda_max_good is not None else None,
+        min_reliability=max(0.0, min(1.0, float(args.min_reliability))),
+        min_inet_down_mbps=max(0.0, float(args.min_inet_down_mbps)),
         offer_limit=max(1, int(args.offer_limit)),
+        runtime_profile=str(args.runtime_profile or DEFAULT_DURABLE_RUNTIME_PROFILE).strip()
+        or DEFAULT_DURABLE_RUNTIME_PROFILE,
+        exclude_offer_ids=parse_int_list(
+            list(getattr(args, "exclude_offer_id", []) or ()),
+            csv_value=str(getattr(args, "exclude_offer_ids", "") or ""),
+        ),
+        exclude_machine_ids=parse_identity_list(
+            list(getattr(args, "exclude_machine_id", []) or ()),
+            csv_value=str(getattr(args, "exclude_machine_ids", "") or ""),
+        ),
     )
 
 
@@ -83,7 +104,14 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         offers,
         max_price=config.max_price,
         min_cuda_max_good=config.min_cuda_max_good,
+        min_vram_gb=config.min_vram_gb,
+        disk_gb=config.disk_gb,
+        min_reliability=config.min_reliability,
+        min_inet_down_mbps=config.min_inet_down_mbps,
         model=config.model,
+        runtime_profile=config.runtime_profile,
+        exclude_offer_ids=config.exclude_offer_ids,
+        exclude_machine_ids=config.exclude_machine_ids,
     )
     selected = select_fleet_offers(
         candidates,
@@ -98,8 +126,15 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
             "nodes": requested_nodes,
             "model": config.model,
             "max_price": round(float(config.max_price), 6),
+            "disk_gb": config.disk_gb,
+            "min_vram_gb": config.min_vram_gb,
             "min_cuda_max_good": config.min_cuda_max_good,
+            "min_reliability": config.min_reliability,
+            "min_inet_down_mbps": config.min_inet_down_mbps,
+            "runtime_profile": config.runtime_profile,
             "offer_limit": config.offer_limit,
+            "exclude_offer_ids": list(config.exclude_offer_ids),
+            "exclude_machine_ids": list(config.exclude_machine_ids),
             "allow_same_machine": bool(args.allow_same_machine),
         },
         "candidate_count": len(candidates),
@@ -139,8 +174,36 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--nodes", type=int, default=1, help="Number of fleet nodes to plan.")
     parser.add_argument("--model", default=DEFAULT_VAST_SMOKE_MODEL, help="Model the fleet will serve.")
     parser.add_argument("--max-price", type=float, default=DEFAULT_VAST_LAUNCH_PROFILE.safe_price_ceiling_usd, help="Maximum hourly price in USD.")
+    parser.add_argument("--disk-gb", type=int, default=DEFAULT_DISK_GB, help="Minimum disk size in GB.")
+    parser.add_argument("--min-vram-gb", type=float, default=DEFAULT_MIN_VRAM_GB, help="Minimum GPU VRAM in GB.")
     parser.add_argument("--min-cuda-max-good", type=float, default=DEFAULT_MIN_CUDA_MAX_GOOD, help="Minimum cuda_max_good host capability.")
+    parser.add_argument("--min-reliability", type=float, default=DEFAULT_MIN_RELIABILITY, help="Minimum host reliability score.")
+    parser.add_argument("--min-inet-down-mbps", type=float, default=DEFAULT_MIN_INET_DOWN_MBPS, help="Minimum internet download speed in Mbps.")
+    parser.add_argument("--runtime-profile", default=DEFAULT_DURABLE_RUNTIME_PROFILE, help="Runtime profile the planned nodes will advertise.")
     parser.add_argument("--offer-limit", type=int, default=DEFAULT_OFFER_LIMIT, help="Maximum number of Vast offers to inspect.")
+    parser.add_argument(
+        "--exclude-offer-id",
+        action="append",
+        type=int,
+        default=[],
+        help="Skip a Vast offer ID. May be passed more than once.",
+    )
+    parser.add_argument(
+        "--exclude-offer-ids",
+        default="",
+        help="Comma-separated Vast offer IDs to skip.",
+    )
+    parser.add_argument(
+        "--exclude-machine-id",
+        action="append",
+        default=[],
+        help="Skip a Vast machine/host identity when the offer payload exposes one. May be passed more than once.",
+    )
+    parser.add_argument(
+        "--exclude-machine-ids",
+        default="",
+        help="Comma-separated Vast machine/host identities to skip when the offer payload exposes them.",
+    )
     parser.add_argument("--allow-same-machine", action="store_true", help="Allow multiple selected offers from the same machine identity.")
     parser.add_argument("--json-indent", type=int, default=2, help="JSON indentation level for the plan.")
     return parser.parse_args(argv)

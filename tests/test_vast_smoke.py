@@ -1572,6 +1572,7 @@ def test_build_config_defaults_follow_vast_launch_profile() -> None:
     assert config.smoke_test_api_path == vast_smoke.DEFAULT_VAST_LAUNCH_PROFILE.smoke_test_api_path
     assert config.min_inet_down_mbps == 250.0
     assert config.min_cuda_max_good == 12.9
+    assert config.offer_limit == 50
 
 
 def test_durable_gemma_defaults_keep_the_local_reservoir_shallow() -> None:
@@ -2208,6 +2209,26 @@ def test_affordable_offers_preferred_offer_is_strict() -> None:
     assert [offer["id"] for offer in offers] == [1002]
 
 
+def test_affordable_offers_apply_host_quality_constraints() -> None:
+    offers = vast_smoke.affordable_offers(
+        [
+            {"id": 1001, "gpu_name": "RTX 3090", "gpu_ram": 24576, "disk_space": 120, "dph_total": 0.11, "reliability": 0.997, "inet_down": 800, "cuda_max_good": 13.0},
+            {"id": 1002, "gpu_name": "RTX 3090", "gpu_ram": 24576, "disk_space": 120, "dph_total": 0.12, "reliability": 0.980, "inet_down": 1200, "cuda_max_good": 13.0},
+            {"id": 1003, "gpu_name": "RTX 3090", "gpu_ram": 24576, "disk_space": 40, "dph_total": 0.13, "reliability": 0.997, "inet_down": 1200, "cuda_max_good": 13.0},
+            {"id": 1004, "gpu_name": "RTX 3090", "gpu_ram": 24576, "disk_space": 120, "dph_total": 0.14, "reliability": 0.997, "inet_down": 1200, "cuda_max_good": 13.0},
+        ],
+        max_price=0.20,
+        min_cuda_max_good=12.9,
+        min_vram_gb=20.0,
+        disk_gb=80,
+        min_reliability=0.99,
+        min_inet_down_mbps=1000.0,
+        model="Qwen/Qwen2.5-1.5B-Instruct",
+    )
+
+    assert [offer["id"] for offer in offers] == [1004]
+
+
 def test_fleet_planner_selects_distinct_machine_ids() -> None:
     selected = vast_fleet_plan.select_fleet_offers(
         [
@@ -2221,3 +2242,65 @@ def test_fleet_planner_selects_distinct_machine_ids() -> None:
 
     assert [offer["id"] for offer in selected] == [1001, 1003, 1004]
     assert vast_fleet_plan.launch_args_for_offer(selected[0]) == ["--preferred-offer-id", "1001"]
+
+
+def test_fleet_planner_applies_launch_quality_constraints(monkeypatch) -> None:
+    captured_configs: list[vast_smoke.VastSmokeConfig] = []
+
+    class PlanningVastAPI:
+        def __init__(self, api_key: str) -> None:
+            self.api_key = api_key
+
+        def search_offers(self, config: vast_smoke.VastSmokeConfig) -> list[dict[str, object]]:
+            captured_configs.append(config)
+            return [
+                {"id": 1001, "machine_id": "host-a", "gpu_name": "RTX 3090", "gpu_ram": 24576, "disk_space": 120, "dph_total": 0.11, "reliability": 0.997, "inet_down": 800, "cuda_max_good": 13.0},
+                {"id": 1002, "machine_id": "host-b", "gpu_name": "RTX 3090", "gpu_ram": 24576, "disk_space": 120, "dph_total": 0.12, "reliability": 0.980, "inet_down": 1200, "cuda_max_good": 13.0},
+                {"id": 1003, "machine_id": "host-c", "gpu_name": "RTX 3090", "gpu_ram": 24576, "disk_space": 40, "dph_total": 0.13, "reliability": 0.997, "inet_down": 1200, "cuda_max_good": 13.0},
+                {"id": 1004, "machine_id": "host-d", "gpu_name": "RTX 3090", "gpu_ram": 24576, "disk_space": 120, "dph_total": 0.14, "reliability": 0.997, "inet_down": 1200, "cuda_max_good": 13.0},
+                {"id": 1005, "machine_id": "host-e", "gpu_name": "RTX 3090", "gpu_ram": 24576, "disk_space": 120, "dph_total": 0.15, "reliability": 0.997, "inet_down": 1200, "cuda_max_good": 13.0},
+                {"id": 1006, "machine_id": "host-f", "gpu_name": "RTX 3090", "gpu_ram": 24576, "disk_space": 120, "dph_total": 0.16, "reliability": 0.997, "inet_down": 1200, "cuda_max_good": 13.0},
+                {"id": 1007, "machine_id": "host-g", "gpu_name": "RTX 3090", "gpu_ram": 24576, "disk_space": 120, "dph_total": 0.17, "reliability": 0.997, "inet_down": 1200, "cuda_max_good": 13.0},
+            ]
+
+    monkeypatch.setattr(vast_fleet_plan, "VastAPI", PlanningVastAPI)
+
+    plan = vast_fleet_plan.build_plan(
+        vast_fleet_plan.parse_args(
+            [
+                "--api-key",
+                "secret",
+                "--nodes",
+                "2",
+                "--model",
+                "Qwen/Qwen2.5-1.5B-Instruct",
+                "--max-price",
+                "0.20",
+                "--disk-gb",
+                "80",
+                "--min-vram-gb",
+                "20",
+                "--min-reliability",
+                "0.99",
+                "--min-inet-down-mbps",
+                "1000",
+                "--exclude-offer-id",
+                "1004",
+                "--exclude-machine-ids",
+                "host-e",
+                "--runtime-profile",
+                "vast_vllm_safetensors",
+            ]
+        )
+    )
+
+    assert captured_configs
+    assert captured_configs[0].disk_gb == 80
+    assert captured_configs[0].min_vram_gb == 20
+    assert captured_configs[0].min_reliability == 0.99
+    assert captured_configs[0].min_inet_down_mbps == 1000
+    assert plan["status"] == "ok"
+    assert plan["candidate_count"] == 2
+    assert plan["requested"]["exclude_offer_ids"] == [1004]
+    assert plan["requested"]["exclude_machine_ids"] == ["host-e"]
+    assert [item["offer"]["id"] for item in plan["selected_offers"]] == [1006, 1007]

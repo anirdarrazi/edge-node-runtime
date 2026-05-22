@@ -125,6 +125,23 @@ python -m node_agent.vast_smoke \
   --node-region eu-se-1
 ```
 
+Fleet planning helper:
+
+```bash
+python -m node_agent.vast_fleet_plan \
+  --nodes 2 \
+  --model google/gemma-4-E4B-it \
+  --runtime-profile rtx_5060_ti_16gb_gemma4_e4b_it \
+  --max-price 1.50 \
+  --min-vram-gb 15 \
+  --min-cuda-max-good 12.9 \
+  --min-reliability 0.98 \
+  --min-inet-down-mbps 600 \
+  --disk-gb 80
+```
+
+The planner now uses the same host-quality constraints as the launcher and inspects 50 offers by default. Keep the planned `--preferred-offer-id` arguments with each launch, and use the generated exclusion flags or `--allow-same-machine` intentionally when building multi-node fleets.
+
 Required runtime secrets are read from environment variables: `VAST_API_KEY`, `HUGGING_FACE_HUB_TOKEN`, `EDGE_CONTROL_URL`, `NODE_ID`, and `NODE_KEY`. Do not commit these values.
 
 Build and push the public `latest` image:

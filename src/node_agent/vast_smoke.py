@@ -40,7 +40,7 @@ if DEFAULT_VAST_RUNTIME_PROFILE is None:  # pragma: no cover - guarded by static
 DEFAULT_VAST_LAUNCH_PROFILE = default_vast_launch_profile()
 DEFAULT_VAST_SMOKE_MODEL = DEFAULT_VAST_RUNTIME_PROFILE.smoke_test_model
 DEFAULT_VAST_SMOKE_API_PATH = DEFAULT_VAST_RUNTIME_PROFILE.smoke_test_api_path
-DEFAULT_OFFER_LIMIT = 20
+DEFAULT_OFFER_LIMIT = 50
 DEFAULT_MIN_VRAM_GB = 16.0
 DEFAULT_DISK_GB = DEFAULT_VAST_LAUNCH_PROFILE.min_disk_gb
 DEFAULT_MIN_CUDA_MAX_GOOD = 12.9
@@ -875,6 +875,10 @@ def affordable_offers(
     *,
     max_price: float,
     min_cuda_max_good: float | None,
+    min_vram_gb: float | None = None,
+    disk_gb: int | None = None,
+    min_reliability: float | None = None,
+    min_inet_down_mbps: float | None = None,
     model: str | None = None,
     runtime_profile: str | None = None,
     preferred_offer_id: int | None = None,
@@ -896,6 +900,50 @@ def affordable_offers(
             f"No suitable Vast offers were available at or below ${max_price:.2f}/hr "
             f"after requiring cuda_max_good >= {float(min_cuda_max_good):.1f}."
         )
+    if min_vram_gb is not None and float(min_vram_gb) > 0:
+        supported = [
+            offer
+            for offer in supported
+            if (_float_value(offer, "gpu_ram") / 1024.0) + VAST_REPORTED_VRAM_TOLERANCE_GB >= float(min_vram_gb)
+        ]
+        if not supported:
+            raise VastSmokeError(
+                f"No suitable Vast offers were available at or below ${max_price:.2f}/hr "
+                f"after requiring at least {float(min_vram_gb):.1f}GB VRAM."
+            )
+    if disk_gb is not None and int(disk_gb) > 0:
+        supported = [
+            offer
+            for offer in supported
+            if _float_value(offer, "disk_space") >= int(disk_gb)
+        ]
+        if not supported:
+            raise VastSmokeError(
+                f"No suitable Vast offers were available at or below ${max_price:.2f}/hr "
+                f"after requiring at least {int(disk_gb)}GB disk."
+            )
+    if min_reliability is not None and float(min_reliability) > 0:
+        supported = [
+            offer
+            for offer in supported
+            if (_float_value(offer, "reliability") or _float_value(offer, "reliability2")) >= float(min_reliability)
+        ]
+        if not supported:
+            raise VastSmokeError(
+                f"No suitable Vast offers were available at or below ${max_price:.2f}/hr "
+                f"after requiring reliability >= {float(min_reliability):.3f}."
+            )
+    if min_inet_down_mbps is not None and float(min_inet_down_mbps) > 0:
+        supported = [
+            offer
+            for offer in supported
+            if _float_value(offer, "inet_down") >= float(min_inet_down_mbps)
+        ]
+        if not supported:
+            raise VastSmokeError(
+                f"No suitable Vast offers were available at or below ${max_price:.2f}/hr "
+                f"after requiring inet_down >= {float(min_inet_down_mbps):.1f} Mbps."
+            )
     runtime_supported = [
         offer
         for offer in supported
