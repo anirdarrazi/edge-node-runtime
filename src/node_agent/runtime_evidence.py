@@ -21,6 +21,8 @@ def _sorted_json(value: Any) -> Any:
         return {key: _sorted_json(value[key]) for key in sorted(value)}
     if isinstance(value, list):
         return [_sorted_json(item) for item in value]
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
     return value
 
 
@@ -36,6 +38,18 @@ def _signature_payload(*, digest: str, signed_at: str, signature_algorithm: str)
         "signature_algorithm": signature_algorithm,
     }
     return json.dumps(_sorted_json(payload), separators=(",", ":"), ensure_ascii=True)
+
+
+def _without_none_values(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _without_none_values(entry)
+            for key, entry in value.items()
+            if entry is not None
+        }
+    if isinstance(value, list):
+        return [_without_none_values(item) for item in value]
+    return value
 
 
 def _startup_args(settings: object) -> dict[str, Any]:
@@ -140,7 +154,9 @@ def resolved_signed_runtime_evidence(
     node_key = getattr(settings, "node_key", None)
     if not isinstance(node_key, str) or not node_key:
         return None
-    bundle = resolved_runtime_evidence_bundle(settings, runtime_tuple, gguf_artifact)
+    bundle = _without_none_values(
+        resolved_runtime_evidence_bundle(settings, runtime_tuple, gguf_artifact)
+    )
     digest = _sha256_json(bundle)
     signed_at = datetime.now(timezone.utc).isoformat()
     return {

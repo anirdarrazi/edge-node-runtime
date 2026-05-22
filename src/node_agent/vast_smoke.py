@@ -133,6 +133,13 @@ VAST_SMOKE_CONFIG_ENV = "NODE_AGENT_VAST_SMOKE_CONFIG"
 DEFAULT_VAST_SMOKE_CONFIG_NAME = "vast-smoke.json"
 
 
+def default_vast_smoke_label(node_id: str | None = None) -> str:
+    node_suffix = str(node_id or "").strip().replace("_", "-")[-12:]
+    if node_suffix:
+        return f"{DEFAULT_VAST_SMOKE_LABEL}-{node_suffix}"
+    return DEFAULT_VAST_SMOKE_LABEL
+
+
 class VastSmokeError(RuntimeError):
     pass
 
@@ -212,6 +219,10 @@ class VastSmokeConfig:
             "exclude_machine_ids",
             parse_identity_list(list(self.exclude_machine_ids or ())),
         )
+        normalized_label = str(self.label or "").strip()
+        if not normalized_label or normalized_label == DEFAULT_VAST_SMOKE_LABEL:
+            normalized_label = default_vast_smoke_label(self.node_id)
+        object.__setattr__(self, "label", normalized_label)
         expected_path = expected_api_path_for(normalized_api_kind, self.model)
         current_path = str(self.smoke_test_api_path or "").strip()
         if not current_path or (
@@ -1376,6 +1387,8 @@ class VastSmokeRunner:
         deadline = start_time + max(1.0, timeout_seconds)
         hard_deadline = deadline + max(0.0, progress_grace_seconds)
         last_status = "Vast instance is still starting."
+        port_mapping_missing_since: float | None = None
+        port_mapping_grace_seconds = max(poll_interval_seconds, min(max(0.0, progress_grace_seconds), 120.0))
         while self.monotonic() < hard_deadline:
             instance = self.api.get_instance(instance_id)
             if not isinstance(instance, dict):
@@ -1395,8 +1408,15 @@ class VastSmokeRunner:
                     if public_ip:
                         return instance
                     last_status = "Vast instance is running but does not have a public IP address yet."
+                    port_mapping_missing_since = None
                 except VastSmokeError as error:
                     last_status = str(error)
+                    if "port" in last_status.lower():
+                        port_mapping_missing_since = port_mapping_missing_since or self.monotonic()
+                        if self.monotonic() - port_mapping_missing_since >= port_mapping_grace_seconds:
+                            raise VastSmokeError(f"Vast instance is running without usable direct ports: {last_status}")
+                    else:
+                        port_mapping_missing_since = None
             elif actual_status in {"dead", "exited", "offline"} or cur_state in {"stopped", "deleted"}:
                 if status_msg and should_allow_launch_grace(status_msg):
                     last_status = status_msg
@@ -1405,6 +1425,7 @@ class VastSmokeRunner:
                 raise VastSmokeError(status_msg or f"Vast instance entered terminal state {actual_status or cur_state}.")
             elif status_msg:
                 last_status = status_msg
+                port_mapping_missing_since = None
             if self.monotonic() >= deadline and not should_allow_launch_grace(last_status):
                 break
             self.sleep(poll_interval_seconds)
@@ -2306,7 +2327,7 @@ def build_config_from_args(args: argparse.Namespace) -> VastSmokeConfig:
             os.getenv("VAST_SMOKE_LABEL"),
             _config_value(config_values, "label", "vast_label"),
         )
-        or DEFAULT_VAST_SMOKE_LABEL,
+        or default_vast_smoke_label(node_id),
         runtype=str(args.runtype).strip() or DEFAULT_VAST_LAUNCH_PROFILE.runtype,
         max_price=float(args.max_price),
         image=str(args.image).strip() or DEFAULT_VAST_SMOKE_IMAGE,

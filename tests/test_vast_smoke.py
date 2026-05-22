@@ -98,6 +98,15 @@ class FakeVastAPI:
         self.destroyed.append(instance_id)
 
 
+class StaticInstanceVastAPI(FakeVastAPI):
+    def __init__(self, instance: dict[str, object]) -> None:
+        super().__init__(offers=[], instances=[])
+        self.instance = instance
+
+    def get_instance(self, instance_id: int) -> dict[str, object] | None:
+        return dict(self.instance)
+
+
 class FakeRuntimeProbeClient:
     def __init__(self, *, get_responses: list[FakeResponse | Exception], post_responses: list[FakeResponse | Exception]) -> None:
         self.get_responses = list(get_responses)
@@ -1580,6 +1589,53 @@ def test_build_config_accepts_custom_vast_label() -> None:
     )
 
     assert config.label == "industrial-chain-node-1"
+
+
+def test_build_config_derives_vast_label_from_durable_node_id() -> None:
+    config = vast_smoke.build_config_from_args(
+        vast_smoke.parse_args(
+            [
+                "--api-key",
+                "secret",
+                "--durable-node",
+                "--edge-control-url",
+                "https://edge.autonomousc.com",
+                "--node-id",
+                "node_fleet_38ddd306193149d8b33814dcf34848c1",
+                "--node-key",
+                "key_123456789012345678901234",
+            ]
+        )
+    )
+
+    assert config.label == "autonomousc-runtime-smoke-test-14dcf34848c1"
+
+
+def test_wait_for_instance_fails_fast_when_running_without_direct_ports() -> None:
+    clock = FakeClock()
+    runner = vast_smoke.VastSmokeRunner(
+        StaticInstanceVastAPI(
+            {
+                "actual_status": "running",
+                "cur_state": "running",
+                "public_ipaddr": "203.0.113.10",
+                "ports": {},
+            }
+        ),
+        AlwaysFailRuntimeProbeClient(),
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+    )
+
+    with pytest.raises(vast_smoke.VastSmokeError, match="without usable direct ports"):
+        runner.wait_for_instance(
+            424242,
+            timeout_seconds=900,
+            progress_grace_seconds=30,
+            poll_interval_seconds=10,
+        )
+
+    assert clock.now - 1000.0 == 30
 
 
 def test_build_config_uses_response_probe_defaults_for_non_embedding_models() -> None:
