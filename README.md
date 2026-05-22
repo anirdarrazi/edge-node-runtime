@@ -31,6 +31,7 @@ Contents:
 - `single_container` mode when Docker socket access is unavailable and the image is running as one NVIDIA container
 
 In both cases, the same setup UI is exposed on `:8765`.
+Manager mode has root-equivalent access to the host through Docker. It should only be enabled explicitly on machines dedicated to this runtime.
 
 ### Public setup
 
@@ -38,8 +39,8 @@ Normal setup is one command and one browser screen:
 
 ```bash
 docker run --gpus all \
-  -p 8765:8765 \
-  -p 8000:8000 \
+  -p 127.0.0.1:8765:8765 \
+  -p 127.0.0.1:8000:8000 \
   -v autonomousc-edge:/var/lib/autonomousc \
   anirdarrazi/autonomousc-ai-edge-runtime:latest
 ```
@@ -149,8 +150,9 @@ Use this when the runtime should manage sibling containers through the host Dock
 ```bash
 docker run --rm \
   --gpus all \
-  -p 8765:8765 \
-  -p 8000:8000 \
+  -p 127.0.0.1:8765:8765 \
+  -p 127.0.0.1:8000:8000 \
+  -e AUTONOMOUSC_RUNTIME_BACKEND=manager \
   --add-host=host.docker.internal:host-gateway \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v autonomousc-edge:/var/lib/autonomousc \
@@ -161,7 +163,7 @@ Then open `http://127.0.0.1:8765` and complete Quick Start.
 
 Notes:
 
-- The setup UI always runs on `http://127.0.0.1:8765` locally, or the mapped `8765` port on remote hosts.
+- The setup UI should be published only on loopback. Use an authenticated tunnel or firewall rule for remote access.
 - In one-container mode, the service starts `vllm` and `node-agent` inside the same container.
 - In manager mode, the service orchestrates sibling `vllm`, `node-agent`, and `vector` containers through Docker Compose.
 - `Dockerfile.single` remains in the repo for compatibility testing, but `:latest` is the supported install path.

@@ -1,4 +1,5 @@
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -571,6 +572,55 @@ def test_main_starts_node_agent_without_nested_docker_when_vllm_is_external(monk
     saved = json.loads((tmp_path / "startup-status.json").read_text(encoding="utf-8"))
     assert saved["status"] == "failed"
     assert saved["failure_reason"] == "node-agent exited with status 0."
+
+
+def test_main_prepares_runtime_defaults_without_mutating_process_env(monkeypatch, tmp_path) -> None:
+    started_envs: list[dict[str, str]] = []
+
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self, command, text=False, env=None, **_kwargs) -> None:
+            started_envs.append(dict(env or {}))
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self) -> None:
+            pass
+
+        def wait(self, timeout=None) -> int:
+            return self.returncode
+
+    for key in (
+        "VLLM_MODEL",
+        "SUPPORTED_MODELS",
+        "RUNTIME_PROFILE",
+        "DEPLOYMENT_TARGET",
+        "INFERENCE_ENGINE",
+        "HF_TOKEN",
+        "HUGGING_FACE_HUB_TOKEN",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("START_VLLM", "false")
+    monkeypatch.delenv("RUN_MODE", raising=False)
+    monkeypatch.delenv("START_NODE_AGENT", raising=False)
+    monkeypatch.setenv("NODE_AGENT_COMMAND", "node-agent run")
+    monkeypatch.setenv("STARTUP_STATUS_PATH", str(tmp_path / "startup-status.json"))
+    monkeypatch.setenv("STARTUP_STATUS_PORT", "0")
+    monkeypatch.setenv("SINGLE_CONTAINER_CHILD_RESTART_LIMIT", "0")
+    monkeypatch.setattr(single_container.subprocess, "Popen", FakeProcess)
+
+    exit_code = single_container.main()
+
+    assert exit_code == 0
+    assert started_envs
+    assert started_envs[0]["VLLM_MODEL"] == "BAAI/bge-large-en-v1.5"
+    assert started_envs[0]["SUPPORTED_MODELS"] == "BAAI/bge-large-en-v1.5"
+    assert started_envs[0]["RUNTIME_PROFILE"] == "vast_vllm_safetensors"
+    assert "VLLM_MODEL" not in os.environ
+    assert "SUPPORTED_MODELS" not in os.environ
+    assert "RUNTIME_PROFILE" not in os.environ
 
 
 def test_main_skips_node_agent_in_serve_only_mode(monkeypatch, tmp_path) -> None:

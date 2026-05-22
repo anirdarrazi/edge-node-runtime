@@ -621,6 +621,50 @@ def test_runner_durable_gemma_node_uses_full_mode_and_stays_live() -> None:
     assert "--max-num-seqs 8" in env["VLLM_EXTRA_ARGS"]
 
 
+def test_durable_gemma_node_can_enroll_with_operator_token() -> None:
+    config = vast_smoke.VastSmokeConfig(
+        api_key="secret",
+        model="google/gemma-4-E4B-it",
+        max_price=0.20,
+        api_kind="responses",
+        durable_node=True,
+        edge_control_url="https://edge.autonomousc.com",
+        operator_token="op_secret",
+        node_region="eu-se-1",
+        runtime_profile="rtx_5060_ti_16gb_gemma4_e4b_it",
+        max_context_tokens=32768,
+    )
+
+    env = vast_smoke.build_launch_env(
+        config,
+        selected_offer={"gpu_name": "RTX 5060 Ti", "gpu_ram": 16384},
+    )
+
+    assert env["RUN_MODE"] == "full"
+    assert env["OPERATOR_TOKEN"] == "op_secret"
+    assert "NODE_ID" not in env
+    assert "NODE_KEY" not in env
+    assert env["VLLM_MODEL"] == "google/gemma-4-E4B-it"
+    assert env["RUNTIME_PROFILE"] == "rtx_5060_ti_16gb_gemma4_e4b_it"
+
+
+def test_durable_node_requires_credentials_or_operator_token() -> None:
+    with pytest.raises(vast_smoke.VastSmokeError, match="operator-token"):
+        vast_smoke.VastSmokeConfig(
+            api_key="secret",
+            durable_node=True,
+            edge_control_url="https://edge.autonomousc.com",
+        )
+
+    with pytest.raises(vast_smoke.VastSmokeError, match="provided together"):
+        vast_smoke.VastSmokeConfig(
+            api_key="secret",
+            durable_node=True,
+            edge_control_url="https://edge.autonomousc.com",
+            node_id="node_only",
+        )
+
+
 def test_runner_retries_stale_offer_and_keeps_real_error_body() -> None:
     clock = FakeClock()
     api = FakeVastAPI(

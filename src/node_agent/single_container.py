@@ -658,6 +658,27 @@ def apply_single_container_runtime_defaults(
     return fallback_note
 
 
+def prepared_single_container_main_env(base_env: Mapping[str, str] | None = None) -> tuple[dict[str, str], str | None, SingleContainerConfig]:
+    values = dict(os.environ if base_env is None else base_env)
+    values.setdefault("CREDENTIALS_PATH", "/var/lib/autonomousc/credentials/node-credentials.json")
+    values.setdefault("ATTESTATION_STATE_PATH", "/var/lib/autonomousc/credentials/attestation-state.json")
+    values.setdefault("RECOVERY_NOTE_PATH", "/var/lib/autonomousc/credentials/recovery-note.txt")
+    values.setdefault("AUTOPILOT_STATE_PATH", "/var/lib/autonomousc/scratch/autopilot-state.json")
+    values.setdefault("HEAT_GOVERNOR_STATE_PATH", "/var/lib/autonomousc/scratch/heat-governor-state.json")
+    values.setdefault("FAULT_INJECTION_STATE_PATH", "/var/lib/autonomousc/scratch/fault-injection-state.json")
+    values.setdefault("STARTUP_STATUS_PATH", "/var/lib/autonomousc/scratch/startup-status.json")
+    values.setdefault("STARTUP_STATUS_HOST", DEFAULT_STARTUP_STATUS_HOST)
+    values.setdefault("STARTUP_STATUS_PORT", str(DEFAULT_STARTUP_STATUS_PORT))
+    values.setdefault("STARTUP_STATUS_ENDPOINT_PATH", DEFAULT_STARTUP_STATUS_ENDPOINT_PATH)
+    values.setdefault("HF_HOME", "/root/.cache/huggingface")
+    initial_config = SingleContainerConfig.from_mapping(values)
+    fallback_note = apply_single_container_runtime_defaults(
+        values,
+        local_inference_url=initial_config.local_inference_url,
+    )
+    return values, fallback_note, SingleContainerConfig.from_mapping(values)
+
+
 def validate_gated_model_access(values: Mapping[str, str], model: str) -> None:
     if not requires_gated_hugging_face_access(model):
         return
@@ -1440,26 +1461,10 @@ class EmbeddedRuntimeSupervisor:
 
 
 def main() -> int:
-    os.environ.setdefault("CREDENTIALS_PATH", "/var/lib/autonomousc/credentials/node-credentials.json")
-    os.environ.setdefault("ATTESTATION_STATE_PATH", "/var/lib/autonomousc/credentials/attestation-state.json")
-    os.environ.setdefault("RECOVERY_NOTE_PATH", "/var/lib/autonomousc/credentials/recovery-note.txt")
-    os.environ.setdefault("AUTOPILOT_STATE_PATH", "/var/lib/autonomousc/scratch/autopilot-state.json")
-    os.environ.setdefault("HEAT_GOVERNOR_STATE_PATH", "/var/lib/autonomousc/scratch/heat-governor-state.json")
-    os.environ.setdefault("FAULT_INJECTION_STATE_PATH", "/var/lib/autonomousc/scratch/fault-injection-state.json")
-    os.environ.setdefault("STARTUP_STATUS_PATH", "/var/lib/autonomousc/scratch/startup-status.json")
-    os.environ.setdefault("STARTUP_STATUS_HOST", DEFAULT_STARTUP_STATUS_HOST)
-    os.environ.setdefault("STARTUP_STATUS_PORT", str(DEFAULT_STARTUP_STATUS_PORT))
-    os.environ.setdefault("STARTUP_STATUS_ENDPOINT_PATH", DEFAULT_STARTUP_STATUS_ENDPOINT_PATH)
-    os.environ.setdefault("HF_HOME", "/root/.cache/huggingface")
-    initial_config = SingleContainerConfig.from_env()
-    fallback_note = apply_single_container_runtime_defaults(
-        os.environ,
-        local_inference_url=initial_config.local_inference_url,
-    )
-    config = SingleContainerConfig.from_env()
+    runtime_env, fallback_note, config = prepared_single_container_main_env()
     if fallback_note:
         print(fallback_note, flush=True)
-    validate_gated_model_access(os.environ, config.vllm_model)
+    validate_gated_model_access(runtime_env, config.vllm_model)
     if not config.start_vllm and not config.start_node_agent:
         raise RuntimeError(
             "Single-container runtime has nothing to run. Enable START_VLLM or START_NODE_AGENT."
@@ -1468,7 +1473,9 @@ def main() -> int:
     vllm_process: subprocess.Popen[str] | None = None
     node_process: subprocess.Popen[str] | None = None
     vllm_output_relay: ProcessOutputRelay | None = None
-    vllm_process_env = sanitized_vllm_process_env(os.environ)
+    process_env = dict(os.environ)
+    process_env.update(runtime_env)
+    vllm_process_env = sanitized_vllm_process_env(process_env)
     startup_status = StartupStatusPublisher(
         config.startup_status_path,
         host=config.startup_status_host,
@@ -1482,7 +1489,7 @@ def main() -> int:
             status=status,
             current_model=config.vllm_model,
             failure_reason=failure_reason,
-            warm_source=startup_warm_source_payload(os.environ, current_model=config.vllm_model),
+            warm_source=startup_warm_source_payload(runtime_env, current_model=config.vllm_model),
             extra={
                 "run_mode": config.run_mode,
                 "start_vllm": config.start_vllm,
@@ -1537,6 +1544,7 @@ def main() -> int:
                 config,
                 vllm_process,
                 output_tail=vllm_output_relay.tail_text if vllm_output_relay is not None else None,
+                fault_state_path=fault_injection_state_path_from_mapping(runtime_env),
                 progress_callback=publish_warming_progress,
             )
         else:
@@ -1549,7 +1557,7 @@ def main() -> int:
             publish_startup_status("warming", extra=startup_runtime_detail(config, startup_stage="starting_node_agent"))
             node_command = list(config.node_agent_command)
             print(f"Starting node agent in this container: {' '.join(shlex.quote(part) for part in node_command)}", flush=True)
-            node_process = subprocess.Popen(node_command, text=True)
+            node_process = subprocess.Popen(node_command, text=True, env=process_env)
         else:
             print(
                 "Serve-only mode is enabled; skipping in-container node agent startup.",
@@ -1656,6 +1664,7 @@ def main() -> int:
                     config,
                     vllm_process,
                     output_tail=vllm_output_relay.tail_text,
+                    fault_state_path=fault_injection_state_path_from_mapping(runtime_env),
                     progress_callback=publish_warming_progress,
                 )
                 if config.start_node_agent:
@@ -1665,11 +1674,11 @@ def main() -> int:
                         f"{' '.join(shlex.quote(part) for part in node_command)}",
                         flush=True,
                     )
-                    node_process = subprocess.Popen(node_command, text=True)
+                    node_process = subprocess.Popen(node_command, text=True, env=process_env)
             elif exited is node_process:
                 node_command = list(config.node_agent_command)
                 print(f"Restarting node agent: {' '.join(shlex.quote(part) for part in node_command)}", flush=True)
-                node_process = subprocess.Popen(node_command, text=True)
+                node_process = subprocess.Popen(node_command, text=True, env=process_env)
             else:
                 raise RuntimeError(exit_message)
 

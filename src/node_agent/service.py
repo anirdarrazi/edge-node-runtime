@@ -6959,8 +6959,14 @@ def make_handler(service: NodeRuntimeService, server_ref: dict[str, ThreadingHTT
                     self._reject(HTTPStatus.UNAUTHORIZED, "unauthorized", "A local admin token is required.")
                     return
                 requested = unquote(path.removeprefix("/downloads/"))
-                target = (service.diagnostics_dir / requested).resolve()
-                if not str(target).startswith(str(service.diagnostics_dir.resolve())) or not target.exists():
+                root = service.diagnostics_dir.resolve()
+                target = (root / requested).resolve()
+                try:
+                    target.relative_to(root)
+                except ValueError:
+                    self._send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
+                    return
+                if not target.is_file():
                     self._send_json({"error": "not_found"}, HTTPStatus.NOT_FOUND)
                     return
                 body = target.read_bytes()
@@ -7138,7 +7144,7 @@ def command_run(host: str, port: int) -> int:
     service.write_meta()
     service.log(f"Node runtime service started at http://{host}:{port}")
     service.resume_setup_if_needed()
-    access_url = f"http://{browser_access_host(host)}:{port}/?token={quote(service.admin_token)}"
+    access_url = f"http://{browser_access_host(host)}:{port}"
     print(f"AUTONOMOUSc node setup UI is available at {access_url}", flush=True)
     print(
         f"Runtime backend: {runtime_backend_label(service.runtime_backend)} on port 8765. "

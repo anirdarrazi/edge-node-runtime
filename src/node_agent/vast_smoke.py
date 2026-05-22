@@ -185,6 +185,7 @@ class VastSmokeConfig:
     edge_control_url: str = ""
     node_id: str = ""
     node_key: str = ""
+    operator_token: str = ""
     node_region: str = DEFAULT_DURABLE_NODE_REGION
     runtime_profile: str = DEFAULT_DURABLE_RUNTIME_PROFILE
     max_batch_tokens: int = DEFAULT_DURABLE_MAX_BATCH_TOKENS
@@ -248,10 +249,16 @@ class VastSmokeConfig:
         if self.durable_node:
             if not str(self.edge_control_url or "").strip():
                 raise VastSmokeError("--edge-control-url or EDGE_CONTROL_URL is required for --durable-node.")
-            if not str(self.node_id or "").strip():
-                raise VastSmokeError("--node-id or NODE_ID is required for --durable-node.")
-            if not str(self.node_key or "").strip():
-                raise VastSmokeError("--node-key or NODE_KEY is required for --durable-node.")
+            has_node_id = bool(str(self.node_id or "").strip())
+            has_node_key = bool(str(self.node_key or "").strip())
+            has_operator_token = bool(str(self.operator_token or "").strip())
+            if has_node_id != has_node_key:
+                raise VastSmokeError("--node-id and --node-key must be provided together for --durable-node.")
+            if not has_operator_token and not (has_node_id and has_node_key):
+                raise VastSmokeError(
+                    "--durable-node requires either --operator-token/SMOKE_OPERATOR_TOKEN for enrollment "
+                    "or both --node-id and --node-key for pre-registered credentials."
+                )
             if int(self.max_context_tokens) == 32768:
                 object.__setattr__(self, "max_context_tokens", DEFAULT_DURABLE_MAX_CONTEXT_TOKENS)
             if normalized_model_lookup_key(self.model) == "google/gemma-4-e4b-it":
@@ -984,8 +991,6 @@ def build_launch_env(
                 "START_NODE_AGENT": "true",
                 "START_VLLM": "true",
                 "EDGE_CONTROL_URL": str(config.edge_control_url).strip(),
-                "NODE_ID": str(config.node_id).strip(),
-                "NODE_KEY": str(config.node_key).strip(),
                 "NODE_LABEL": config.label,
                 "NODE_REGION": str(config.node_region or DEFAULT_DURABLE_NODE_REGION).strip(),
                 "TRUST_TIER": "standard",
@@ -1030,6 +1035,11 @@ def build_launch_env(
                 "ALLOW_HIGH_GPU_MEMORY_PRESSURE": "true",
             }
         )
+        if str(config.node_id or "").strip() and str(config.node_key or "").strip():
+            env["NODE_ID"] = str(config.node_id).strip()
+            env["NODE_KEY"] = str(config.node_key).strip()
+        if str(config.operator_token or "").strip():
+            env["OPERATOR_TOKEN"] = str(config.operator_token).strip()
     else:
         env.update(
             {
@@ -2213,6 +2223,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--edge-control-url", default="", help="Control-plane URL for durable node mode. Defaults to EDGE_CONTROL_URL or AUTONOMOUSC_BASE_URL.")
     parser.add_argument("--node-id", default="", help="Pre-registered AUTONOMOUSc node id for durable node mode. Defaults to NODE_ID.")
     parser.add_argument("--node-key", default="", help="Pre-registered AUTONOMOUSc node key for durable node mode. Defaults to NODE_KEY.")
+    parser.add_argument(
+        "--operator-token",
+        default="",
+        help="AUTONOMOUSc operator API key used by durable node mode to enroll a fresh node. Defaults to SMOKE_OPERATOR_TOKEN, AUTONOMOUSC_OPERATOR_API_KEY, or OPERATOR_TOKEN.",
+    )
     parser.add_argument("--node-region", default=DEFAULT_DURABLE_NODE_REGION, help="Concrete scheduler region for durable node mode.")
     parser.add_argument("--runtime-profile", default=DEFAULT_DURABLE_RUNTIME_PROFILE, help="Runtime profile advertised by durable node mode.")
     parser.add_argument("--max-batch-tokens", type=int, default=DEFAULT_DURABLE_MAX_BATCH_TOKENS, help="Durable node assignment token budget cap.")
@@ -2315,6 +2330,13 @@ def build_config_from_args(args: argparse.Namespace) -> VastSmokeConfig:
         os.getenv("NODE_KEY"),
         _config_value(config_values, "node_key"),
     )
+    operator_token = first_nonempty(
+        str(getattr(args, "operator_token", "") or ""),
+        os.getenv("SMOKE_OPERATOR_TOKEN"),
+        os.getenv("AUTONOMOUSC_OPERATOR_API_KEY"),
+        os.getenv("OPERATOR_TOKEN"),
+        _config_value(config_values, "operator_token", "smoke_operator_token"),
+    )
     vllm_extra_args = str(args.vllm_extra_args or "").strip()
     model = str(args.model).strip() or DEFAULT_VAST_SMOKE_MODEL
     if durable_node and not vllm_extra_args and normalized_model_lookup_key(model) == "google/gemma-4-e4b-it":
@@ -2376,6 +2398,7 @@ def build_config_from_args(args: argparse.Namespace) -> VastSmokeConfig:
         edge_control_url=edge_control_url,
         node_id=node_id,
         node_key=node_key,
+        operator_token=operator_token,
         node_region=str(getattr(args, "node_region", DEFAULT_DURABLE_NODE_REGION) or DEFAULT_DURABLE_NODE_REGION).strip(),
         runtime_profile=str(getattr(args, "runtime_profile", DEFAULT_DURABLE_RUNTIME_PROFILE) or DEFAULT_DURABLE_RUNTIME_PROFILE).strip(),
         max_batch_tokens=max(1, int(getattr(args, "max_batch_tokens", DEFAULT_DURABLE_MAX_BATCH_TOKENS))),

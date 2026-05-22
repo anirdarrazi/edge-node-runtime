@@ -55,6 +55,19 @@ def test_detect_runtime_backend_uses_single_container_inside_container(monkeypat
     assert runtime_backend_module.detect_runtime_backend() == runtime_backend_module.SINGLE_CONTAINER_RUNTIME_BACKEND
 
 
+def test_detect_runtime_backend_requires_explicit_manager_mode_inside_container_with_socket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(runtime_backend_module.RUNTIME_BACKEND_ENV, raising=False)
+    monkeypatch.setattr(runtime_backend_module, "docker_socket_present", lambda: True)
+    monkeypatch.setattr(runtime_backend_module, "running_inside_container", lambda: True)
+
+    assert runtime_backend_module.detect_runtime_backend() == runtime_backend_module.SINGLE_CONTAINER_RUNTIME_BACKEND
+
+    monkeypatch.setenv(runtime_backend_module.RUNTIME_BACKEND_ENV, runtime_backend_module.MANAGER_RUNTIME_BACKEND)
+    assert runtime_backend_module.detect_runtime_backend() == runtime_backend_module.MANAGER_RUNTIME_BACKEND
+
+
 def test_launcher_defaults_to_container_service_ui(monkeypatch: pytest.MonkeyPatch) -> None:
     recorded: list[list[str]] = []
 

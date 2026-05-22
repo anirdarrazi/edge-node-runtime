@@ -29,11 +29,11 @@ def detect_runtime_backend() -> str:
     configured = normalize_runtime_backend(os.getenv(RUNTIME_BACKEND_ENV))
     if configured != AUTO_RUNTIME_BACKEND:
         return configured
+    if running_inside_container():
+        return SINGLE_CONTAINER_RUNTIME_BACKEND
     if docker_socket_present():
         return MANAGER_RUNTIME_BACKEND
-    if not running_inside_container():
-        return MANAGER_RUNTIME_BACKEND
-    return SINGLE_CONTAINER_RUNTIME_BACKEND
+    return MANAGER_RUNTIME_BACKEND
 
 
 def runtime_backend_label(backend: str) -> str:

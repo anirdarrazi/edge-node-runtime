@@ -7203,9 +7203,10 @@ def main(argv: list[str] | None = None) -> int:
     installer.resume_if_needed()
     admin_token = generate_admin_token()
     server = ThreadingHTTPServer((args.host, args.port), make_handler(installer, admin_token))
-    url = f"http://{browser_access_host(args.host)}:{args.port}/?token={quote(admin_token)}"
+    base_url = f"http://{browser_access_host(args.host)}:{args.port}"
+    url = f"{base_url}/?token={quote(admin_token)}"
 
-    print(f"AUTONOMOUSc guided installer is available at {url}")
+    print(f"AUTONOMOUSc guided installer is available at {base_url}")
     try:
         webbrowser.open(url, new=2)
     except Exception:
