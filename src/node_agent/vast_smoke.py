@@ -246,6 +246,18 @@ class VastSmokeConfig:
         if normalized_benchmark_profile not in {"balanced", "input_heavy", "output_heavy"}:
             normalized_benchmark_profile = DEFAULT_BENCHMARK_PROFILE
         object.__setattr__(self, "benchmark_profile", normalized_benchmark_profile)
+        if (
+            normalized_model_lookup_key(self.model) == "google/gemma-4-e4b-it"
+            and runtime_profile_requires_rtx_5060_ti_gemma_policy(self.runtime_profile)
+        ):
+            if not str(self.vllm_extra_args or "").strip():
+                object.__setattr__(self, "vllm_extra_args", DEFAULT_GEMMA_E4B_VLLM_EXTRA_ARGS)
+            if self.vllm_startup_timeout_seconds is None or int(self.vllm_startup_timeout_seconds) <= 0:
+                object.__setattr__(
+                    self,
+                    "vllm_startup_timeout_seconds",
+                    DEFAULT_DURABLE_GEMMA_E4B_VLLM_STARTUP_TIMEOUT_SECONDS,
+                )
         if self.durable_node:
             if not str(self.edge_control_url or "").strip():
                 raise VastSmokeError("--edge-control-url or EDGE_CONTROL_URL is required for --durable-node.")
@@ -261,15 +273,6 @@ class VastSmokeConfig:
                 )
             if int(self.max_context_tokens) == 32768:
                 object.__setattr__(self, "max_context_tokens", DEFAULT_DURABLE_MAX_CONTEXT_TOKENS)
-            if normalized_model_lookup_key(self.model) == "google/gemma-4-e4b-it":
-                if not str(self.vllm_extra_args or "").strip():
-                    object.__setattr__(self, "vllm_extra_args", DEFAULT_GEMMA_E4B_VLLM_EXTRA_ARGS)
-                if self.vllm_startup_timeout_seconds is None or int(self.vllm_startup_timeout_seconds) <= 0:
-                    object.__setattr__(
-                        self,
-                        "vllm_startup_timeout_seconds",
-                        DEFAULT_DURABLE_GEMMA_E4B_VLLM_STARTUP_TIMEOUT_SECONDS,
-                    )
 
     @property
     def effective_max_context_tokens(self) -> int:
@@ -1028,6 +1031,7 @@ def build_launch_env(
         "VLLM_MODEL": config.model,
         "SUPPORTED_MODELS": config.model,
         "MAX_CONTEXT_TOKENS": str(config.effective_max_context_tokens),
+        "RUNTIME_PROFILE": str(config.runtime_profile or DEFAULT_DURABLE_RUNTIME_PROFILE).strip(),
         "STARTUP_STATUS_HOST": DEFAULT_STARTUP_STATUS_HOST,
         "STARTUP_STATUS_PORT": str(DEFAULT_STARTUP_STATUS_PORT),
         "STARTUP_STATUS_ENDPOINT_PATH": DEFAULT_STARTUP_STATUS_ENDPOINT_PATH,
@@ -1044,7 +1048,6 @@ def build_launch_env(
                 "TRUST_TIER": "standard",
                 "RESTRICTED_CAPABLE": "false",
                 "ATTESTATION_PROVIDER": "simulated",
-                "RUNTIME_PROFILE": str(config.runtime_profile or DEFAULT_DURABLE_RUNTIME_PROFILE).strip(),
                 "DEPLOYMENT_TARGET": "vast_ai",
                 "INFERENCE_ENGINE": "vllm",
                 "RUNTIME_IMAGE": config.image,
@@ -1095,6 +1098,8 @@ def build_launch_env(
                 "START_NODE_AGENT": "false",
             }
         )
+    if config.vllm_startup_timeout_seconds is not None and int(config.vllm_startup_timeout_seconds) > 0:
+        env["VLLM_STARTUP_TIMEOUT_SECONDS"] = str(max(1, int(config.vllm_startup_timeout_seconds)))
     if config.hf_token:
         env["HUGGING_FACE_HUB_TOKEN"] = config.hf_token
     if str(config.vllm_extra_args or "").strip():
@@ -1957,7 +1962,7 @@ class VastSmokeRunner:
                 "max_local_queue_assignments": config.max_local_queue_assignments if config.durable_node else None,
                 "pull_bundle_size": config.pull_bundle_size if config.durable_node else None,
                 "node_region": config.node_region if config.durable_node else None,
-                "runtime_profile": config.runtime_profile if config.durable_node else None,
+                "runtime_profile": config.runtime_profile,
                 "min_cuda_max_good": config.min_cuda_max_good,
                 "expected_api_path": config.smoke_test_api_path,
                 "readiness_path": DEFAULT_MODELS_PATH,
@@ -2387,7 +2392,12 @@ def build_config_from_args(args: argparse.Namespace) -> VastSmokeConfig:
     )
     vllm_extra_args = str(args.vllm_extra_args or "").strip()
     model = str(args.model).strip() or DEFAULT_VAST_SMOKE_MODEL
-    if durable_node and not vllm_extra_args and normalized_model_lookup_key(model) == "google/gemma-4-e4b-it":
+    runtime_profile = str(getattr(args, "runtime_profile", DEFAULT_DURABLE_RUNTIME_PROFILE) or DEFAULT_DURABLE_RUNTIME_PROFILE).strip()
+    if (
+        not vllm_extra_args
+        and normalized_model_lookup_key(model) == "google/gemma-4-e4b-it"
+        and runtime_profile_requires_rtx_5060_ti_gemma_policy(runtime_profile)
+    ):
         vllm_extra_args = DEFAULT_GEMMA_E4B_VLLM_EXTRA_ARGS
     return VastSmokeConfig(
         api_key=api_key,
@@ -2448,7 +2458,7 @@ def build_config_from_args(args: argparse.Namespace) -> VastSmokeConfig:
         node_key=node_key,
         operator_token=operator_token,
         node_region=str(getattr(args, "node_region", DEFAULT_DURABLE_NODE_REGION) or DEFAULT_DURABLE_NODE_REGION).strip(),
-        runtime_profile=str(getattr(args, "runtime_profile", DEFAULT_DURABLE_RUNTIME_PROFILE) or DEFAULT_DURABLE_RUNTIME_PROFILE).strip(),
+        runtime_profile=runtime_profile,
         max_batch_tokens=max(1, int(getattr(args, "max_batch_tokens", DEFAULT_DURABLE_MAX_BATCH_TOKENS))),
         target_batch_items=max(1, int(getattr(args, "target_batch_items", DEFAULT_DURABLE_TARGET_BATCH_ITEMS))),
         max_batch_items=max(1, int(getattr(args, "max_batch_items", DEFAULT_DURABLE_MAX_BATCH_ITEMS))),

@@ -621,6 +621,39 @@ def test_runner_durable_gemma_node_uses_full_mode_and_stays_live() -> None:
     assert "--max-num-seqs 8" in env["VLLM_EXTRA_ARGS"]
 
 
+def test_gemma_vast_profile_uses_tuned_vllm_args_without_durable_node() -> None:
+    config = vast_smoke.build_config_from_args(
+        vast_smoke.parse_args(
+            [
+                "--api-key",
+                "secret",
+                "--model",
+                "google/gemma-4-E4B-it",
+                "--runtime-profile",
+                "rtx_5060_ti_16gb_gemma4_e4b_it",
+                "--max-context-tokens",
+                "32768",
+            ]
+        )
+    )
+
+    env = vast_smoke.build_launch_env(
+        config,
+        selected_offer={"gpu_name": "RTX 5060 Ti", "gpu_ram": 16384},
+    )
+
+    assert config.durable_node is False
+    assert config.runtime_profile == "rtx_5060_ti_16gb_gemma4_e4b_it"
+    assert config.vllm_startup_timeout_seconds == 1800
+    assert "--quantization fp8" in config.vllm_extra_args
+    assert "--kv-cache-dtype fp8" in config.vllm_extra_args
+    assert env["RUN_MODE"] == "serve_only"
+    assert env["VLLM_MODEL"] == "google/gemma-4-E4B-it"
+    assert env["MAX_CONTEXT_TOKENS"] == "32768"
+    assert env["VLLM_STARTUP_TIMEOUT_SECONDS"] == "1800"
+    assert "--quantization fp8" in env["VLLM_EXTRA_ARGS"]
+
+
 def test_durable_gemma_node_can_enroll_with_operator_token() -> None:
     config = vast_smoke.VastSmokeConfig(
         api_key="secret",
