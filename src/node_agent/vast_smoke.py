@@ -14,6 +14,8 @@ from typing import Any, Mapping
 import httpx
 
 from .runtime_profiles import (
+    LEGACY_RTX_5060_TI_16GB_GEMMA4_E4B_PROFILE,
+    RTX_5060_TI_16GB_GEMMA4_E4B_IT_PROFILE,
     VAST_VLLM_SAFETENSORS_PROFILE,
     default_vast_launch_profile,
     runtime_profile_by_id,
@@ -47,6 +49,7 @@ DEFAULT_MIN_INET_DOWN_MBPS = 250.0
 DEFAULT_LAUNCH_TIMEOUT_SECONDS = 240.0
 DEFAULT_LAUNCH_PROGRESS_GRACE_SECONDS = 240.0
 DEFAULT_READINESS_TIMEOUT_SECONDS = 900.0
+DEFAULT_STARTUP_STATUS_CONNECT_TIMEOUT_SECONDS = 180.0
 DEFAULT_POLL_INTERVAL_SECONDS = 5.0
 DEFAULT_PROBE_RETRY_ATTEMPTS = 3
 DEFAULT_PROBE_RETRY_DELAY_SECONDS = 2.0
@@ -54,6 +57,7 @@ DEFAULT_POST_PROBE_STATUS_GRACE_SECONDS = 20.0
 DEFAULT_POST_PROBE_STATUS_POLL_SECONDS = 2.0
 DEFAULT_VAST_API_RETRY_ATTEMPTS = 5
 DEFAULT_VAST_API_RETRY_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+VAST_REPORTED_VRAM_TOLERANCE_GB = 0.25
 DEFAULT_PRICING_PLATFORM_OVERHEAD_PCT = 0.10
 DEFAULT_PRICING_IDLE_RESERVE_PCT = 0.15
 DEFAULT_PRICING_TARGET_MARGIN_PCT = 0.35
@@ -160,6 +164,7 @@ class VastSmokeConfig:
     launch_timeout_seconds: float = DEFAULT_LAUNCH_TIMEOUT_SECONDS
     launch_progress_grace_seconds: float = DEFAULT_LAUNCH_PROGRESS_GRACE_SECONDS
     readiness_timeout_seconds: float = DEFAULT_READINESS_TIMEOUT_SECONDS
+    startup_status_connect_timeout_seconds: float = DEFAULT_STARTUP_STATUS_CONNECT_TIMEOUT_SECONDS
     poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS
     api_kind: str = "auto"
     smoke_test_api_path: str = DEFAULT_VAST_SMOKE_API_PATH
@@ -697,7 +702,7 @@ def offer_fit_tier(offer: dict[str, Any], *, model: str | None = None) -> int:
     gpu_ram_gb = _float_value(offer, "gpu_ram") / 1024.0
     preferred_vram_gb = preferred_vast_smoke_vram_gb(model)
     preferred_inet_down_mbps = recommended_vast_smoke_min_inet_down_mbps(model)
-    meets_preferred_vram = gpu_ram_gb >= preferred_vram_gb
+    meets_preferred_vram = gpu_ram_gb + VAST_REPORTED_VRAM_TOLERANCE_GB >= preferred_vram_gb
     meets_preferred_inet = _float_value(offer, "inet_down") >= preferred_inet_down_mbps
     if meets_preferred_vram and meets_preferred_inet:
         return 0
@@ -729,12 +734,59 @@ def offer_supports_minimum_cuda(offer: dict[str, Any], minimum_cuda_max_good: fl
     return _float_value(offer, "cuda_max_good") >= float(minimum_cuda_max_good)
 
 
-def model_requires_rtx_5060_ti_gemma_policy(model: str | None) -> bool:
-    return normalized_model_lookup_key(model) == "google/gemma-4-e4b-it"
+def runtime_profile_requires_rtx_5060_ti_gemma_policy(runtime_profile: str | None = None) -> bool:
+    normalized = str(runtime_profile or DEFAULT_DURABLE_RUNTIME_PROFILE).strip().lower()
+    return normalized in {
+        RTX_5060_TI_16GB_GEMMA4_E4B_IT_PROFILE,
+        LEGACY_RTX_5060_TI_16GB_GEMMA4_E4B_PROFILE,
+    }
+
+
+def model_requires_rtx_5060_ti_gemma_policy(
+    model: str | None,
+    *,
+    runtime_profile: str | None = None,
+) -> bool:
+    return (
+        normalized_model_lookup_key(model) == "google/gemma-4-e4b-it"
+        and runtime_profile_requires_rtx_5060_ti_gemma_policy(runtime_profile)
+    )
 
 
 def _normalized_offer_gpu_name(offer: Mapping[str, Any]) -> str:
     return " ".join(str(offer.get("gpu_name") or "").strip().lower().split())
+
+
+def offer_gpu_fraction(offer: Mapping[str, Any]) -> float | None:
+    if "gpu_frac" not in offer:
+        return None
+    try:
+        return float(offer.get("gpu_frac") or 0)
+    except (TypeError, ValueError):
+        return None
+
+
+def offer_supports_full_gpu(offer: Mapping[str, Any]) -> bool:
+    gpu_fraction = offer_gpu_fraction(offer)
+    return gpu_fraction is None or gpu_fraction >= 0.99
+
+
+def gemma_e4b_fp8_compatible_gpu_name(gpu_name: str) -> bool:
+    normalized = " ".join(str(gpu_name or "").strip().lower().split())
+    if not normalized:
+        return False
+    compatible_tokens = (
+        "rtx 40",
+        "rtx 50",
+        "rtx pro",
+        "l4",
+        "l40",
+        "h100",
+        "h200",
+        "b100",
+        "b200",
+    )
+    return any(token in normalized for token in compatible_tokens)
 
 
 def offer_direct_port_capacity(offer: Mapping[str, Any]) -> int | None:
@@ -756,12 +808,25 @@ def offer_supports_required_direct_ports(offer: Mapping[str, Any], required_coun
     return capacity >= max(0, int(required_count))
 
 
-def offer_supports_rtx_5060_ti_gemma_policy(offer: dict[str, Any], *, model: str | None = None) -> bool:
-    if not model_requires_rtx_5060_ti_gemma_policy(model):
+def offer_supports_rtx_5060_ti_gemma_policy(
+    offer: dict[str, Any],
+    *,
+    model: str | None = None,
+    runtime_profile: str | None = None,
+) -> bool:
+    if normalized_model_lookup_key(model) != "google/gemma-4-e4b-it":
         return True
+    if not offer_supports_full_gpu(offer):
+        return False
     gpu_name = _normalized_offer_gpu_name(offer)
     gpu_ram_gb = _float_value(offer, "gpu_ram") / 1024.0
     disk_space_gb = _float_value(offer, "disk_space")
+    if not model_requires_rtx_5060_ti_gemma_policy(model, runtime_profile=runtime_profile):
+        if gpu_ram_gb < 15.0:
+            return False
+        if "disk_space" in offer and disk_space_gb < DEFAULT_DISK_GB:
+            return False
+        return gemma_e4b_fp8_compatible_gpu_name(gpu_name) and offer_supports_required_direct_ports(offer, 2)
     if not ("5060" in gpu_name and "ti" in gpu_name):
         return False
     if gpu_ram_gb < 15.0 or gpu_ram_gb > 17.9:
@@ -771,8 +836,20 @@ def offer_supports_rtx_5060_ti_gemma_policy(offer: dict[str, Any], *, model: str
     return offer_supports_required_direct_ports(offer, 2)
 
 
-def choose_cheapest_offer(offers: list[dict[str, Any]], *, max_price: float, model: str | None = None) -> dict[str, Any]:
-    return affordable_offers(offers, max_price=max_price, min_cuda_max_good=None, model=model)[0]
+def choose_cheapest_offer(
+    offers: list[dict[str, Any]],
+    *,
+    max_price: float,
+    model: str | None = None,
+    runtime_profile: str | None = None,
+) -> dict[str, Any]:
+    return affordable_offers(
+        offers,
+        max_price=max_price,
+        min_cuda_max_good=None,
+        model=model,
+        runtime_profile=runtime_profile,
+    )[0]
 
 
 def affordable_offers(
@@ -781,6 +858,7 @@ def affordable_offers(
     max_price: float,
     min_cuda_max_good: float | None,
     model: str | None = None,
+    runtime_profile: str | None = None,
     preferred_offer_id: int | None = None,
     exclude_offer_ids: tuple[int, ...] | list[int] | None = None,
     exclude_machine_ids: tuple[str, ...] | list[str] | None = None,
@@ -801,13 +879,28 @@ def affordable_offers(
             f"after requiring cuda_max_good >= {float(min_cuda_max_good):.1f}."
         )
     runtime_supported = [
-        offer for offer in supported if offer_supports_rtx_5060_ti_gemma_policy(offer, model=model)
+        offer
+        for offer in supported
+        if offer_supports_rtx_5060_ti_gemma_policy(
+            offer,
+            model=model,
+            runtime_profile=runtime_profile,
+        )
     ]
     if not runtime_supported:
+        if runtime_profile_requires_rtx_5060_ti_gemma_policy(runtime_profile):
+            detail = (
+                "an RTX 5060 Ti 16GB host with enough disk and direct ports "
+                "for google/gemma-4-E4B-it."
+            )
+        else:
+            detail = (
+                "an FP8-capable 16GB+ host with enough disk and direct ports "
+                "for google/gemma-4-E4B-it."
+            )
         raise VastSmokeError(
             f"No suitable Vast offers were available at or below ${max_price:.2f}/hr "
-            "after requiring an RTX 5060 Ti 16GB host with enough disk and direct ports "
-            "for google/gemma-4-E4B-it."
+            f"after requiring {detail}"
         )
     preferred_offer_id = int(preferred_offer_id or 0)
     selected = runtime_supported
@@ -839,7 +932,30 @@ def affordable_offers(
     )
 
 
-def build_launch_env(config: VastSmokeConfig) -> dict[str, str]:
+def launch_gpu_name(selected_offer: Mapping[str, Any] | None = None) -> str:
+    if selected_offer is not None:
+        gpu_name = str(selected_offer.get("gpu_name") or "").strip()
+        if gpu_name:
+            return gpu_name
+    return "RTX 5060 Ti"
+
+
+def launch_gpu_memory_gb(selected_offer: Mapping[str, Any] | None = None) -> str:
+    if selected_offer is not None:
+        gpu_ram_gb = _float_value(dict(selected_offer), "gpu_ram") / 1024.0
+        if gpu_ram_gb > 0:
+            rounded = round(gpu_ram_gb, 1)
+            if rounded.is_integer():
+                return str(int(rounded))
+            return str(rounded)
+    return "16"
+
+
+def build_launch_env(
+    config: VastSmokeConfig,
+    *,
+    selected_offer: Mapping[str, Any] | None = None,
+) -> dict[str, str]:
     env = {
         "-p 8000:8000": "1",
         f"-p {DEFAULT_STARTUP_STATUS_PORT}:{DEFAULT_STARTUP_STATUS_PORT}": "1",
@@ -873,8 +989,8 @@ def build_launch_env(config: VastSmokeConfig) -> dict[str, str]:
                 "TEMPORARY_NODE": "false",
                 "DISABLE_PUBLIC_BOOTSTRAP_FALLBACK": "true",
                 "BURST_PROVIDER": "vast_ai",
-                "GPU_NAME": "RTX 5060 Ti",
-                "GPU_MEMORY_GB": "16",
+                "GPU_NAME": launch_gpu_name(selected_offer),
+                "GPU_MEMORY_GB": launch_gpu_memory_gb(selected_offer),
                 "MAX_BATCH_TOKENS": str(max(1, int(config.max_batch_tokens))),
                 "TARGET_BATCH_ITEMS": str(max(1, int(config.target_batch_items))),
                 "MAX_BATCH_ITEMS": str(max(1, int(config.max_batch_items))),
@@ -1295,15 +1411,18 @@ class VastSmokeRunner:
         base_url: str,
         *,
         startup_status_url: str | None,
-        timeout_seconds: float,
         poll_interval_seconds: float,
+        timeout_seconds: float,
+        startup_status_connect_timeout_seconds: float = DEFAULT_STARTUP_STATUS_CONNECT_TIMEOUT_SECONDS,
     ) -> tuple[dict[str, Any], int]:
         deadline = self.monotonic() + max(1.0, timeout_seconds)
+        startup_status_deadline = self.monotonic() + max(1.0, startup_status_connect_timeout_seconds)
         last_error = "The OpenAI-compatible runtime is still starting."
         models_url = f"{base_url}{DEFAULT_MODELS_PATH}"
         runtime_report["models_path"] = DEFAULT_MODELS_PATH
         runtime_report["startup_status_path"] = DEFAULT_STARTUP_STATUS_ENDPOINT_PATH
         runtime_report["startup_status_url"] = startup_status_url
+        startup_status_observed = not startup_status_url
         while self.monotonic() < deadline:
             startup_summary = None
             if startup_status_url:
@@ -1312,6 +1431,7 @@ class VastSmokeRunner:
                     runtime_report["startup_status_code"] = int(startup_response.status_code)
                     startup_payload = response_json_object(startup_response)
                     if startup_payload is not None:
+                        startup_status_observed = True
                         runtime_report["startup_status"] = startup_payload
                         startup_summary = startup_status_summary(startup_payload)
                         if startup_summary:
@@ -1331,6 +1451,11 @@ class VastSmokeRunner:
                 except (httpx.HTTPError, ValueError) as error:
                     last_error = str(error) or f"{DEFAULT_STARTUP_STATUS_ENDPOINT_PATH} is unavailable."
                     runtime_report["startup_status_poll_error"] = last_error
+                if not startup_status_observed and self.monotonic() >= startup_status_deadline:
+                    raise VastSmokeError(
+                        "Runtime startup-status endpoint did not become reachable in time: "
+                        f"{last_error}"
+                    )
             try:
                 response = self.runtime.get(models_url)
                 runtime_report["models_status"] = int(response.status_code)
@@ -1756,6 +1881,7 @@ class VastSmokeRunner:
                 "launch_timeout_seconds": config.launch_timeout_seconds,
                 "launch_progress_grace_seconds": config.launch_progress_grace_seconds,
                 "readiness_timeout_seconds": config.readiness_timeout_seconds,
+                "startup_status_connect_timeout_seconds": config.startup_status_connect_timeout_seconds,
                 "benchmark_requests": int(config.benchmark_requests),
                 "benchmark_concurrency": int(config.benchmark_concurrency),
                 "benchmark_profile": config.benchmark_profile,
@@ -1783,6 +1909,7 @@ class VastSmokeRunner:
                 max_price=config.max_price,
                 min_cuda_max_good=config.min_cuda_max_good,
                 model=config.model,
+                runtime_profile=config.runtime_profile,
                 preferred_offer_id=config.preferred_offer_id,
                 exclude_offer_ids=config.exclude_offer_ids,
                 exclude_machine_ids=config.exclude_machine_ids,
@@ -1810,7 +1937,7 @@ class VastSmokeRunner:
                     instance_id = self.api.create_instance(
                         _int_value(selected_offer, "id"),
                         image=config.image,
-                        env=build_launch_env(config),
+                        env=build_launch_env(config, selected_offer=selected_offer),
                         disk_gb=config.disk_gb,
                         label=config.label,
                         runtype=config.runtype,
@@ -1851,6 +1978,7 @@ class VastSmokeRunner:
                         base_url,
                         startup_status_url=startup_status_url,
                         timeout_seconds=config.readiness_timeout_seconds,
+                        startup_status_connect_timeout_seconds=config.startup_status_connect_timeout_seconds,
                         poll_interval_seconds=config.poll_interval_seconds,
                     )
                     successful_launch_started_at = candidate_launch_started_at
@@ -2045,6 +2173,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Extra boot time allowed while Vast reports image pull or checksum progress after the launch timeout.",
     )
     parser.add_argument("--readiness-timeout-seconds", type=float, default=DEFAULT_READINESS_TIMEOUT_SECONDS, help="How long to wait for /v1/models to come up.")
+    parser.add_argument(
+        "--startup-status-connect-timeout-seconds",
+        type=float,
+        default=DEFAULT_STARTUP_STATUS_CONNECT_TIMEOUT_SECONDS,
+        help="How long to wait for the runtime startup-status endpoint before treating the host as unusable.",
+    )
     parser.add_argument("--poll-interval-seconds", type=float, default=DEFAULT_POLL_INTERVAL_SECONDS, help="Polling interval for Vast and runtime readiness.")
     parser.add_argument("--api", choices=("auto", "embeddings", "responses", "chat_completions"), default="auto", help="Smoke probe type to run after /v1/models succeeds.")
     parser.add_argument("--runtype", default=DEFAULT_VAST_LAUNCH_PROFILE.runtype, help="Vast runtype to use. Defaults to the runtime profile launch metadata.")
@@ -2196,6 +2330,10 @@ def build_config_from_args(args: argparse.Namespace) -> VastSmokeConfig:
             float(getattr(args, "launch_progress_grace_seconds", DEFAULT_LAUNCH_PROGRESS_GRACE_SECONDS)),
         ),
         readiness_timeout_seconds=max(30.0, float(args.readiness_timeout_seconds)),
+        startup_status_connect_timeout_seconds=max(
+            1.0,
+            float(getattr(args, "startup_status_connect_timeout_seconds", DEFAULT_STARTUP_STATUS_CONNECT_TIMEOUT_SECONDS)),
+        ),
         poll_interval_seconds=max(1.0, float(args.poll_interval_seconds)),
         api_kind=str(args.api).strip().lower(),
         smoke_test_api_path=expected_api_path_for(

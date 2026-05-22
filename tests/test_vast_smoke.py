@@ -120,6 +120,20 @@ class FakeRuntimeProbeClient:
         return result
 
 
+class AlwaysFailRuntimeProbeClient:
+    def __init__(self) -> None:
+        self.get_calls: list[str] = []
+        self.post_calls: list[tuple[str, dict[str, object]]] = []
+
+    def get(self, url: str):
+        self.get_calls.append(url)
+        raise vast_smoke.httpx.ConnectError("connection refused")
+
+    def post(self, url: str, *, json_body: dict[str, object]):
+        self.post_calls.append((url, dict(json_body)))
+        raise vast_smoke.httpx.ConnectError("connection refused")
+
+
 class FakeDeleteClient:
     def __init__(self, responses: list[FakeResponse]) -> None:
         self.responses = list(responses)
@@ -282,6 +296,77 @@ def test_gemma_offer_policy_requires_5060_ti_runtime_fit() -> None:
     )
 
     assert selected["id"] == 2
+
+
+def test_gemma_offer_policy_allows_compatible_gpu_for_generic_vast_profile() -> None:
+    selected = vast_smoke.choose_cheapest_offer(
+        [
+            {
+                "id": 1,
+                "gpu_name": "RTX 4070S Ti",
+                "gpu_ram": 16384,
+                "gpu_frac": 0.125,
+                "dph_total": 0.03,
+                "reliability": 0.999,
+                "inet_down": 900,
+                "disk_space": 120,
+                "direct_port_count": 4,
+            },
+            {
+                "id": 2,
+                "gpu_name": "RTX 2080 Ti",
+                "gpu_ram": 22528,
+                "dph_total": 0.04,
+                "reliability": 0.999,
+                "inet_down": 900,
+                "disk_space": 120,
+                "direct_port_count": 4,
+            },
+            {
+                "id": 3,
+                "gpu_name": "RTX 5070 Ti",
+                "gpu_ram": 16384,
+                "dph_total": 0.06,
+                "reliability": 0.999,
+                "inet_down": 900,
+                "disk_space": 120,
+                "direct_port_count": 4,
+            },
+            {
+                "id": 4,
+                "gpu_name": "RTX 5060 Ti",
+                "gpu_ram": 16384,
+                "dph_total": 0.08,
+                "reliability": 0.996,
+                "inet_down": 900,
+                "disk_space": 80,
+                "direct_port_count": 2,
+            },
+        ],
+        max_price=0.25,
+        model="google/gemma-4-E4B-it",
+        runtime_profile=vast_smoke.VAST_VLLM_SAFETENSORS_PROFILE,
+    )
+
+    assert selected["id"] == 3
+
+
+def test_build_launch_env_uses_selected_vast_gpu_metadata() -> None:
+    config = vast_smoke.VastSmokeConfig(
+        api_key="secret",
+        durable_node=True,
+        node_id="node_test",
+        node_key="key",
+        edge_control_url="https://edge.test",
+    )
+
+    env = vast_smoke.build_launch_env(
+        config,
+        selected_offer={"gpu_name": "RTX 5070 Ti", "gpu_ram": 16303},
+    )
+
+    assert env["GPU_NAME"] == "RTX 5070 Ti"
+    assert env["GPU_MEMORY_GB"] == "15.9"
 
 
 def test_offer_fit_tier_prefers_hosts_that_meet_both_vram_and_network_targets() -> None:
@@ -1064,6 +1149,47 @@ def test_runner_fails_fast_when_startup_status_reports_failure_reason() -> None:
     assert report["runtime"]["startup_status"]["status"] == "failed"
     assert report["runtime"]["startup_status"]["failure_reason"] == "model warm failed repeatedly"
     assert runtime.get_calls == ["http://114.179.27.171:40189/startup-status"]
+    assert api.destroyed == [424242]
+
+
+def test_runner_fails_fast_when_startup_status_never_accepts_connections() -> None:
+    clock = FakeClock()
+    api = FakeVastAPI(
+        offers=[{"id": 101, "gpu_name": "RTX 5070 Ti", "gpu_ram": 16303, "dph_total": 0.12, "reliability": 0.99, "inet_down": 700, "cuda_max_good": 13.0, "disk_space": 120, "direct_port_count": 4}],
+        instances=[
+            {
+                "actual_status": "running",
+                "cur_state": "running",
+                "public_ipaddr": "114.179.27.171",
+                "gpu_name": "RTX 5070 Ti",
+                "gpu_ram": 16303,
+                "dph_total": 0.12,
+                "geolocation": "Japan, JP",
+                "ports": {"8000/tcp": [{"HostPort": "40188"}], "8011/tcp": [{"HostPort": "40189"}]},
+            }
+        ],
+    )
+    runtime = AlwaysFailRuntimeProbeClient()
+    config = vast_smoke.VastSmokeConfig(
+        api_key="secret",
+        max_price=0.20,
+        startup_status_connect_timeout_seconds=3,
+        readiness_timeout_seconds=30,
+        poll_interval_seconds=1,
+    )
+
+    report = vast_smoke.VastSmokeRunner(
+        api,
+        runtime,
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+    ).run(config)
+
+    assert report["status"] == "error"
+    assert "startup-status endpoint did not become reachable" in report["error"]
+    assert report["runtime"]["startup_status_poll_error"] == "connection refused"
+    assert "http://114.179.27.171:40189/startup-status" in runtime.get_calls
+    assert "http://114.179.27.171:40188/v1/models" in runtime.get_calls
     assert api.destroyed == [424242]
 
 
