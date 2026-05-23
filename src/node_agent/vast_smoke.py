@@ -975,6 +975,15 @@ def affordable_offers(
     exclude_offer_ids: tuple[int, ...] | list[int] | None = None,
     exclude_machine_ids: tuple[str, ...] | list[str] | None = None,
 ) -> list[dict[str, Any]]:
+    preferred_offer_id = int(preferred_offer_id or 0)
+    if preferred_offer_id > 0:
+        preferred_offers = [offer for offer in offers if _int_value(offer, "id") == preferred_offer_id]
+        if not preferred_offers:
+            raise VastSmokeError(
+                f"Preferred Vast offer {preferred_offer_id} is no longer available in the latest search results. "
+                "Re-plan the fleet and retry with a fresh offer ID."
+            )
+        offers = preferred_offers
     affordable = [
         offer for offer in offers if _float_value(offer, "dph_total", default=10**9) <= float(max_price)
     ]
@@ -1063,7 +1072,6 @@ def affordable_offers(
             f"No suitable Vast offers were available at or below ${max_price:.2f}/hr "
             f"after requiring {detail}{diagnostic}"
         )
-    preferred_offer_id = int(preferred_offer_id or 0)
     selected = runtime_supported
     if preferred_offer_id > 0:
         selected = [offer for offer in selected if _int_value(offer, "id") == preferred_offer_id]

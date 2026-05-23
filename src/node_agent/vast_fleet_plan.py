@@ -19,15 +19,19 @@ from .vast_smoke import (
     VastAPI,
     VastSmokeConfig,
     VastSmokeError,
+    VAST_REPORTED_VRAM_TOLERANCE_GB,
     _config_value,
+    _float_value,
     _int_value,
     affordable_offers,
     default_vast_smoke_config_path,
     first_nonempty,
     load_vast_smoke_config,
     offer_machine_id_values,
+    offer_supports_minimum_cuda,
     parse_identity_list,
     parse_int_list,
+    runtime_policy_rejection_diagnostic,
     summarize_offer,
 )
 
@@ -58,6 +62,109 @@ def select_fleet_offers(
 
 def launch_args_for_offer(offer: Mapping[str, Any]) -> list[str]:
     return ["--preferred-offer-id", str(_int_value(dict(offer), "id"))]
+
+
+def candidate_machine_count(offers: list[dict[str, Any]]) -> int | None:
+    machine_ids: set[str] = set()
+    missing_identity = False
+    for offer in offers:
+        ids = offer_machine_id_values(offer)
+        if ids:
+            machine_ids.update(ids)
+        else:
+            missing_identity = True
+    if missing_identity:
+        return None
+    return len(machine_ids)
+
+
+def offer_matches_non_runtime_quality_floor(offer: Mapping[str, Any], config: VastSmokeConfig) -> bool:
+    offer_dict = dict(offer)
+    if _float_value(offer_dict, "dph_total", default=10**9) > float(config.max_price):
+        return False
+    if not offer_supports_minimum_cuda(offer_dict, config.min_cuda_max_good):
+        return False
+    if (
+        config.min_vram_gb is not None
+        and float(config.min_vram_gb) > 0
+        and (_float_value(offer_dict, "gpu_ram") / 1024.0) + VAST_REPORTED_VRAM_TOLERANCE_GB < float(config.min_vram_gb)
+    ):
+        return False
+    if config.disk_gb is not None and int(config.disk_gb) > 0:
+        if "disk_space" in offer_dict and _float_value(offer_dict, "disk_space") < int(config.disk_gb):
+            return False
+    if config.min_reliability is not None and float(config.min_reliability) > 0:
+        reliability = _float_value(offer_dict, "reliability") or _float_value(offer_dict, "reliability2")
+        if reliability < float(config.min_reliability):
+            return False
+    if (
+        config.min_inet_down_mbps is not None
+        and float(config.min_inet_down_mbps) > 0
+        and _float_value(offer_dict, "inet_down") < float(config.min_inet_down_mbps)
+    ):
+        return False
+    return True
+
+
+def fleet_partial_note(
+    *,
+    requested_nodes: int,
+    selected_count: int,
+    candidate_count: int,
+    unique_candidate_machines: int | None,
+    allow_same_machine: bool,
+) -> str:
+    if candidate_count <= 0:
+        return (
+            "No eligible full-profile Vast offers were available for the requested fleet size. "
+            "Inspect market_diagnostics.rejection_summary before relaxing any safety floor."
+        )
+    if candidate_count < requested_nodes:
+        return (
+            f"Only {candidate_count} eligible full-profile Vast offer(s) were available for "
+            f"{requested_nodes} requested node(s). Wait for more full GPU supply, raise the price ceiling, "
+            "or choose a different runtime profile."
+        )
+    if not allow_same_machine and unique_candidate_machines is not None and unique_candidate_machines < requested_nodes:
+        return (
+            f"{candidate_count} eligible offer(s) were available, but only {unique_candidate_machines} distinct "
+            f"machine(s) could satisfy {requested_nodes} requested node(s). Use --allow-same-machine only when "
+            "same-host correlated failure risk is acceptable."
+        )
+    return (
+        f"Only {selected_count} offer(s) could be selected for {requested_nodes} requested node(s). "
+        "Inspect selected_offers and market_diagnostics before launching."
+    )
+
+
+def market_diagnostics(
+    offers: list[dict[str, Any]],
+    candidates: list[dict[str, Any]],
+    selected: list[dict[str, Any]],
+    *,
+    config: VastSmokeConfig,
+    requested_nodes: int,
+    allow_same_machine: bool,
+) -> dict[str, Any]:
+    non_runtime_floor_matches = [
+        offer for offer in offers if offer_matches_non_runtime_quality_floor(offer, config)
+    ]
+    unique_candidate_machines = candidate_machine_count(candidates)
+    return {
+        "searched_offer_count": len(offers),
+        "non_runtime_quality_floor_count": len(non_runtime_floor_matches),
+        "eligible_candidate_count": len(candidates),
+        "selected_count": len(selected),
+        "requested_nodes": requested_nodes,
+        "allow_same_machine": allow_same_machine,
+        "unique_candidate_machine_count": unique_candidate_machines,
+        "rejection_summary": runtime_policy_rejection_diagnostic(
+            non_runtime_floor_matches,
+            model=config.model,
+            runtime_profile=config.runtime_profile,
+        ).strip()
+        or None,
+    }
 
 
 def build_config_from_args(args: argparse.Namespace) -> VastSmokeConfig:
@@ -120,6 +227,14 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
     )
     requested_nodes = max(1, int(args.nodes))
     status = "ok" if len(selected) >= requested_nodes else "partial"
+    diagnostics = market_diagnostics(
+        offers,
+        candidates,
+        selected,
+        config=config,
+        requested_nodes=requested_nodes,
+        allow_same_machine=bool(args.allow_same_machine),
+    )
     return {
         "status": status,
         "requested": {
@@ -151,12 +266,16 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
             []
             if len(selected) >= requested_nodes
             else [
-                (
-                    "Not enough distinct eligible Vast offers were available for the requested fleet size. "
-                    "Rerun with --offer-limit higher, --max-price higher, or --allow-same-machine if sharing a host is intentional."
+                fleet_partial_note(
+                    requested_nodes=requested_nodes,
+                    selected_count=len(selected),
+                    candidate_count=len(candidates),
+                    unique_candidate_machines=diagnostics["unique_candidate_machine_count"],
+                    allow_same_machine=bool(args.allow_same_machine),
                 )
             ]
         ),
+        "market_diagnostics": diagnostics,
     }
 
 

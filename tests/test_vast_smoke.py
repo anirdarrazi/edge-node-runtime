@@ -2109,6 +2109,31 @@ def test_affordable_offers_explains_fractional_gpu_runtime_policy_rejections() -
     assert "gpu_frac=0.125" in message
 
 
+def test_affordable_offers_reports_stale_preferred_offer_ids() -> None:
+    with pytest.raises(vast_smoke.VastSmokeError, match="no longer available"):
+        vast_smoke.affordable_offers(
+            [
+                {
+                    "id": 1001,
+                    "gpu_name": "RTX 5060 Ti",
+                    "gpu_ram": 16311,
+                    "disk_space": 120,
+                    "dph_total": 0.11,
+                    "reliability": 0.995,
+                    "inet_down": 1000,
+                    "cuda_max_good": 13.0,
+                    "gpu_frac": 1.0,
+                    "direct_port_count": 16,
+                }
+            ],
+            max_price=0.20,
+            min_cuda_max_good=12.9,
+            model="google/gemma-4-E4B-it",
+            runtime_profile="rtx_5060_ti_16gb_gemma4_e4b_it",
+            preferred_offer_id=2002,
+        )
+
+
 def test_affordable_offers_support_fleet_offer_and_machine_exclusions() -> None:
     offers = vast_smoke.affordable_offers(
         [
@@ -2404,6 +2429,28 @@ def test_fleet_planner_selects_distinct_machine_ids() -> None:
     assert vast_fleet_plan.launch_args_for_offer(selected[0]) == ["--preferred-offer-id", "1001"]
 
 
+def test_fleet_partial_note_respects_same_machine_mode() -> None:
+    distinct_note = vast_fleet_plan.fleet_partial_note(
+        requested_nodes=2,
+        selected_count=1,
+        candidate_count=2,
+        unique_candidate_machines=1,
+        allow_same_machine=False,
+    )
+    same_machine_note = vast_fleet_plan.fleet_partial_note(
+        requested_nodes=2,
+        selected_count=1,
+        candidate_count=1,
+        unique_candidate_machines=1,
+        allow_same_machine=True,
+    )
+
+    assert "distinct machine" in distinct_note
+    assert "same-host correlated failure risk" in distinct_note
+    assert "Only 1 eligible full-profile Vast offer" in same_machine_note
+    assert "distinct" not in same_machine_note
+
+
 def test_fleet_planner_applies_launch_quality_constraints(monkeypatch) -> None:
     captured_configs: list[vast_smoke.VastSmokeConfig] = []
 
@@ -2464,3 +2511,74 @@ def test_fleet_planner_applies_launch_quality_constraints(monkeypatch) -> None:
     assert plan["requested"]["exclude_offer_ids"] == [1004]
     assert plan["requested"]["exclude_machine_ids"] == ["host-e"]
     assert [item["offer"]["id"] for item in plan["selected_offers"]] == [1006, 1007]
+    assert plan["market_diagnostics"]["searched_offer_count"] == 7
+    assert plan["market_diagnostics"]["eligible_candidate_count"] == 2
+
+
+def test_fleet_planner_reports_partial_market_diagnostics(monkeypatch) -> None:
+    class PlanningVastAPI:
+        def __init__(self, api_key: str) -> None:
+            self.api_key = api_key
+
+        def search_offers(self, config: vast_smoke.VastSmokeConfig) -> list[dict[str, object]]:
+            return [
+                {
+                    "id": 1001,
+                    "machine_id": "host-a",
+                    "gpu_name": "RTX 5060 Ti",
+                    "gpu_ram": 16311,
+                    "disk_space": 120,
+                    "dph_total": 0.11,
+                    "reliability": 0.997,
+                    "inet_down": 1200,
+                    "cuda_max_good": 13.0,
+                    "gpu_frac": 1.0,
+                    "direct_port_count": 16,
+                },
+                {
+                    "id": 1002,
+                    "machine_id": "host-b",
+                    "gpu_name": "RTX 5060 Ti",
+                    "gpu_ram": 16311,
+                    "disk_space": 120,
+                    "dph_total": 0.12,
+                    "reliability": 0.997,
+                    "inet_down": 1200,
+                    "cuda_max_good": 13.0,
+                    "gpu_frac": 0.125,
+                    "direct_port_count": 16,
+                },
+            ]
+
+    monkeypatch.setattr(vast_fleet_plan, "VastAPI", PlanningVastAPI)
+
+    plan = vast_fleet_plan.build_plan(
+        vast_fleet_plan.parse_args(
+            [
+                "--api-key",
+                "secret",
+                "--nodes",
+                "2",
+                "--model",
+                "google/gemma-4-E4B-it",
+                "--runtime-profile",
+                "rtx_5060_ti_16gb_gemma4_e4b_it",
+                "--max-price",
+                "0.20",
+                "--disk-gb",
+                "80",
+                "--min-vram-gb",
+                "15",
+                "--min-reliability",
+                "0.99",
+                "--min-inet-down-mbps",
+                "1000",
+            ]
+        )
+    )
+
+    assert plan["status"] == "partial"
+    assert plan["candidate_count"] == 1
+    assert plan["market_diagnostics"]["non_runtime_quality_floor_count"] == 2
+    assert "fractional GPU slice" in plan["market_diagnostics"]["rejection_summary"]
+    assert "Only 1 eligible full-profile Vast offer" in plan["notes"][0]
