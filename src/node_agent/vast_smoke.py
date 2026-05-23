@@ -216,6 +216,8 @@ class VastSmokeConfig:
     min_cuda_max_good: float | None = DEFAULT_MIN_CUDA_MAX_GOOD
     min_reliability: float = DEFAULT_MIN_RELIABILITY
     min_inet_down_mbps: float = DEFAULT_MIN_INET_DOWN_MBPS
+    apply_model_recommended_min_vram_gb: bool = True
+    apply_model_recommended_min_inet_down_mbps: bool = True
     offer_limit: int = DEFAULT_OFFER_LIMIT
     preferred_offer_id: int | None = None
     exclude_offer_ids: tuple[int, ...] = ()
@@ -286,11 +288,14 @@ class VastSmokeConfig:
             recommended = recommended_vast_smoke_max_context_tokens(self.model)
             if recommended != 32768:
                 object.__setattr__(self, "max_context_tokens", recommended)
-        if float(self.min_vram_gb) == DEFAULT_MIN_VRAM_GB:
+        if self.apply_model_recommended_min_vram_gb and float(self.min_vram_gb) == DEFAULT_MIN_VRAM_GB:
             recommended_vram = recommended_vast_smoke_min_vram_gb(self.model)
             if recommended_vram != DEFAULT_MIN_VRAM_GB:
                 object.__setattr__(self, "min_vram_gb", recommended_vram)
-        if float(self.min_inet_down_mbps) == DEFAULT_MIN_INET_DOWN_MBPS:
+        if (
+            self.apply_model_recommended_min_inet_down_mbps
+            and float(self.min_inet_down_mbps) == DEFAULT_MIN_INET_DOWN_MBPS
+        ):
             recommended_inet = recommended_vast_smoke_min_inet_down_mbps(self.model)
             if recommended_inet != DEFAULT_MIN_INET_DOWN_MBPS:
                 object.__setattr__(self, "min_inet_down_mbps", recommended_inet)
@@ -996,6 +1001,86 @@ def runtime_policy_rejection_diagnostic(
     return f" Runtime policy rejection summary: {reason_text}. Examples: {example_text}."
 
 
+def offer_quality_rejection_reason(
+    offer: Mapping[str, Any],
+    *,
+    max_price: float,
+    min_cuda_max_good: float | None = None,
+    min_vram_gb: float | None = None,
+    disk_gb: int | None = None,
+    min_reliability: float | None = None,
+    min_inet_down_mbps: float | None = None,
+) -> str | None:
+    offer_dict = dict(offer)
+    if _float_value(offer_dict, "dph_total", default=10**9) > float(max_price):
+        return "above price ceiling"
+    if not offer_supports_minimum_cuda(offer_dict, min_cuda_max_good):
+        return "below CUDA capability floor"
+    if (
+        min_vram_gb is not None
+        and float(min_vram_gb) > 0
+        and (_float_value(offer_dict, "gpu_ram") / 1024.0) + VAST_REPORTED_VRAM_TOLERANCE_GB < float(min_vram_gb)
+    ):
+        return "below VRAM floor"
+    if (
+        disk_gb is not None
+        and int(disk_gb) > 0
+        and "disk_space" in offer_dict
+        and _float_value(offer_dict, "disk_space") < int(disk_gb)
+    ):
+        return "below disk floor"
+    if min_reliability is not None and float(min_reliability) > 0:
+        reliability = _float_value(offer_dict, "reliability") or _float_value(offer_dict, "reliability2")
+        if reliability < float(min_reliability):
+            return "below reliability floor"
+    if (
+        min_inet_down_mbps is not None
+        and float(min_inet_down_mbps) > 0
+        and _float_value(offer_dict, "inet_down") < float(min_inet_down_mbps)
+    ):
+        return "below network floor"
+    return None
+
+
+def quality_rejection_diagnostic(
+    offers: list[dict[str, Any]],
+    *,
+    max_price: float,
+    min_cuda_max_good: float | None = None,
+    min_vram_gb: float | None = None,
+    disk_gb: int | None = None,
+    min_reliability: float | None = None,
+    min_inet_down_mbps: float | None = None,
+) -> str:
+    reasons: dict[str, int] = {}
+    examples: list[str] = []
+    for offer in offers:
+        reason = offer_quality_rejection_reason(
+            offer,
+            max_price=max_price,
+            min_cuda_max_good=min_cuda_max_good,
+            min_vram_gb=min_vram_gb,
+            disk_gb=disk_gb,
+            min_reliability=min_reliability,
+            min_inet_down_mbps=min_inet_down_mbps,
+        )
+        if not reason:
+            continue
+        reasons[reason] = reasons.get(reason, 0) + 1
+        if len(examples) < 3:
+            offer_id = _int_value(offer, "id")
+            gpu_name = _normalized_offer_gpu_name(offer) or "unknown gpu"
+            hourly = _float_value(offer, "dph_total", default=0.0)
+            reliability = _float_value(offer, "reliability") or _float_value(offer, "reliability2")
+            examples.append(f"{offer_id}:{gpu_name}:${hourly:.3f}/hr:rel={reliability:.3f}:{reason}")
+    if not reasons:
+        return ""
+    top_reasons = sorted(reasons.items(), key=lambda item: (-item[1], item[0]))[:3]
+    reason_text = ", ".join(f"{count} {reason}" for reason, count in top_reasons)
+    example_text = "; ".join(examples)
+    return f" Quality filter rejection summary: {reason_text}. Examples: {example_text}."
+
+
 def choose_cheapest_offer(
     offers: list[dict[str, Any]],
     *,
@@ -1110,6 +1195,15 @@ def affordable_offers(
             model=model,
             runtime_profile=runtime_profile,
         )
+        quality_diagnostic = quality_rejection_diagnostic(
+            affordable,
+            max_price=max_price,
+            min_cuda_max_good=min_cuda_max_good,
+            min_vram_gb=min_vram_gb,
+            disk_gb=disk_gb,
+            min_reliability=min_reliability,
+            min_inet_down_mbps=min_inet_down_mbps,
+        )
         if runtime_profile_requires_rtx_5060_ti_gemma_policy(runtime_profile):
             detail = (
                 "an RTX 5060 Ti 16GB host with enough disk and direct ports "
@@ -1122,7 +1216,7 @@ def affordable_offers(
             )
         raise VastSmokeError(
             f"No suitable Vast offers were available at or below ${max_price:.2f}/hr "
-            f"after requiring {detail}{diagnostic}"
+            f"after requiring {detail}{diagnostic}{quality_diagnostic}"
         )
     selected = runtime_supported
     if preferred_offer_id > 0:
@@ -2376,7 +2470,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--label", default="", help="Human-readable Vast instance label for launch tracking and cleanup.")
     parser.add_argument("--max-price", type=float, default=DEFAULT_VAST_LAUNCH_PROFILE.safe_price_ceiling_usd, help="Maximum hourly price in USD.")
     parser.add_argument("--disk-gb", type=int, default=DEFAULT_DISK_GB, help="Requested disk size in GB.")
-    parser.add_argument("--min-vram-gb", type=float, default=DEFAULT_MIN_VRAM_GB, help="Minimum GPU VRAM in GB.")
+    parser.add_argument(
+        "--min-vram-gb",
+        type=float,
+        default=None,
+        help="Minimum GPU VRAM in GB. Defaults to the selected model/runtime recommendation.",
+    )
     parser.add_argument(
         "--min-cuda-max-good",
         type=float,
@@ -2384,7 +2483,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Minimum cuda_max_good host capability for the selected runtime image.",
     )
     parser.add_argument("--min-reliability", type=float, default=DEFAULT_MIN_RELIABILITY, help="Minimum host reliability score.")
-    parser.add_argument("--min-inet-down-mbps", type=float, default=DEFAULT_MIN_INET_DOWN_MBPS, help="Minimum internet download speed in Mbps.")
+    parser.add_argument(
+        "--min-inet-down-mbps",
+        type=float,
+        default=None,
+        help="Minimum internet download speed in Mbps. Defaults to the selected model/runtime recommendation.",
+    )
     parser.add_argument("--offer-limit", type=int, default=DEFAULT_OFFER_LIMIT, help="Maximum number of Vast offers to inspect.")
     parser.add_argument("--preferred-offer-id", type=int, default=0, help="Launch only this pre-planned Vast offer ID.")
     parser.add_argument(
@@ -2568,10 +2672,20 @@ def build_config_from_args(args: argparse.Namespace) -> VastSmokeConfig:
         max_price=float(args.max_price),
         image=str(args.image).strip() or DEFAULT_VAST_SMOKE_IMAGE,
         disk_gb=max(1, int(args.disk_gb)),
-        min_vram_gb=max(1.0, float(args.min_vram_gb)),
+        min_vram_gb=max(
+            1.0,
+            float(args.min_vram_gb) if args.min_vram_gb is not None else DEFAULT_MIN_VRAM_GB,
+        ),
         min_cuda_max_good=float(args.min_cuda_max_good) if args.min_cuda_max_good is not None else None,
         min_reliability=max(0.0, min(1.0, float(args.min_reliability))),
-        min_inet_down_mbps=max(0.0, float(args.min_inet_down_mbps)),
+        min_inet_down_mbps=max(
+            0.0,
+            float(args.min_inet_down_mbps)
+            if args.min_inet_down_mbps is not None
+            else DEFAULT_MIN_INET_DOWN_MBPS,
+        ),
+        apply_model_recommended_min_vram_gb=args.min_vram_gb is None,
+        apply_model_recommended_min_inet_down_mbps=args.min_inet_down_mbps is None,
         offer_limit=max(1, int(args.offer_limit)),
         preferred_offer_id=(
             max(1, int(getattr(args, "preferred_offer_id", 0)))

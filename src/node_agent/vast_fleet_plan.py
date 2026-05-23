@@ -19,18 +19,17 @@ from .vast_smoke import (
     VastAPI,
     VastSmokeConfig,
     VastSmokeError,
-    VAST_REPORTED_VRAM_TOLERANCE_GB,
     _config_value,
-    _float_value,
     _int_value,
     affordable_offers,
     default_vast_smoke_config_path,
     first_nonempty,
     load_vast_smoke_config,
     offer_machine_id_values,
-    offer_supports_minimum_cuda,
+    offer_quality_rejection_reason,
     parse_identity_list,
     parse_int_list,
+    quality_rejection_diagnostic,
     runtime_policy_rejection_diagnostic,
     summarize_offer,
 )
@@ -79,31 +78,18 @@ def candidate_machine_count(offers: list[dict[str, Any]]) -> int | None:
 
 
 def offer_matches_non_runtime_quality_floor(offer: Mapping[str, Any], config: VastSmokeConfig) -> bool:
-    offer_dict = dict(offer)
-    if _float_value(offer_dict, "dph_total", default=10**9) > float(config.max_price):
-        return False
-    if not offer_supports_minimum_cuda(offer_dict, config.min_cuda_max_good):
-        return False
-    if (
-        config.min_vram_gb is not None
-        and float(config.min_vram_gb) > 0
-        and (_float_value(offer_dict, "gpu_ram") / 1024.0) + VAST_REPORTED_VRAM_TOLERANCE_GB < float(config.min_vram_gb)
-    ):
-        return False
-    if config.disk_gb is not None and int(config.disk_gb) > 0:
-        if "disk_space" in offer_dict and _float_value(offer_dict, "disk_space") < int(config.disk_gb):
-            return False
-    if config.min_reliability is not None and float(config.min_reliability) > 0:
-        reliability = _float_value(offer_dict, "reliability") or _float_value(offer_dict, "reliability2")
-        if reliability < float(config.min_reliability):
-            return False
-    if (
-        config.min_inet_down_mbps is not None
-        and float(config.min_inet_down_mbps) > 0
-        and _float_value(offer_dict, "inet_down") < float(config.min_inet_down_mbps)
-    ):
-        return False
-    return True
+    return (
+        offer_quality_rejection_reason(
+            offer,
+            max_price=config.max_price,
+            min_cuda_max_good=config.min_cuda_max_good,
+            min_vram_gb=config.min_vram_gb,
+            disk_gb=config.disk_gb,
+            min_reliability=config.min_reliability,
+            min_inet_down_mbps=config.min_inet_down_mbps,
+        )
+        is None
+    )
 
 
 def fleet_partial_note(
@@ -158,6 +144,16 @@ def market_diagnostics(
         "requested_nodes": requested_nodes,
         "allow_same_machine": allow_same_machine,
         "unique_candidate_machine_count": unique_candidate_machines,
+        "quality_rejection_summary": quality_rejection_diagnostic(
+            offers,
+            max_price=config.max_price,
+            min_cuda_max_good=config.min_cuda_max_good,
+            min_vram_gb=config.min_vram_gb,
+            disk_gb=config.disk_gb,
+            min_reliability=config.min_reliability,
+            min_inet_down_mbps=config.min_inet_down_mbps,
+        ).strip()
+        or None,
         "rejection_summary": runtime_policy_rejection_diagnostic(
             non_runtime_floor_matches,
             model=config.model,
@@ -185,10 +181,20 @@ def build_config_from_args(args: argparse.Namespace) -> VastSmokeConfig:
         model=str(args.model or DEFAULT_VAST_SMOKE_MODEL).strip() or DEFAULT_VAST_SMOKE_MODEL,
         max_price=float(args.max_price),
         disk_gb=max(1, int(args.disk_gb)),
-        min_vram_gb=max(1.0, float(args.min_vram_gb)),
+        min_vram_gb=max(
+            1.0,
+            float(args.min_vram_gb) if args.min_vram_gb is not None else DEFAULT_MIN_VRAM_GB,
+        ),
         min_cuda_max_good=float(args.min_cuda_max_good) if args.min_cuda_max_good is not None else None,
         min_reliability=max(0.0, min(1.0, float(args.min_reliability))),
-        min_inet_down_mbps=max(0.0, float(args.min_inet_down_mbps)),
+        min_inet_down_mbps=max(
+            0.0,
+            float(args.min_inet_down_mbps)
+            if args.min_inet_down_mbps is not None
+            else DEFAULT_MIN_INET_DOWN_MBPS,
+        ),
+        apply_model_recommended_min_vram_gb=args.min_vram_gb is None,
+        apply_model_recommended_min_inet_down_mbps=args.min_inet_down_mbps is None,
         offer_limit=max(1, int(args.offer_limit)),
         runtime_profile=str(args.runtime_profile or DEFAULT_DURABLE_RUNTIME_PROFILE).strip()
         or DEFAULT_DURABLE_RUNTIME_PROFILE,
@@ -294,10 +300,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--model", default=DEFAULT_VAST_SMOKE_MODEL, help="Model the fleet will serve.")
     parser.add_argument("--max-price", type=float, default=DEFAULT_VAST_LAUNCH_PROFILE.safe_price_ceiling_usd, help="Maximum hourly price in USD.")
     parser.add_argument("--disk-gb", type=int, default=DEFAULT_DISK_GB, help="Minimum disk size in GB.")
-    parser.add_argument("--min-vram-gb", type=float, default=DEFAULT_MIN_VRAM_GB, help="Minimum GPU VRAM in GB.")
+    parser.add_argument(
+        "--min-vram-gb",
+        type=float,
+        default=None,
+        help="Minimum GPU VRAM in GB. Defaults to the selected model/runtime recommendation.",
+    )
     parser.add_argument("--min-cuda-max-good", type=float, default=DEFAULT_MIN_CUDA_MAX_GOOD, help="Minimum cuda_max_good host capability.")
     parser.add_argument("--min-reliability", type=float, default=DEFAULT_MIN_RELIABILITY, help="Minimum host reliability score.")
-    parser.add_argument("--min-inet-down-mbps", type=float, default=DEFAULT_MIN_INET_DOWN_MBPS, help="Minimum internet download speed in Mbps.")
+    parser.add_argument(
+        "--min-inet-down-mbps",
+        type=float,
+        default=None,
+        help="Minimum internet download speed in Mbps. Defaults to the selected model/runtime recommendation.",
+    )
     parser.add_argument("--runtime-profile", default=DEFAULT_DURABLE_RUNTIME_PROFILE, help="Runtime profile the planned nodes will advertise.")
     parser.add_argument("--offer-limit", type=int, default=DEFAULT_OFFER_LIMIT, help="Maximum number of Vast offers to inspect.")
     parser.add_argument(

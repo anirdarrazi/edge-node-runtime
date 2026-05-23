@@ -1650,6 +1650,56 @@ def test_build_config_defaults_follow_vast_launch_profile() -> None:
     assert config.offer_limit == 200
 
 
+def test_build_config_honors_explicit_model_floor_overrides() -> None:
+    defaulted = vast_smoke.build_config_from_args(
+        vast_smoke.parse_args(["--api-key", "secret", "--model", "google/gemma-4-E4B-it"])
+    )
+    explicit = vast_smoke.build_config_from_args(
+        vast_smoke.parse_args(
+            [
+                "--api-key",
+                "secret",
+                "--model",
+                "google/gemma-4-E4B-it",
+                "--min-vram-gb",
+                "8",
+                "--min-inet-down-mbps",
+                "250",
+            ]
+        )
+    )
+
+    assert defaulted.min_vram_gb == 15.0
+    assert defaulted.min_inet_down_mbps == 600.0
+    assert explicit.min_vram_gb == 8.0
+    assert explicit.min_inet_down_mbps == 250.0
+
+
+def test_fleet_config_honors_explicit_model_floor_overrides() -> None:
+    defaulted = vast_fleet_plan.build_config_from_args(
+        vast_fleet_plan.parse_args(["--api-key", "secret", "--model", "google/gemma-4-E4B-it"])
+    )
+    explicit = vast_fleet_plan.build_config_from_args(
+        vast_fleet_plan.parse_args(
+            [
+                "--api-key",
+                "secret",
+                "--model",
+                "google/gemma-4-E4B-it",
+                "--min-vram-gb",
+                "8",
+                "--min-inet-down-mbps",
+                "250",
+            ]
+        )
+    )
+
+    assert defaulted.min_vram_gb == 15.0
+    assert defaulted.min_inet_down_mbps == 600.0
+    assert explicit.min_vram_gb == 8.0
+    assert explicit.min_inet_down_mbps == 250.0
+
+
 def test_durable_gemma_defaults_keep_the_local_reservoir_shallow() -> None:
     config = vast_smoke.build_config_from_args(
         vast_smoke.parse_args(
@@ -2151,6 +2201,52 @@ def test_affordable_offers_explains_fractional_gpu_runtime_policy_rejections() -
     assert "gpu_frac=0.125" in message
 
 
+def test_affordable_offers_reports_quality_floor_rejections_with_runtime_rejections() -> None:
+    with pytest.raises(vast_smoke.VastSmokeError) as exc_info:
+        vast_smoke.affordable_offers(
+            [
+                {
+                    "id": 1,
+                    "gpu_name": "RTX 5060 Ti",
+                    "gpu_ram": 16311,
+                    "disk_space": 120,
+                    "dph_total": 0.11,
+                    "reliability": 0.900,
+                    "inet_down": 1000,
+                    "cuda_max_good": 13.0,
+                    "gpu_frac": 1.0,
+                    "direct_port_count": 16,
+                },
+                {
+                    "id": 2,
+                    "gpu_name": "RTX 5060 Ti",
+                    "gpu_ram": 16311,
+                    "disk_space": 120,
+                    "dph_total": 0.12,
+                    "reliability": 0.995,
+                    "inet_down": 1000,
+                    "cuda_max_good": 13.0,
+                    "gpu_frac": 0.125,
+                    "direct_port_count": 16,
+                },
+            ],
+            max_price=0.20,
+            min_cuda_max_good=12.9,
+            min_vram_gb=15,
+            disk_gb=80,
+            min_reliability=0.98,
+            min_inet_down_mbps=250,
+            model="google/gemma-4-E4B-it",
+            runtime_profile="rtx_5060_ti_16gb_gemma4_e4b_it",
+        )
+
+    message = str(exc_info.value)
+    assert "Runtime policy rejection summary" in message
+    assert "fractional GPU slice" in message
+    assert "Quality filter rejection summary" in message
+    assert "below reliability floor" in message
+
+
 def test_affordable_offers_reports_stale_preferred_offer_ids() -> None:
     with pytest.raises(vast_smoke.VastSmokeError, match="no longer available"):
         vast_smoke.affordable_offers(
@@ -2590,6 +2686,19 @@ def test_fleet_planner_reports_partial_market_diagnostics(monkeypatch) -> None:
                     "gpu_frac": 0.125,
                     "direct_port_count": 16,
                 },
+                {
+                    "id": 1003,
+                    "machine_id": "host-c",
+                    "gpu_name": "RTX 5060 Ti",
+                    "gpu_ram": 16311,
+                    "disk_space": 120,
+                    "dph_total": 0.13,
+                    "reliability": 0.900,
+                    "inet_down": 1200,
+                    "cuda_max_good": 13.0,
+                    "gpu_frac": 1.0,
+                    "direct_port_count": 16,
+                },
             ]
 
     monkeypatch.setattr(vast_fleet_plan, "VastAPI", PlanningVastAPI)
@@ -2622,5 +2731,6 @@ def test_fleet_planner_reports_partial_market_diagnostics(monkeypatch) -> None:
     assert plan["status"] == "partial"
     assert plan["candidate_count"] == 1
     assert plan["market_diagnostics"]["non_runtime_quality_floor_count"] == 2
+    assert "below reliability floor" in plan["market_diagnostics"]["quality_rejection_summary"]
     assert "fractional GPU slice" in plan["market_diagnostics"]["rejection_summary"]
     assert "Only 1 eligible full-profile Vast offer" in plan["notes"][0]
