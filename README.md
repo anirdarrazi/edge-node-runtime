@@ -140,7 +140,7 @@ python -m node_agent.vast_fleet_plan \
   --disk-gb 80
 ```
 
-The planner now uses the same host-quality constraints as the launcher and inspects 50 offers by default. Keep the planned `--preferred-offer-id` arguments with each launch, and use the generated exclusion flags or `--allow-same-machine` intentionally when building multi-node fleets.
+The planner now uses the same host-quality constraints as the launcher and inspects 50 offers by default. Keep the planned `--preferred-offer-id` arguments with each launch, and use the generated exclusion flags or `--allow-same-machine` intentionally when building multi-node fleets. If the Vast market only exposes fractional RTX 5060 Ti slices, the planner rejects them for this 32K Gemma profile and reports a runtime-policy rejection summary instead of launching a node that is likely to fail or contend for memory.
 
 Required runtime secrets are read from environment variables: `VAST_API_KEY`, `HUGGING_FACE_HUB_TOKEN`, `EDGE_CONTROL_URL`, `NODE_ID`, and `NODE_KEY`. Do not commit these values.
 

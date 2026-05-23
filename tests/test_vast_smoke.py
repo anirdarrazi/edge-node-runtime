@@ -2076,6 +2076,39 @@ def test_affordable_offers_enforce_capacity_floor_locally() -> None:
     assert [offer["id"] for offer in offers] == [3]
 
 
+def test_affordable_offers_explains_fractional_gpu_runtime_policy_rejections() -> None:
+    with pytest.raises(vast_smoke.VastSmokeError) as exc_info:
+        vast_smoke.affordable_offers(
+            [
+                {
+                    "id": 1,
+                    "gpu_name": "RTX 5060 Ti",
+                    "gpu_ram": 16311,
+                    "disk_space": 120,
+                    "dph_total": 0.11,
+                    "reliability": 0.995,
+                    "inet_down": 1000,
+                    "cuda_max_good": 13.0,
+                    "gpu_frac": 0.125,
+                    "direct_port_count": 16,
+                }
+            ],
+            max_price=0.20,
+            min_cuda_max_good=12.9,
+            min_vram_gb=15,
+            disk_gb=80,
+            min_reliability=0.98,
+            min_inet_down_mbps=250,
+            model="google/gemma-4-E4B-it",
+            runtime_profile="rtx_5060_ti_16gb_gemma4_e4b_it",
+        )
+
+    message = str(exc_info.value)
+    assert "Runtime policy rejection summary" in message
+    assert "fractional GPU slice" in message
+    assert "gpu_frac=0.125" in message
+
+
 def test_affordable_offers_support_fleet_offer_and_machine_exclusions() -> None:
     offers = vast_smoke.affordable_offers(
         [

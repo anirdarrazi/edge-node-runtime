@@ -868,6 +868,82 @@ def offer_supports_rtx_5060_ti_gemma_policy(
     return offer_supports_required_direct_ports(offer, 2)
 
 
+def offer_rtx_5060_ti_gemma_policy_rejection_reason(
+    offer: Mapping[str, Any],
+    *,
+    model: str | None = None,
+    runtime_profile: str | None = None,
+) -> str | None:
+    offer_dict = dict(offer)
+    if offer_supports_rtx_5060_ti_gemma_policy(
+        offer_dict,
+        model=model,
+        runtime_profile=runtime_profile,
+    ):
+        return None
+    if normalized_model_lookup_key(model) != "google/gemma-4-e4b-it":
+        return "runtime profile policy mismatch"
+    gpu_name = _normalized_offer_gpu_name(offer_dict)
+    gpu_ram_gb = _float_value(offer_dict, "gpu_ram") / 1024.0
+    disk_space_gb = _float_value(offer_dict, "disk_space")
+    exact_5060_ti_required = model_requires_rtx_5060_ti_gemma_policy(
+        model,
+        runtime_profile=runtime_profile,
+    )
+    if exact_5060_ti_required and not ("5060" in gpu_name and "ti" in gpu_name):
+        return f"not RTX 5060 Ti ({gpu_name or 'unknown'})"
+    gpu_fraction = offer_gpu_fraction(offer)
+    if gpu_fraction is not None and gpu_fraction < 0.99:
+        return f"fractional GPU slice (gpu_frac={gpu_fraction:.3g})"
+    if not model_requires_rtx_5060_ti_gemma_policy(model, runtime_profile=runtime_profile):
+        if gpu_ram_gb < 15.0:
+            return f"insufficient VRAM ({gpu_ram_gb:.1f}GB)"
+        if "disk_space" in offer and disk_space_gb < DEFAULT_DISK_GB:
+            return f"insufficient disk ({disk_space_gb:.0f}GB)"
+        if not gemma_e4b_fp8_compatible_gpu_name(gpu_name):
+            return f"GPU is not FP8-compatible enough ({gpu_name or 'unknown'})"
+        if not offer_supports_required_direct_ports(offer, 2):
+            return f"not enough direct ports ({offer_direct_port_capacity(offer) or 0})"
+        return "runtime profile policy mismatch"
+    if gpu_ram_gb < 15.0 or gpu_ram_gb > 17.9:
+        return f"unexpected VRAM for RTX 5060 Ti profile ({gpu_ram_gb:.1f}GB)"
+    if "disk_space" in offer and disk_space_gb < DEFAULT_DISK_GB:
+        return f"insufficient disk ({disk_space_gb:.0f}GB)"
+    if not offer_supports_required_direct_ports(offer, 2):
+        return f"not enough direct ports ({offer_direct_port_capacity(offer) or 0})"
+    return "runtime profile policy mismatch"
+
+
+def runtime_policy_rejection_diagnostic(
+    offers: list[dict[str, Any]],
+    *,
+    model: str | None = None,
+    runtime_profile: str | None = None,
+) -> str:
+    reasons: dict[str, int] = {}
+    examples: list[str] = []
+    for offer in offers:
+        reason = offer_rtx_5060_ti_gemma_policy_rejection_reason(
+            offer,
+            model=model,
+            runtime_profile=runtime_profile,
+        )
+        if not reason:
+            continue
+        reasons[reason] = reasons.get(reason, 0) + 1
+        if len(examples) < 3:
+            offer_id = _int_value(offer, "id")
+            gpu_name = _normalized_offer_gpu_name(offer) or "unknown gpu"
+            hourly = _float_value(offer, "dph_total", default=0.0)
+            examples.append(f"{offer_id}:{gpu_name}:${hourly:.3f}/hr:{reason}")
+    if not reasons:
+        return ""
+    top_reasons = sorted(reasons.items(), key=lambda item: (-item[1], item[0]))[:3]
+    reason_text = ", ".join(f"{count} {reason}" for reason, count in top_reasons)
+    example_text = "; ".join(examples)
+    return f" Runtime policy rejection summary: {reason_text}. Examples: {example_text}."
+
+
 def choose_cheapest_offer(
     offers: list[dict[str, Any]],
     *,
@@ -968,6 +1044,11 @@ def affordable_offers(
         )
     ]
     if not runtime_supported:
+        diagnostic = runtime_policy_rejection_diagnostic(
+            supported,
+            model=model,
+            runtime_profile=runtime_profile,
+        )
         if runtime_profile_requires_rtx_5060_ti_gemma_policy(runtime_profile):
             detail = (
                 "an RTX 5060 Ti 16GB host with enough disk and direct ports "
@@ -980,7 +1061,7 @@ def affordable_offers(
             )
         raise VastSmokeError(
             f"No suitable Vast offers were available at or below ${max_price:.2f}/hr "
-            f"after requiring {detail}"
+            f"after requiring {detail}{diagnostic}"
         )
     preferred_offer_id = int(preferred_offer_id or 0)
     selected = runtime_supported
