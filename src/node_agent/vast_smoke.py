@@ -879,7 +879,21 @@ def offer_gpu_fraction(offer: Mapping[str, Any]) -> float | None:
 
 def offer_supports_full_gpu(offer: Mapping[str, Any]) -> bool:
     gpu_fraction = offer_gpu_fraction(offer)
-    return gpu_fraction is None or gpu_fraction >= 0.99
+    if gpu_fraction is None or gpu_fraction >= 0.99:
+        return True
+    offer_dict = dict(offer)
+    assigned_gpu_count = _int_value(offer_dict, "num_gpus", default=0)
+    gpu_ids = offer.get("gpu_ids")
+    if isinstance(gpu_ids, (list, tuple, set)):
+        assigned_gpu_count = max(assigned_gpu_count, len(gpu_ids))
+    if assigned_gpu_count < 1:
+        return False
+
+    gpu_ram_mb = _float_value(offer_dict, "gpu_ram")
+    total_gpu_ram_mb = _float_value(offer_dict, "gpu_total_ram")
+    if total_gpu_ram_mb <= 0 or gpu_ram_mb <= 0:
+        return False
+    return gpu_ram_mb + (VAST_REPORTED_VRAM_TOLERANCE_GB * 1024.0) >= total_gpu_ram_mb
 
 
 def gemma_e4b_fp8_compatible_gpu_name(gpu_name: str) -> bool:
@@ -972,8 +986,15 @@ def offer_rtx_5060_ti_gemma_policy_rejection_reason(
     if exact_5060_ti_required and not ("5060" in gpu_name and "ti" in gpu_name):
         return f"not RTX 5060 Ti ({gpu_name or 'unknown'})"
     gpu_fraction = offer_gpu_fraction(offer)
-    if gpu_fraction is not None and gpu_fraction < 0.99:
-        return f"fractional GPU slice (gpu_frac={gpu_fraction:.3g})"
+    if not offer_supports_full_gpu(offer):
+        gpu_ram_gb = _float_value(offer_dict, "gpu_ram") / 1024.0
+        total_gpu_ram_gb = _float_value(offer_dict, "gpu_total_ram") / 1024.0
+        if gpu_fraction is not None:
+            return (
+                f"fractional GPU memory slice "
+                f"(gpu_frac={gpu_fraction:.3g}, gpu_ram={gpu_ram_gb:.1f}GB, gpu_total_ram={total_gpu_ram_gb:.1f}GB)"
+            )
+        return "missing full-GPU memory evidence"
     if not model_requires_rtx_5060_ti_gemma_policy(model, runtime_profile=runtime_profile):
         if gpu_ram_gb < 15.0:
             return f"insufficient VRAM ({gpu_ram_gb:.1f}GB)"

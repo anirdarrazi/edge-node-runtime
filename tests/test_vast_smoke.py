@@ -307,6 +307,38 @@ def test_gemma_offer_policy_requires_5060_ti_runtime_fit() -> None:
     assert selected["id"] == 2
 
 
+def test_gemma_offer_policy_accepts_vast_single_gpu_slots_with_machine_fraction() -> None:
+    offers = vast_smoke.affordable_offers(
+        [
+            {
+                "id": 1,
+                "gpu_name": "RTX 5060 Ti",
+                "gpu_ram": 16311,
+                "gpu_total_ram": 16311,
+                "gpu_frac": 0.125,
+                "gpu_ids": [162459],
+                "num_gpus": 1,
+                "dph_total": 0.19,
+                "reliability": 0.996,
+                "inet_down": 900,
+                "disk_space": 120,
+                "direct_port_count": 16,
+                "cuda_max_good": 13.0,
+            }
+        ],
+        max_price=0.25,
+        min_cuda_max_good=12.9,
+        min_vram_gb=15,
+        disk_gb=80,
+        min_reliability=0.98,
+        min_inet_down_mbps=250,
+        model="google/gemma-4-E4B-it",
+        runtime_profile="rtx_5060_ti_16gb_gemma4_e4b_it",
+    )
+
+    assert [offer["id"] for offer in offers] == [1]
+
+
 def test_gemma_offer_policy_allows_compatible_gpu_for_generic_vast_profile() -> None:
     selected = vast_smoke.choose_cheapest_offer(
         [
@@ -2290,6 +2322,7 @@ def test_affordable_offers_explains_fractional_gpu_runtime_policy_rejections() -
                     "id": 1,
                     "gpu_name": "RTX 5060 Ti",
                     "gpu_ram": 16311,
+                    "gpu_total_ram": 32768,
                     "disk_space": 120,
                     "dph_total": 0.11,
                     "reliability": 0.995,
@@ -2311,7 +2344,7 @@ def test_affordable_offers_explains_fractional_gpu_runtime_policy_rejections() -
 
     message = str(exc_info.value)
     assert "Runtime policy rejection summary" in message
-    assert "fractional GPU slice" in message
+    assert "fractional GPU memory slice" in message
     assert "gpu_frac=0.125" in message
 
 
@@ -2335,6 +2368,7 @@ def test_affordable_offers_reports_quality_floor_rejections_with_runtime_rejecti
                     "id": 2,
                     "gpu_name": "RTX 5060 Ti",
                     "gpu_ram": 16311,
+                    "gpu_total_ram": 32768,
                     "disk_space": 120,
                     "dph_total": 0.12,
                     "reliability": 0.995,
@@ -2356,7 +2390,7 @@ def test_affordable_offers_reports_quality_floor_rejections_with_runtime_rejecti
 
     message = str(exc_info.value)
     assert "Runtime policy rejection summary" in message
-    assert "fractional GPU slice" in message
+    assert "fractional GPU memory slice" in message
     assert "Quality filter rejection summary" in message
     assert "below reliability floor" in message
 
@@ -2792,6 +2826,7 @@ def test_fleet_planner_reports_partial_market_diagnostics(monkeypatch) -> None:
                     "machine_id": "host-b",
                     "gpu_name": "RTX 5060 Ti",
                     "gpu_ram": 16311,
+                    "gpu_total_ram": 32768,
                     "disk_space": 120,
                     "dph_total": 0.12,
                     "reliability": 0.997,
@@ -2846,5 +2881,5 @@ def test_fleet_planner_reports_partial_market_diagnostics(monkeypatch) -> None:
     assert plan["candidate_count"] == 1
     assert plan["market_diagnostics"]["non_runtime_quality_floor_count"] == 2
     assert "below reliability floor" in plan["market_diagnostics"]["quality_rejection_summary"]
-    assert "fractional GPU slice" in plan["market_diagnostics"]["rejection_summary"]
+    assert "fractional GPU memory slice" in plan["market_diagnostics"]["rejection_summary"]
     assert "Only 1 eligible full-profile Vast offer" in plan["notes"][0]

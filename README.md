@@ -132,7 +132,7 @@ python -m node_agent.vast_fleet_plan \
   --nodes 2 \
   --model google/gemma-4-E4B-it \
   --runtime-profile rtx_5060_ti_16gb_gemma4_e4b_it \
-  --max-price 1.50 \
+  --max-price 0.25 \
   --min-vram-gb 15 \
   --min-cuda-max-good 12.9 \
   --min-reliability 0.98 \
@@ -140,7 +140,7 @@ python -m node_agent.vast_fleet_plan \
   --disk-gb 80
 ```
 
-The planner now uses the same host-quality constraints as the launcher and inspects 200 offers by default. Keep the planned `--preferred-offer-id` arguments with each launch, and use the generated exclusion flags or `--allow-same-machine` intentionally when building multi-node fleets. Vast offers can disappear between planning and launch; if a preferred offer is stale, the launcher fails before renting anything and tells the operator to re-plan. If the Vast market only exposes fractional RTX 5060 Ti slices, the planner rejects them for this 32K Gemma profile and reports a runtime-policy rejection summary instead of launching a node that is likely to fail or contend for memory. Partial fleet plans include `market_diagnostics` so operators can tell whether they are blocked by price, quality floors, runtime policy, or lack of distinct machine identities. If Vast reports a realized instance hourly cost above `--max-price` after creation, the launcher destroys that candidate before model warmup and tries the next eligible host.
+The planner now uses the same host-quality constraints as the launcher and inspects 200 offers by default. Keep the planned `--preferred-offer-id` arguments with each launch, and use the generated exclusion flags or `--allow-same-machine` intentionally when building multi-node fleets. Vast offers can disappear between planning and launch; if a preferred offer is stale, the launcher fails before renting anything and tells the operator to re-plan. Vast may report `gpu_frac < 1` for a rented slot on a larger multi-GPU host; the launcher accepts it only when the offer still assigns at least one GPU and reports full per-GPU memory through `gpu_ram` and `gpu_total_ram`. If the Vast market only exposes true partial-memory RTX 5060 Ti slices, the planner rejects them for this 32K Gemma profile and reports a runtime-policy rejection summary instead of launching a node that is likely to fail or contend for memory. Partial fleet plans include `market_diagnostics` so operators can tell whether they are blocked by price, quality floors, runtime policy, or lack of distinct machine identities. If Vast reports a realized instance hourly cost above `--max-price` after creation, the launcher destroys that candidate before model warmup and tries the next eligible host.
 
 Required runtime secrets are read from environment variables: `VAST_API_KEY`, `HUGGING_FACE_HUB_TOKEN`, `EDGE_CONTROL_URL`, `NODE_ID`, and `NODE_KEY`. Do not commit these values.
 
