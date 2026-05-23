@@ -36,6 +36,19 @@ class RecordingClient:
         return DummyResponse({"node_id": "node_123", "node_key": "key_123456789012345678901234"})
 
 
+class OperatorApiKeyEnrollClient:
+    def __init__(self):
+        self.calls = []
+
+    def post(self, path, json, headers=None):
+        self.calls.append((path, json, headers or {}))
+        if len(self.calls) == 1:
+            request = httpx.Request("POST", "http://localhost:8787/nodes/enroll")
+            response = httpx.Response(401, request=request, text='{"error":"unauthorized"}')
+            raise httpx.HTTPStatusError("legacy operator token rejected", request=request, response=response)
+        return DummyResponse({"node_id": "node_api_key", "node_key": "key_api_123456789012345678901234"})
+
+
 class FailIfCalledClient:
     def post(self, path, json):
         raise AssertionError(f"unexpected network call: {path} {json}")
@@ -134,6 +147,23 @@ def test_enroll_persists_and_restores_credentials(tmp_path: Path):
 
     assert restored_node_id == "node_123"
     assert restored_node_key == "key_123456789012345678901234"
+
+
+def test_enroll_retries_with_bearer_when_operator_api_key_is_configured(tmp_path: Path):
+    credentials_path = tmp_path / "credentials" / "node.json"
+    settings = build_settings(credentials_path, operator_token="op_api_secret")
+    client = EdgeControlClient(settings)
+    recording_client = OperatorApiKeyEnrollClient()
+    client.client = recording_client
+
+    node_id, node_key = client.enroll_if_needed()
+
+    assert node_id == "node_api_key"
+    assert node_key == "key_api_123456789012345678901234"
+    assert len(recording_client.calls) == 2
+    assert recording_client.calls[0][1]["operator_token"] == "op_api_secret"
+    assert "operator_token" not in recording_client.calls[1][1]
+    assert recording_client.calls[1][2]["Authorization"] == "Bearer op_api_secret"
 
 
 class ClaimClient:

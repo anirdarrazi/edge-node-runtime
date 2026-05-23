@@ -40,7 +40,7 @@ if DEFAULT_VAST_RUNTIME_PROFILE is None:  # pragma: no cover - guarded by static
 DEFAULT_VAST_LAUNCH_PROFILE = default_vast_launch_profile()
 DEFAULT_VAST_SMOKE_MODEL = DEFAULT_VAST_RUNTIME_PROFILE.smoke_test_model
 DEFAULT_VAST_SMOKE_API_PATH = DEFAULT_VAST_RUNTIME_PROFILE.smoke_test_api_path
-DEFAULT_OFFER_LIMIT = 50
+DEFAULT_OFFER_LIMIT = 200
 DEFAULT_MIN_VRAM_GB = 16.0
 DEFAULT_DISK_GB = DEFAULT_VAST_LAUNCH_PROFILE.min_disk_gb
 DEFAULT_MIN_CUDA_MAX_GOOD = 12.9
@@ -264,11 +264,17 @@ class VastSmokeConfig:
             has_node_id = bool(str(self.node_id or "").strip())
             has_node_key = bool(str(self.node_key or "").strip())
             has_operator_token = bool(str(self.operator_token or "").strip())
+            if has_operator_token and not (has_node_id and has_node_key) and looks_like_batchrouter_or_customer_key(self.operator_token):
+                raise VastSmokeError(
+                    "--durable-node requires an AUTONOMOUSc operator API key for node enrollment. "
+                    "The configured token looks like a BatchRouter integration/customer key; set "
+                    "AUTONOMOUSC_OPERATOR_API_KEY or OPERATOR_TOKEN instead."
+                )
             if has_node_id != has_node_key:
                 raise VastSmokeError("--node-id and --node-key must be provided together for --durable-node.")
             if not has_operator_token and not (has_node_id and has_node_key):
                 raise VastSmokeError(
-                    "--durable-node requires either --operator-token/SMOKE_OPERATOR_TOKEN for enrollment "
+                    "--durable-node requires either --operator-token/AUTONOMOUSC_OPERATOR_API_KEY for enrollment "
                     "or both --node-id and --node-key for pre-registered credentials."
                 )
             if int(self.max_context_tokens) == 32768:
@@ -297,6 +303,11 @@ def first_nonempty(*values: str | None) -> str | None:
         if candidate:
             return candidate
     return None
+
+
+def looks_like_batchrouter_or_customer_key(value: str | None) -> bool:
+    token = str(value or "").strip()
+    return token.startswith(("autc_br_", "ob_live_", "ob_test_"))
 
 
 def recommended_vast_smoke_max_context_tokens(model: str | None) -> int:
@@ -918,7 +929,7 @@ def affordable_offers(
         supported = [
             offer
             for offer in supported
-            if _float_value(offer, "disk_space") >= int(disk_gb)
+            if "disk_space" not in offer or _float_value(offer, "disk_space") >= int(disk_gb)
         ]
         if not supported:
             raise VastSmokeError(
@@ -1997,6 +2008,10 @@ class VastSmokeRunner:
                 offers,
                 max_price=config.max_price,
                 min_cuda_max_good=config.min_cuda_max_good,
+                min_vram_gb=config.min_vram_gb,
+                disk_gb=config.disk_gb,
+                min_reliability=config.min_reliability,
+                min_inet_down_mbps=config.min_inet_down_mbps,
                 model=config.model,
                 runtime_profile=config.runtime_profile,
                 preferred_offer_id=config.preferred_offer_id,
@@ -2279,7 +2294,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--operator-token",
         default="",
-        help="AUTONOMOUSc operator API key used by durable node mode to enroll a fresh node. Defaults to SMOKE_OPERATOR_TOKEN, AUTONOMOUSC_OPERATOR_API_KEY, or OPERATOR_TOKEN.",
+        help="AUTONOMOUSc operator API key used by durable node mode to enroll a fresh node. Defaults to AUTONOMOUSC_OPERATOR_API_KEY, OPERATOR_TOKEN, then legacy SMOKE_OPERATOR_TOKEN.",
     )
     parser.add_argument("--node-region", default=DEFAULT_DURABLE_NODE_REGION, help="Concrete scheduler region for durable node mode.")
     parser.add_argument("--runtime-profile", default=DEFAULT_DURABLE_RUNTIME_PROFILE, help="Runtime profile advertised by durable node mode.")
@@ -2385,9 +2400,9 @@ def build_config_from_args(args: argparse.Namespace) -> VastSmokeConfig:
     )
     operator_token = first_nonempty(
         str(getattr(args, "operator_token", "") or ""),
-        os.getenv("SMOKE_OPERATOR_TOKEN"),
         os.getenv("AUTONOMOUSC_OPERATOR_API_KEY"),
         os.getenv("OPERATOR_TOKEN"),
+        os.getenv("SMOKE_OPERATOR_TOKEN"),
         _config_value(config_values, "operator_token", "smoke_operator_token"),
     )
     vllm_extra_args = str(args.vllm_extra_args or "").strip()

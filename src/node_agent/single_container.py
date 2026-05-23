@@ -41,6 +41,7 @@ DEFAULT_STARTUP_RESPONSES_PATH = "/v1/responses"
 DEFAULT_STARTUP_CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
 DEFAULT_STARTUP_EMBEDDINGS_INPUT = ["startup readiness probe"]
 DEFAULT_STARTUP_RESPONSES_INPUT = "Reply with the single word ready."
+DEFAULT_NODE_AGENT_READY_TIMEOUT_SECONDS = 180
 DEFAULT_CHILD_RESTART_LIMIT = 12
 DEFAULT_CHILD_RESTART_WINDOW_SECONDS = 900
 DEFAULT_CHILD_RESTART_BACKOFF_SECONDS = 5
@@ -146,6 +147,91 @@ def startup_status_path_from_mapping(env: Mapping[str, str] | None = None) -> Pa
     if credentials_path:
         return Path(credentials_path).parent / DEFAULT_STARTUP_STATUS_FILENAME
     return Path(".") / DEFAULT_STARTUP_STATUS_FILENAME
+
+
+def node_agent_readiness_required(env: Mapping[str, str] | None = None) -> bool:
+    values = env or os.environ
+    if normalize_run_mode(values.get("RUN_MODE")) == SERVE_ONLY_RUN_MODE:
+        return False
+    if not env_bool_from_mapping(values, "START_NODE_AGENT", True):
+        return False
+    has_operator_token = bool(str(values.get("OPERATOR_TOKEN") or "").strip())
+    has_static_identity = bool(str(values.get("NODE_ID") or "").strip() and str(values.get("NODE_KEY") or "").strip())
+    return has_operator_token or has_static_identity
+
+
+def _read_json_object(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def node_control_plane_ready_detail(env: Mapping[str, str] | None = None) -> dict[str, Any]:
+    values = env or os.environ
+    detail: dict[str, Any] = {"node_control_plane_ready": False}
+    configured_node_id = str(values.get("NODE_ID") or "").strip()
+    configured_node_key = str(values.get("NODE_KEY") or "").strip()
+    if configured_node_id and configured_node_key:
+        detail.update({"node_id": configured_node_id, "node_credentials_source": "env"})
+    else:
+        credentials_path = Path(str(values.get("CREDENTIALS_PATH") or "/var/lib/autonomousc/credentials/node-credentials.json"))
+        credentials = _read_json_object(credentials_path)
+        node_id = str(credentials.get("node_id") or "").strip() if credentials else ""
+        node_key = str(credentials.get("node_key") or "").strip() if credentials else ""
+        if node_id and node_key:
+            detail.update({"node_id": node_id, "node_credentials_source": "file"})
+
+    node_id = str(detail.get("node_id") or "").strip()
+    attestation_path = Path(str(values.get("ATTESTATION_STATE_PATH") or "/var/lib/autonomousc/credentials/attestation-state.json"))
+    attestation = _read_json_object(attestation_path)
+    attested_node_id = str(attestation.get("node_id") or "").strip() if attestation else ""
+    attestation_status = str(attestation.get("status") or "").strip().lower() if attestation else ""
+    if attestation_status:
+        detail["node_attestation_status"] = attestation_status
+    if attested_node_id:
+        detail["node_attestation_node_id"] = attested_node_id
+    if node_id and attestation_status == "verified" and (not attested_node_id or attested_node_id == node_id):
+        detail["node_control_plane_ready"] = True
+    return detail
+
+
+def wait_for_node_agent_control_plane_ready(
+    config: "SingleContainerConfig",
+    env_values: Mapping[str, str],
+    node_process: subprocess.Popen[str] | None,
+    *,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    if not config.start_node_agent or not node_agent_readiness_required(env_values):
+        return {}
+    timeout_seconds = max(
+        1,
+        env_int_from_mapping(
+            env_values,
+            "NODE_AGENT_READY_TIMEOUT_SECONDS",
+            DEFAULT_NODE_AGENT_READY_TIMEOUT_SECONDS,
+        ),
+    )
+    started_at = time.monotonic()
+    last_signature: str | None = None
+    while True:
+        detail = node_control_plane_ready_detail(env_values)
+        signature = json.dumps(detail, sort_keys=True)
+        if signature != last_signature and progress_callback is not None:
+            progress_callback(detail)
+            last_signature = signature
+        if detail.get("node_control_plane_ready") is True:
+            return detail
+        if node_process is not None and node_process.poll() is not None:
+            raise RuntimeError("node-agent exited before control-plane enrollment and attestation completed.")
+        if time.monotonic() - started_at >= timeout_seconds:
+            raise RuntimeError(
+                "node-agent did not finish control-plane enrollment and attestation "
+                f"within {timeout_seconds}s."
+            )
+        time.sleep(1)
 
 
 def utc_now_iso() -> str:
@@ -367,6 +453,7 @@ def startup_runtime_detail(
     startup_stage: str,
     last_ready_error: str | None = None,
     recent_vllm_output: str | None = None,
+    recent_node_output: str | None = None,
     vllm_process_exit_code: int | None = None,
     failed_service: str | None = None,
     failure_kind: str | None = None,
@@ -382,6 +469,9 @@ def startup_runtime_detail(
         payload["last_ready_error"] = last_ready_error
     if recent_output:
         payload["recent_vllm_output"] = recent_output
+    node_output = trimmed_output(recent_node_output)
+    if node_output:
+        payload["recent_node_output"] = node_output
     if vllm_process_exit_code is not None:
         payload["vllm_process_exit_code"] = int(vllm_process_exit_code)
     if failed_service:
@@ -1473,6 +1563,7 @@ def main() -> int:
     vllm_process: subprocess.Popen[str] | None = None
     node_process: subprocess.Popen[str] | None = None
     vllm_output_relay: ProcessOutputRelay | None = None
+    node_output_relay: ProcessOutputRelay | None = None
     process_env = dict(os.environ)
     process_env.update(runtime_env)
     vllm_process_env = sanitized_vllm_process_env(process_env)
@@ -1496,6 +1587,27 @@ def main() -> int:
                 "start_node_agent": config.start_node_agent,
                 **(dict(extra) if extra is not None else {}),
             },
+        )
+
+    def wait_for_node_agent_ready() -> dict[str, Any]:
+        def publish_node_progress(detail: dict[str, Any]) -> None:
+            publish_startup_status(
+                "warming",
+                extra={
+                    **startup_runtime_detail(
+                        config,
+                        startup_stage="waiting_node_agent_control_plane",
+                        recent_node_output=node_output_relay.tail_text() if node_output_relay is not None else None,
+                    ),
+                    **detail,
+                },
+            )
+
+        return wait_for_node_agent_control_plane_ready(
+            config,
+            runtime_env,
+            node_process,
+            progress_callback=publish_node_progress,
         )
 
     def handle_signal(signum: int, _frame: object) -> None:
@@ -1557,14 +1669,30 @@ def main() -> int:
             publish_startup_status("warming", extra=startup_runtime_detail(config, startup_stage="starting_node_agent"))
             node_command = list(config.node_agent_command)
             print(f"Starting node agent in this container: {' '.join(shlex.quote(part) for part in node_command)}", flush=True)
-            node_process = subprocess.Popen(node_command, text=True, env=process_env)
+            node_output_relay = ProcessOutputRelay()
+            node_process = subprocess.Popen(
+                node_command,
+                text=True,
+                env=process_env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                bufsize=1,
+            )
+            node_output_relay.attach(node_process)
         else:
             print(
                 "Serve-only mode is enabled; skipping in-container node agent startup.",
                 flush=True,
             )
 
-        publish_startup_status("ready", extra=startup_runtime_detail(config, startup_stage="ready"))
+        node_ready_detail = wait_for_node_agent_ready()
+        publish_startup_status(
+            "ready",
+            extra={
+                **startup_runtime_detail(config, startup_stage="ready"),
+                **node_ready_detail,
+            },
+        )
 
         restart_events: deque[float] = deque()
         while True:
@@ -1600,6 +1728,7 @@ def main() -> int:
                         config,
                         startup_stage="failed",
                         recent_vllm_output=vllm_output_relay.tail_text() if vllm_output_relay is not None else None,
+                        recent_node_output=node_output_relay.tail_text() if node_output_relay is not None else None,
                         vllm_process_exit_code=(
                             vllm_process.returncode
                             if vllm_process is not None and vllm_process.poll() is not None
@@ -1626,6 +1755,7 @@ def main() -> int:
                     config,
                     startup_stage=f"restarting_{exited_service.replace('-', '_')}",
                     recent_vllm_output=vllm_output_relay.tail_text() if vllm_output_relay is not None else None,
+                    recent_node_output=node_output_relay.tail_text() if node_output_relay is not None else None,
                     vllm_process_exit_code=(
                         vllm_process.returncode
                         if vllm_process is not None and vllm_process.poll() is not None
@@ -1674,17 +1804,43 @@ def main() -> int:
                         f"{' '.join(shlex.quote(part) for part in node_command)}",
                         flush=True,
                     )
-                    node_process = subprocess.Popen(node_command, text=True, env=process_env)
+                    node_output_relay = ProcessOutputRelay()
+                    node_process = subprocess.Popen(
+                        node_command,
+                        text=True,
+                        env=process_env,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        bufsize=1,
+                    )
+                    node_output_relay.attach(node_process)
             elif exited is node_process:
                 node_command = list(config.node_agent_command)
                 print(f"Restarting node agent: {' '.join(shlex.quote(part) for part in node_command)}", flush=True)
-                node_process = subprocess.Popen(node_command, text=True, env=process_env)
+                node_output_relay = ProcessOutputRelay()
+                node_process = subprocess.Popen(
+                    node_command,
+                    text=True,
+                    env=process_env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    bufsize=1,
+                )
+                node_output_relay.attach(node_process)
             else:
                 raise RuntimeError(exit_message)
 
-            publish_startup_status("ready", extra=startup_runtime_detail(config, startup_stage="ready"))
+            node_ready_detail = wait_for_node_agent_ready()
+            publish_startup_status(
+                "ready",
+                extra={
+                    **startup_runtime_detail(config, startup_stage="ready"),
+                    **node_ready_detail,
+                },
+            )
     except Exception as error:
         recent_vllm_output = vllm_output_relay.tail_text() if vllm_output_relay is not None else None
+        recent_node_output = node_output_relay.tail_text() if node_output_relay is not None else None
         publish_startup_status(
             "failed",
             failure_reason=str(error),
@@ -1692,6 +1848,7 @@ def main() -> int:
                 config,
                 startup_stage="failed",
                 recent_vllm_output=recent_vllm_output,
+                recent_node_output=recent_node_output,
                 vllm_process_exit_code=vllm_process.returncode if vllm_process is not None and vllm_process.poll() is not None else None,
                 failure_kind=startup_failure_kind(str(error), recent_vllm_output),
             ),

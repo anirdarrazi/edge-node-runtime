@@ -461,6 +461,68 @@ def test_startup_status_publisher_writes_file_and_serves_endpoint(tmp_path) -> N
         publisher.close()
 
 
+def test_node_control_plane_ready_detail_reads_attested_credentials(tmp_path) -> None:
+    credentials_path = tmp_path / "credentials" / "node-credentials.json"
+    attestation_path = tmp_path / "credentials" / "attestation-state.json"
+    credentials_path.parent.mkdir(parents=True)
+    credentials_path.write_text(
+        json.dumps({"node_id": "node_ready", "node_key": "node-key"}),
+        encoding="utf-8",
+    )
+    attestation_path.write_text(
+        json.dumps({"node_id": "node_ready", "status": "verified"}),
+        encoding="utf-8",
+    )
+
+    detail = single_container.node_control_plane_ready_detail(
+        {
+            "CREDENTIALS_PATH": str(credentials_path),
+            "ATTESTATION_STATE_PATH": str(attestation_path),
+        }
+    )
+
+    assert detail["node_control_plane_ready"] is True
+    assert detail["node_id"] == "node_ready"
+    assert detail["node_credentials_source"] == "file"
+    assert detail["node_attestation_status"] == "verified"
+
+
+def test_wait_for_node_agent_control_plane_ready_blocks_until_attested(monkeypatch, tmp_path) -> None:
+    credentials_path = tmp_path / "credentials" / "node-credentials.json"
+    attestation_path = tmp_path / "credentials" / "attestation-state.json"
+    env = {
+        "OPERATOR_TOKEN": "op_secret",
+        "CREDENTIALS_PATH": str(credentials_path),
+        "ATTESTATION_STATE_PATH": str(attestation_path),
+        "NODE_AGENT_READY_TIMEOUT_SECONDS": "10",
+    }
+    progress: list[dict[str, object]] = []
+    monotonic_values = iter([0.0, 0.0, 1.0])
+
+    class RunningProcess:
+        def poll(self):
+            return None
+
+    def fake_sleep(_seconds: float) -> None:
+        credentials_path.parent.mkdir(parents=True, exist_ok=True)
+        credentials_path.write_text(json.dumps({"node_id": "node_wait", "node_key": "key"}), encoding="utf-8")
+        attestation_path.write_text(json.dumps({"node_id": "node_wait", "status": "verified"}), encoding="utf-8")
+
+    monkeypatch.setattr(single_container.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(single_container.time, "sleep", fake_sleep)
+
+    detail = single_container.wait_for_node_agent_control_plane_ready(
+        single_container.SingleContainerConfig(vllm_model="BAAI/bge-large-en-v1.5"),
+        env,
+        RunningProcess(),  # type: ignore[arg-type]
+        progress_callback=progress.append,
+    )
+
+    assert detail["node_control_plane_ready"] is True
+    assert detail["node_id"] == "node_wait"
+    assert progress[0]["node_control_plane_ready"] is False
+
+
 def test_embedded_runtime_snapshot_includes_machine_readable_startup_status(tmp_path) -> None:
     supervisor = single_container.EmbeddedRuntimeSupervisor(
         lambda: {

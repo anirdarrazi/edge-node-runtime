@@ -388,13 +388,26 @@ class EdgeControlClient:
                 "Normal setup should use the setup UI claim flow instead."
             )
 
-        payload = self.transport.post_json(
-            "/nodes/enroll",
-            {
-                "operator_token": self.settings.operator_token,
-                **self._node_request_payload(),
-            },
-        )
+        node_payload = self._node_request_payload()
+        try:
+            payload = self.transport.post_json(
+                "/nodes/enroll",
+                {
+                    "operator_token": self.settings.operator_token,
+                    **node_payload,
+                },
+            )
+        except httpx.HTTPStatusError as error:
+            # Modern headless/Vast flows use operator API keys, while older
+            # installer flows used signed operator session tokens in the body.
+            # Try bearer auth after an auth failure so both credentials work.
+            if error.response.status_code not in {401, 403}:
+                raise
+            payload = self.transport.post_json(
+                "/nodes/enroll",
+                node_payload,
+                headers={"Authorization": f"Bearer {self.settings.operator_token}"},
+            )
         return self._persist_from_response(payload)
 
     def create_node_claim_session(self) -> NodeClaimSession:

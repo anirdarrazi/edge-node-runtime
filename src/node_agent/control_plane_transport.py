@@ -369,8 +369,16 @@ class EdgeControlTransport:
                 response=error.response,
             ) from error
 
-    def post_json(self, path: str, payload: dict[str, Any]) -> Any:
-        response = self._request_with_retry("POST", path, json=payload)
+    def post_json(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        headers: dict[str, str] | None = None,
+    ) -> Any:
+        kwargs: dict[str, Any] = {"json": payload}
+        if headers:
+            kwargs["headers"] = headers
+        response = self._request_with_retry("POST", path, **kwargs)
         return response.json()
 
     def post_content(self, path: str, payload: bytes, headers: dict[str, str]) -> Any:

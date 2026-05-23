@@ -1605,7 +1605,7 @@ def test_build_config_defaults_follow_vast_launch_profile() -> None:
     assert config.smoke_test_api_path == vast_smoke.DEFAULT_VAST_LAUNCH_PROFILE.smoke_test_api_path
     assert config.min_inet_down_mbps == 250.0
     assert config.min_cuda_max_good == 12.9
-    assert config.offer_limit == 50
+    assert config.offer_limit == 200
 
 
 def test_durable_gemma_defaults_keep_the_local_reservoir_shallow() -> None:
@@ -1634,6 +1634,47 @@ def test_durable_gemma_defaults_keep_the_local_reservoir_shallow() -> None:
     assert config.max_concurrent_assignments == 8
     assert config.max_local_queue_assignments == 4
     assert config.pull_bundle_size == 4
+
+
+def test_durable_node_rejects_batchrouter_customer_key_for_enrollment() -> None:
+    try:
+        vast_smoke.build_config_from_args(
+            vast_smoke.parse_args(
+                [
+                    "--api-key",
+                    "secret",
+                    "--durable-node",
+                    "--edge-control-url",
+                    "https://edge.example.test",
+                    "--operator-token",
+                    "ob_live_deadbeef",
+                ]
+            )
+        )
+    except vast_smoke.VastSmokeError as error:
+        assert "operator API key" in str(error)
+        assert "BatchRouter integration/customer key" in str(error)
+    else:  # pragma: no cover
+        raise AssertionError("BatchRouter/customer keys must not be accepted as node enrollment keys")
+
+
+def test_operator_api_key_env_takes_precedence_over_legacy_smoke_token(monkeypatch) -> None:
+    monkeypatch.setenv("AUTONOMOUSC_OPERATOR_API_KEY", "autc_live_operator")
+    monkeypatch.setenv("SMOKE_OPERATOR_TOKEN", "ob_live_customer")
+
+    config = vast_smoke.build_config_from_args(
+        vast_smoke.parse_args(
+            [
+                "--api-key",
+                "secret",
+                "--durable-node",
+                "--edge-control-url",
+                "https://edge.example.test",
+            ]
+        )
+    )
+
+    assert config.operator_token == "autc_live_operator"
 
 
 def test_build_config_accepts_fleet_offer_controls() -> None:
@@ -1980,6 +2021,59 @@ def test_affordable_offers_require_minimum_cuda_max_good() -> None:
     )
 
     assert [offer["id"] for offer in offers] == [2]
+
+
+def test_affordable_offers_enforce_capacity_floor_locally() -> None:
+    offers = vast_smoke.affordable_offers(
+        [
+            {
+                "id": 1,
+                "gpu_name": "RTX 5060 Ti",
+                "gpu_ram": 16311,
+                "disk_space": 120,
+                "dph_total": 0.11,
+                "reliability": 0.97,
+                "inet_down": 1000,
+                "cuda_max_good": 13.0,
+                "gpu_frac": 1.0,
+                "direct_port_count": 16,
+            },
+            {
+                "id": 2,
+                "gpu_name": "RTX 5060 Ti",
+                "gpu_ram": 16311,
+                "disk_space": 120,
+                "dph_total": 0.12,
+                "reliability": 0.995,
+                "inet_down": 150,
+                "cuda_max_good": 13.0,
+                "gpu_frac": 1.0,
+                "direct_port_count": 16,
+            },
+            {
+                "id": 3,
+                "gpu_name": "RTX 5060 Ti",
+                "gpu_ram": 16311,
+                "disk_space": 120,
+                "dph_total": 0.13,
+                "reliability": 0.995,
+                "inet_down": 700,
+                "cuda_max_good": 13.0,
+                "gpu_frac": 1.0,
+                "direct_port_count": 16,
+            },
+        ],
+        max_price=0.20,
+        min_cuda_max_good=12.9,
+        min_vram_gb=15,
+        disk_gb=80,
+        min_reliability=0.98,
+        min_inet_down_mbps=250,
+        model="google/gemma-4-E4B-it",
+        runtime_profile="rtx_5060_ti_16gb_gemma4_e4b_it",
+    )
+
+    assert [offer["id"] for offer in offers] == [3]
 
 
 def test_affordable_offers_support_fleet_offer_and_machine_exclusions() -> None:
