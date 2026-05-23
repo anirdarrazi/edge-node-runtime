@@ -1238,6 +1238,52 @@ def test_runner_fails_fast_when_startup_status_reports_failure_reason() -> None:
     assert api.destroyed == [424242]
 
 
+def test_runner_destroys_instance_when_realized_cost_exceeds_max_price() -> None:
+    clock = FakeClock()
+    api = FakeVastAPI(
+        offers=[
+            {
+                "id": 101,
+                "gpu_name": "RTX 4000Ada",
+                "gpu_ram": 20475,
+                "dph_total": 0.18,
+                "reliability": 0.99,
+                "inet_down": 500,
+                "cuda_max_good": 13.0,
+            }
+        ],
+        instances=[
+            {
+                "actual_status": "running",
+                "cur_state": "running",
+                "public_ipaddr": "114.179.27.171",
+                "gpu_name": "RTX 4000Ada",
+                "gpu_ram": 20475,
+                "dph_total": 0.250001,
+                "geolocation": "Japan, JP",
+                "ports": {"8000/tcp": [{"HostPort": "40188"}], "8011/tcp": [{"HostPort": "40189"}]},
+            }
+        ],
+    )
+    runtime = FakeRuntimeProbeClient(get_responses=[], post_responses=[])
+    config = vast_smoke.VastSmokeConfig(api_key="secret", max_price=0.20)
+
+    report = vast_smoke.VastSmokeRunner(
+        api,
+        runtime,
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+    ).run(config)
+
+    assert report["status"] == "error"
+    assert "realized hourly cost $0.250001/hr" in report["error"]
+    assert "above requested max price $0.200000/hr" in report["error"]
+    assert report["cleanup"] == {"destroyed": True, "instance_id": 424242}
+    assert api.destroyed == [424242]
+    assert runtime.get_calls == []
+    assert runtime.post_calls == []
+
+
 def test_runner_fails_fast_when_startup_status_never_accepts_connections() -> None:
     clock = FakeClock()
     api = FakeVastAPI(
@@ -1675,6 +1721,27 @@ def test_build_config_honors_explicit_model_floor_overrides() -> None:
     assert explicit.min_inet_down_mbps == 250.0
 
 
+def test_price_ceiling_warning_reports_profile_safety_floor() -> None:
+    safe = vast_smoke.VastSmokeConfig(
+        api_key="secret",
+        model="google/gemma-4-E4B-it",
+        runtime_profile="rtx_5060_ti_16gb_gemma4_e4b_it",
+        max_price=0.25,
+    )
+    expensive = vast_smoke.VastSmokeConfig(
+        api_key="secret",
+        model="google/gemma-4-E4B-it",
+        runtime_profile="rtx_5060_ti_16gb_gemma4_e4b_it",
+        max_price=1.50,
+    )
+
+    assert vast_smoke.price_ceiling_warning(safe) is None
+    warning = vast_smoke.price_ceiling_warning(expensive)
+    assert warning is not None
+    assert "$1.50/hr" in warning
+    assert "$0.25/hr" in warning
+
+
 def test_fleet_config_honors_explicit_model_floor_overrides() -> None:
     defaulted = vast_fleet_plan.build_config_from_args(
         vast_fleet_plan.parse_args(["--api-key", "secret", "--model", "google/gemma-4-E4B-it"])
@@ -1698,6 +1765,53 @@ def test_fleet_config_honors_explicit_model_floor_overrides() -> None:
     assert defaulted.min_inet_down_mbps == 600.0
     assert explicit.min_vram_gb == 8.0
     assert explicit.min_inet_down_mbps == 250.0
+
+
+def test_fleet_plan_marks_expensive_operator_override(monkeypatch) -> None:
+    class PlanningVastAPI:
+        def __init__(self, api_key: str) -> None:
+            self.api_key = api_key
+
+        def search_offers(self, config: vast_smoke.VastSmokeConfig) -> list[dict[str, object]]:
+            return [
+                {
+                    "id": 1001,
+                    "machine_id": "host-a",
+                    "gpu_name": "RTX 5060 Ti",
+                    "gpu_ram": 16311,
+                    "disk_space": 120,
+                    "dph_total": 0.26,
+                    "reliability": 0.997,
+                    "inet_down": 1200,
+                    "cuda_max_good": 13.0,
+                    "gpu_frac": 1.0,
+                    "direct_port_count": 16,
+                }
+            ]
+
+    monkeypatch.setattr(vast_fleet_plan, "VastAPI", PlanningVastAPI)
+
+    plan = vast_fleet_plan.build_plan(
+        vast_fleet_plan.parse_args(
+            [
+                "--api-key",
+                "secret",
+                "--nodes",
+                "1",
+                "--model",
+                "google/gemma-4-E4B-it",
+                "--runtime-profile",
+                "rtx_5060_ti_16gb_gemma4_e4b_it",
+                "--max-price",
+                "0.30",
+            ]
+        )
+    )
+
+    assert plan["status"] == "ok"
+    assert plan["market_diagnostics"]["profile_safe_price_ceiling_usd"] == 0.25
+    assert plan["market_diagnostics"]["max_price_exceeds_profile_ceiling"] is True
+    assert any("exceeds the rtx_5060_ti_16gb_gemma4_e4b_it profile safety ceiling" in note for note in plan["notes"])
 
 
 def test_durable_gemma_defaults_keep_the_local_reservoir_shallow() -> None:

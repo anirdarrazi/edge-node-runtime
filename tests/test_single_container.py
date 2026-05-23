@@ -99,6 +99,7 @@ def test_sanitized_vllm_process_env_omits_runtime_control_variables(monkeypatch)
             "VLLM_HOST": "0.0.0.0",
             "VLLM_PORT": "8000",
             "VLLM_BASE_URL": "http://127.0.0.1:8000",
+            "VLLM_STARTUP_TIMEOUT_SECONDS": "1800",
             "INFERENCE_BASE_URL": "http://127.0.0.1:8000",
             "HF_HOME": "/tmp/hf-cache",
             "HUGGING_FACE_HUB_TOKEN": "hf_secret",
@@ -109,6 +110,7 @@ def test_sanitized_vllm_process_env_omits_runtime_control_variables(monkeypatch)
     assert "VLLM_HOST" not in env
     assert "VLLM_PORT" not in env
     assert "VLLM_BASE_URL" not in env
+    assert "VLLM_STARTUP_TIMEOUT_SECONDS" not in env
     assert "INFERENCE_BASE_URL" not in env
     assert env["HF_HOME"] == "/tmp/hf-cache"
     assert env["HUGGING_FACE_HUB_TOKEN"] == "hf_secret"

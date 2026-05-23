@@ -172,6 +172,10 @@ class VastInstanceLaunchError(VastSmokeError):
         self.offer_id = offer_id
 
 
+class VastRealizedCostExceededError(VastSmokeError):
+    pass
+
+
 def redact_sensitive_text(value: str) -> str:
     redacted = str(value)
     for pattern in SENSITIVE_TEXT_PATTERNS:
@@ -412,6 +416,24 @@ def benchmark_profile_name(value: str | None) -> str:
     if normalized in {"input_heavy", "output_heavy"}:
         return normalized
     return DEFAULT_BENCHMARK_PROFILE
+
+
+def runtime_profile_safe_price_ceiling_usd(runtime_profile: str | None) -> float | None:
+    profile = runtime_profile_by_id(runtime_profile or DEFAULT_DURABLE_RUNTIME_PROFILE)
+    if profile is not None and profile.vast_launch is not None:
+        return float(profile.vast_launch.safe_price_ceiling_usd)
+    return float(DEFAULT_VAST_LAUNCH_PROFILE.safe_price_ceiling_usd)
+
+
+def price_ceiling_warning(config: "VastSmokeConfig") -> str | None:
+    profile_ceiling = runtime_profile_safe_price_ceiling_usd(config.runtime_profile)
+    if profile_ceiling is None or float(config.max_price) <= profile_ceiling:
+        return None
+    return (
+        f"Requested max Vast price ${float(config.max_price):.2f}/hr exceeds the "
+        f"{config.runtime_profile} profile safety ceiling ${profile_ceiling:.2f}/hr. "
+        "Use this only for deliberate live audits or constrained burst recovery."
+    )
 
 
 def benchmark_responses_input(profile: str, *, model: str | None = None) -> str:
@@ -1454,6 +1476,8 @@ def should_retry_candidate_after_error(error: Exception, runtime_report: Mapping
         return False
     if isinstance(error, VastInstanceLaunchError):
         return bool(error.retryable)
+    if isinstance(error, VastRealizedCostExceededError):
+        return True
     if isinstance(error, httpx.HTTPError):
         return True
     message = str(error or "").strip().lower()
@@ -2190,6 +2214,15 @@ class VastSmokeRunner:
             "requested": {
                 "model": config.model,
                 "max_price": round(float(config.max_price), 6),
+                "profile_safe_price_ceiling_usd": (
+                    round(float(runtime_profile_safe_price_ceiling_usd(config.runtime_profile)), 6)
+                    if runtime_profile_safe_price_ceiling_usd(config.runtime_profile) is not None
+                    else None
+                ),
+                "max_price_exceeds_profile_ceiling": (
+                    runtime_profile_safe_price_ceiling_usd(config.runtime_profile) is not None
+                    and float(config.max_price) > float(runtime_profile_safe_price_ceiling_usd(config.runtime_profile))
+                ),
                 "image": config.image,
                 "api": config.api_kind,
                 "runtype": config.runtype,
@@ -2234,6 +2267,9 @@ class VastSmokeRunner:
             "cleanup": {"destroyed": False},
             "notes": [],
         }
+        warning = price_ceiling_warning(config)
+        if warning:
+            report["notes"].append(warning)
         instance_id: int | None = None
         successful_launch_started_at: float | None = None
         ready_at: float | None = None
@@ -2307,6 +2343,13 @@ class VastSmokeRunner:
                             "geolocation": instance.get("geolocation"),
                         }
                     )
+                    realized_hourly_cost = _float_value(instance, "dph_total")
+                    if realized_hourly_cost > float(config.max_price) + 1e-9:
+                        raise VastRealizedCostExceededError(
+                            f"Vast instance {instance_id} realized hourly cost ${realized_hourly_cost:.6f}/hr, "
+                            f"above requested max price ${float(config.max_price):.6f}/hr. "
+                            "Destroying this candidate before model warmup."
+                        )
                     report["runtime"] = {
                         "base_url": base_url,
                         "startup_status_path": DEFAULT_STARTUP_STATUS_ENDPOINT_PATH,

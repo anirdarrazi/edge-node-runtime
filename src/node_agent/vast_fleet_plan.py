@@ -29,8 +29,10 @@ from .vast_smoke import (
     offer_quality_rejection_reason,
     parse_identity_list,
     parse_int_list,
+    price_ceiling_warning,
     quality_rejection_diagnostic,
     runtime_policy_rejection_diagnostic,
+    runtime_profile_safe_price_ceiling_usd,
     summarize_offer,
 )
 
@@ -144,6 +146,11 @@ def market_diagnostics(
         "requested_nodes": requested_nodes,
         "allow_same_machine": allow_same_machine,
         "unique_candidate_machine_count": unique_candidate_machines,
+        "profile_safe_price_ceiling_usd": runtime_profile_safe_price_ceiling_usd(config.runtime_profile),
+        "max_price_exceeds_profile_ceiling": (
+            runtime_profile_safe_price_ceiling_usd(config.runtime_profile) is not None
+            and float(config.max_price) > float(runtime_profile_safe_price_ceiling_usd(config.runtime_profile))
+        ),
         "quality_rejection_summary": quality_rejection_diagnostic(
             offers,
             max_price=config.max_price,
@@ -268,19 +275,22 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
             }
             for index, offer in enumerate(selected, start=1)
         ],
-        "notes": (
-            []
-            if len(selected) >= requested_nodes
-            else [
-                fleet_partial_note(
+        "notes": [
+            note
+            for note in [
+                price_ceiling_warning(config),
+                None
+                if len(selected) >= requested_nodes
+                else fleet_partial_note(
                     requested_nodes=requested_nodes,
                     selected_count=len(selected),
                     candidate_count=len(candidates),
                     unique_candidate_machines=diagnostics["unique_candidate_machine_count"],
                     allow_same_machine=bool(args.allow_same_machine),
-                )
+                ),
             ]
-        ),
+            if note
+        ],
         "market_diagnostics": diagnostics,
     }
 
