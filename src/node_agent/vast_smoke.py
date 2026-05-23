@@ -5,6 +5,7 @@ import concurrent.futures
 import math
 import json
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -131,6 +132,26 @@ DEFAULT_VAST_SMOKE_MODEL_PREFERRED_VRAM_GB = {
 }
 VAST_SMOKE_CONFIG_ENV = "NODE_AGENT_VAST_SMOKE_CONFIG"
 DEFAULT_VAST_SMOKE_CONFIG_NAME = "vast-smoke.json"
+SENSITIVE_REPORT_KEYS = frozenset(
+    {
+        "api_key",
+        "authorization",
+        "hf_token",
+        "hugging_face_hub_token",
+        "node_key",
+        "operator_token",
+        "poll_token",
+        "token",
+    }
+)
+SENSITIVE_TEXT_PATTERNS = (
+    re.compile(r"(?i)(bearer\s+)[a-z0-9._~+/=-]{12,}"),
+    re.compile(r"\b(hf_[A-Za-z0-9]{8,})\b"),
+    re.compile(r"\b(autc_(?:live|test|br)_[A-Za-z0-9]{8,})\b"),
+    re.compile(r"\b(ob_(?:live|test)_[A-Za-z0-9]{8,})\b"),
+    re.compile(r"\b(sk-[A-Za-z0-9]{16,})\b"),
+    re.compile(r"(?i)(--(?:hf-token|api-key|operator-token|node-key)(?:=|\s+))(\S+)"),
+)
 
 
 def default_vast_smoke_label(node_id: str | None = None) -> str:
@@ -149,6 +170,37 @@ class VastInstanceLaunchError(VastSmokeError):
         super().__init__(message)
         self.retryable = retryable
         self.offer_id = offer_id
+
+
+def redact_sensitive_text(value: str) -> str:
+    redacted = str(value)
+    for pattern in SENSITIVE_TEXT_PATTERNS:
+        if pattern.pattern.startswith("(?i)(--"):
+            redacted = pattern.sub(r"\1***REDACTED***", redacted)
+        elif pattern.pattern.startswith("(?i)(bearer"):
+            redacted = pattern.sub(r"\1***REDACTED***", redacted)
+        else:
+            redacted = pattern.sub("***REDACTED***", redacted)
+    return redacted
+
+
+def redact_sensitive_payload(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        redacted: dict[str, Any] = {}
+        for key, child in value.items():
+            normalized_key = str(key).strip().lower()
+            if normalized_key in SENSITIVE_REPORT_KEYS:
+                redacted[key] = "***REDACTED***" if str(child or "").strip() else child
+            else:
+                redacted[key] = redact_sensitive_payload(child)
+        return redacted
+    if isinstance(value, list):
+        return [redact_sensitive_payload(child) for child in value]
+    if isinstance(value, tuple):
+        return tuple(redact_sensitive_payload(child) for child in value)
+    if isinstance(value, str):
+        return redact_sensitive_text(value)
+    return value
 
 
 @dataclass(frozen=True)
@@ -703,7 +755,7 @@ def format_vast_launch_error(
         str(body.get("error") or "") if isinstance(body, dict) else "",
         str(fallback_text or ""),
     )
-    detail = detail or "Vast instance launch failed."
+    detail = redact_sensitive_text(detail or "Vast instance launch failed.")
     if isinstance(body, dict) and body.get("ask_id") not in {None, ""}:
         detail = f"{detail} (ask_id={body.get('ask_id')})"
     if status_code is not None:
@@ -2301,7 +2353,7 @@ class VastSmokeRunner:
                 report.setdefault("notes", []).append(
                     f"Cleanup failed for Vast instance {instance_id}: {cleanup_error}"
                 )
-        return report
+        return redact_sensitive_payload(report)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -2592,7 +2644,7 @@ def build_config_from_args(args: argparse.Namespace) -> VastSmokeConfig:
 
 
 def emit_json_report(payload: Mapping[str, Any], *, indent: int) -> None:
-    text = json.dumps(payload, indent=indent, ensure_ascii=False)
+    text = json.dumps(redact_sensitive_payload(payload), indent=indent, ensure_ascii=False)
     try:
         print(text)
         return

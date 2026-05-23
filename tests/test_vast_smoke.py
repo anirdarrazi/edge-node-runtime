@@ -1516,6 +1516,48 @@ def test_emit_json_report_falls_back_to_utf8_stdout_buffer(monkeypatch) -> None:
     assert payload["error"] == "█ blocked"
 
 
+def test_emit_json_report_redacts_sensitive_values(monkeypatch) -> None:
+    buffer = StringIO()
+    monkeypatch.setattr(vast_smoke.sys, "stdout", buffer)
+
+    vast_smoke.emit_json_report(
+        {
+            "status": "error",
+            "api_key": "vast-secret",
+            "nested": {
+                "message": "Vast echoed Bearer autc_live_1234567890abcdef, sk-1234567890abcdefghijkl, and --hf-token arbitrary-secret",
+                "command": ["vllm", "--operator-token=autc_live_abcdef1234567890"],
+                "safe": "node_public_id",
+            },
+        },
+        indent=2,
+    )
+
+    output = buffer.getvalue()
+    assert "vast-secret" not in output
+    assert "autc_live_1234567890abcdef" not in output
+    assert "sk-1234567890abcdefghijkl" not in output
+    assert "arbitrary-secret" not in output
+    assert "autc_live_abcdef1234567890" not in output
+    assert output.count("***REDACTED***") >= 4
+    assert "node_public_id" in output
+
+
+def test_format_vast_launch_error_redacts_echoed_tokens() -> None:
+    message = vast_smoke.format_vast_launch_error(
+        1234,
+        body={
+            "msg": "launch failed with HUGGING_FACE_HUB_TOKEN=hf_1234567890abcdef and --node-key node-secret",
+            "ask_id": 1234,
+        },
+        status_code=400,
+    )
+
+    assert "hf_1234567890abcdef" not in message
+    assert "node-secret" not in message
+    assert "***REDACTED***" in message
+
+
 def test_build_config_accepts_api_key_from_env(monkeypatch) -> None:
     monkeypatch.delenv("NODE_AGENT_VAST_SMOKE_CONFIG", raising=False)
     monkeypatch.setenv("VAST_API_KEY", "env-secret")

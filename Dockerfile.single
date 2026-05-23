@@ -1,4 +1,3 @@
-# check=skip=SecretsUsedInArgOrEnv
 ARG VLLM_BASE_IMAGE=vllm/vllm-openai@sha256:8e86cb93b724092cd4dc892fb129a6c5538613b38a5cd34e40aab9e6aea72b03
 FROM ${VLLM_BASE_IMAGE}
 
@@ -20,10 +19,6 @@ ENV INFERENCE_BASE_URL=http://127.0.0.1:8000
 ENV VLLM_BASE_URL=http://127.0.0.1:8000
 ENV VLLM_HOST=0.0.0.0
 ENV VLLM_PORT=8000
-ENV CREDENTIALS_PATH=/var/lib/autonomousc/credentials/node-credentials.json
-ENV ATTESTATION_STATE_PATH=/var/lib/autonomousc/credentials/attestation-state.json
-ENV RECOVERY_NOTE_PATH=/var/lib/autonomousc/credentials/recovery-note.txt
-ENV AUTOPILOT_STATE_PATH=/var/lib/autonomousc/scratch/autopilot-state.json
 
 VOLUME ["/root/.cache/huggingface", "/var/lib/autonomousc/credentials", "/var/lib/autonomousc/scratch"]
 EXPOSE 8000

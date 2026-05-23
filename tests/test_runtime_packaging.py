@@ -50,6 +50,16 @@ def test_manager_mode_readme_requests_gpu_access() -> None:
     assert "docker run --rm \\\n  --gpus all \\" in manager_section
 
 
+def test_single_container_dockerfile_does_not_bake_credential_paths_as_env() -> None:
+    content = (RUNTIME_ROOT / "Dockerfile.single").read_text(encoding="utf-8")
+
+    assert "SecretsUsedInArgOrEnv" not in content
+    assert "ENV CREDENTIALS_PATH=" not in content
+    assert "ENV ATTESTATION_STATE_PATH=" not in content
+    assert "ENV RECOVERY_NOTE_PATH=" not in content
+    assert "ENV AUTOPILOT_STATE_PATH=" not in content
+
+
 def test_built_wheel_includes_hidden_runtime_env_example(tmp_path: Path) -> None:
     completed = subprocess.run(
         [
