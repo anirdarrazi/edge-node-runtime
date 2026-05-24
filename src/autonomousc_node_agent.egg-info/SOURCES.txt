@@ -28,6 +28,7 @@ src/node_agent/inference_engine.py
 src/node_agent/installer.py
 src/node_agent/installer_ui.html
 src/node_agent/launcher.py
+src/node_agent/live_vast_batchrouter_drill.py
 src/node_agent/local_api_security.py
 src/node_agent/main.py
 src/node_agent/model_artifacts.py
@@ -63,6 +64,7 @@ tests/test_control_plane.py
 tests/test_desktop_launcher.py
 tests/test_heat_governor.py
 tests/test_installer.py
+tests/test_live_vast_batchrouter_drill.py
 tests/test_main.py
 tests/test_model_artifacts.py
 tests/test_release_manifest.py

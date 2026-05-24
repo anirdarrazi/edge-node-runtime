@@ -51,6 +51,8 @@ DEFAULT_LAUNCH_TIMEOUT_SECONDS = 240.0
 DEFAULT_LAUNCH_PROGRESS_GRACE_SECONDS = 240.0
 DEFAULT_READINESS_TIMEOUT_SECONDS = 900.0
 DEFAULT_STARTUP_STATUS_CONNECT_TIMEOUT_SECONDS = 180.0
+DEFAULT_STARTUP_PROGRESS_STALE_SECONDS = 0.0
+DEFAULT_STARTUP_MAX_VLLM_RESTARTS = -1
 DEFAULT_POLL_INTERVAL_SECONDS = 5.0
 DEFAULT_PROBE_RETRY_ATTEMPTS = 3
 DEFAULT_PROBE_RETRY_DELAY_SECONDS = 2.0
@@ -152,6 +154,9 @@ SENSITIVE_TEXT_PATTERNS = (
     re.compile(r"\b(sk-[A-Za-z0-9]{16,})\b"),
     re.compile(r"(?i)(--(?:hf-token|api-key|operator-token|node-key)(?:=|\s+))(\S+)"),
 )
+VLLM_START_MARKER_PATTERN = re.compile(
+    r"INFO\s+(\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s+\[utils\.py:233\]\s+non-default args"
+)
 
 
 def default_vast_smoke_label(node_id: str | None = None) -> str:
@@ -230,6 +235,8 @@ class VastSmokeConfig:
     launch_progress_grace_seconds: float = DEFAULT_LAUNCH_PROGRESS_GRACE_SECONDS
     readiness_timeout_seconds: float = DEFAULT_READINESS_TIMEOUT_SECONDS
     startup_status_connect_timeout_seconds: float = DEFAULT_STARTUP_STATUS_CONNECT_TIMEOUT_SECONDS
+    startup_progress_stale_seconds: float = DEFAULT_STARTUP_PROGRESS_STALE_SECONDS
+    startup_max_vllm_restarts: int = DEFAULT_STARTUP_MAX_VLLM_RESTARTS
     poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS
     api_kind: str = "auto"
     smoke_test_api_path: str = DEFAULT_VAST_SMOKE_API_PATH
@@ -1449,6 +1456,24 @@ def startup_status_state(runtime_report: Mapping[str, Any] | None) -> str:
     return str(payload.get("status") or "").strip().lower()
 
 
+def startup_progress_signature(payload: Mapping[str, Any] | None) -> tuple[str, str, str]:
+    if not isinstance(payload, Mapping):
+        return ("", "", "")
+    return (
+        str(payload.get("status") or "").strip().lower(),
+        str(payload.get("startup_stage") or "").strip().lower(),
+        str(payload.get("recent_vllm_output") or "").strip(),
+    )
+
+
+def startup_vllm_start_marker(payload: Mapping[str, Any] | None) -> str:
+    if not isinstance(payload, Mapping):
+        return ""
+    recent_output = str(payload.get("recent_vllm_output") or "")
+    matches = VLLM_START_MARKER_PATTERN.findall(recent_output)
+    return str(matches[-1]).strip() if matches else ""
+
+
 def should_allow_launch_grace(status_text: str | None) -> bool:
     normalized = str(status_text or "").strip().lower()
     if not normalized:
@@ -1519,6 +1544,8 @@ def should_retry_candidate_after_error(error: Exception, runtime_report: Mapping
             "public ip",
             "port ",
             "still starting",
+            "startup progress stalled",
+            "vllm restarted",
             "runtime is unavailable",
             "openai-compatible runtime did not become ready",
         )
@@ -1772,10 +1799,6 @@ class VastSmokeRunner:
                     else:
                         port_mapping_missing_since = None
             elif actual_status in {"dead", "exited", "offline"} or cur_state in {"stopped", "deleted"}:
-                if status_msg and should_allow_launch_grace(status_msg):
-                    last_status = status_msg
-                    self.sleep(poll_interval_seconds)
-                    continue
                 raise VastSmokeError(status_msg or f"Vast instance entered terminal state {actual_status or cur_state}.")
             elif status_msg:
                 last_status = status_msg
@@ -1794,10 +1817,18 @@ class VastSmokeRunner:
         poll_interval_seconds: float,
         timeout_seconds: float,
         startup_status_connect_timeout_seconds: float = DEFAULT_STARTUP_STATUS_CONNECT_TIMEOUT_SECONDS,
+        startup_progress_stale_seconds: float = DEFAULT_STARTUP_PROGRESS_STALE_SECONDS,
+        startup_max_vllm_restarts: int = DEFAULT_STARTUP_MAX_VLLM_RESTARTS,
     ) -> tuple[dict[str, Any], int]:
         deadline = self.monotonic() + max(1.0, timeout_seconds)
         startup_status_deadline = self.monotonic() + max(1.0, startup_status_connect_timeout_seconds)
+        startup_progress_stale_after = max(0.0, float(startup_progress_stale_seconds or 0.0))
+        max_vllm_restarts = int(startup_max_vllm_restarts)
         last_error = "The OpenAI-compatible runtime is still starting."
+        last_progress_signature: tuple[str, str, str] | None = None
+        last_progress_changed_at = self.monotonic()
+        last_vllm_start_marker = ""
+        vllm_restart_count = 0
         models_url = f"{base_url}{DEFAULT_MODELS_PATH}"
         runtime_report["models_path"] = DEFAULT_MODELS_PATH
         runtime_report["startup_status_path"] = DEFAULT_STARTUP_STATUS_ENDPOINT_PATH
@@ -1821,6 +1852,36 @@ class VastSmokeRunner:
                             reason_text = failure_reason or "no failure_reason was provided."
                             raise VastSmokeError(
                                 f"Runtime startup failed before {DEFAULT_MODELS_PATH} became ready: {reason_text}"
+                            )
+                        vllm_start_marker = startup_vllm_start_marker(startup_payload)
+                        if vllm_start_marker:
+                            if not last_vllm_start_marker:
+                                last_vllm_start_marker = vllm_start_marker
+                            elif vllm_start_marker != last_vllm_start_marker:
+                                vllm_restart_count += 1
+                                last_vllm_start_marker = vllm_start_marker
+                                runtime_report["startup_vllm_restart_count"] = vllm_restart_count
+                                if max_vllm_restarts >= 0 and vllm_restart_count > max_vllm_restarts:
+                                    raise VastSmokeError(
+                                        "Runtime vLLM restarted during warmup before "
+                                        f"{DEFAULT_MODELS_PATH} became ready: "
+                                        f"restart_count={vllm_restart_count}, "
+                                        f"max_restarts={max_vllm_restarts}."
+                                    )
+                        progress_signature = startup_progress_signature(startup_payload)
+                        if progress_signature != last_progress_signature:
+                            last_progress_signature = progress_signature
+                            last_progress_changed_at = self.monotonic()
+                        elif (
+                            startup_progress_stale_after > 0
+                            and progress_signature[0] not in {"", "ready", "failed"}
+                            and self.monotonic() - last_progress_changed_at >= startup_progress_stale_after
+                        ):
+                            stage = progress_signature[1] or "unknown"
+                            raise VastSmokeError(
+                                "Runtime startup progress stalled before "
+                                f"{DEFAULT_MODELS_PATH} became ready: status={progress_signature[0]}, "
+                                f"stage={stage}, stale_seconds={startup_progress_stale_after:.0f}."
                             )
                     elif startup_response.status_code >= 500:
                         last_error = f"{DEFAULT_STARTUP_STATUS_ENDPOINT_PATH} returned HTTP {startup_response.status_code}."
@@ -2271,6 +2332,8 @@ class VastSmokeRunner:
                 "launch_progress_grace_seconds": config.launch_progress_grace_seconds,
                 "readiness_timeout_seconds": config.readiness_timeout_seconds,
                 "startup_status_connect_timeout_seconds": config.startup_status_connect_timeout_seconds,
+                "startup_progress_stale_seconds": config.startup_progress_stale_seconds,
+                "startup_max_vllm_restarts": config.startup_max_vllm_restarts,
                 "benchmark_requests": int(config.benchmark_requests),
                 "benchmark_concurrency": int(config.benchmark_concurrency),
                 "benchmark_profile": config.benchmark_profile,
@@ -2382,6 +2445,8 @@ class VastSmokeRunner:
                         startup_status_url=startup_status_url,
                         timeout_seconds=config.readiness_timeout_seconds,
                         startup_status_connect_timeout_seconds=config.startup_status_connect_timeout_seconds,
+                        startup_progress_stale_seconds=config.startup_progress_stale_seconds,
+                        startup_max_vllm_restarts=config.startup_max_vllm_restarts,
                         poll_interval_seconds=config.poll_interval_seconds,
                     )
                     successful_launch_started_at = candidate_launch_started_at
@@ -2592,6 +2657,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_STARTUP_STATUS_CONNECT_TIMEOUT_SECONDS,
         help="How long to wait for the runtime startup-status endpoint before treating the host as unusable.",
     )
+    parser.add_argument(
+        "--startup-progress-stale-seconds",
+        type=float,
+        default=DEFAULT_STARTUP_PROGRESS_STALE_SECONDS,
+        help=(
+            "Optional watchdog for stale startup-status progress. When greater than zero, a host is abandoned "
+            "if startup status, stage, and vLLM output stop changing for this many seconds before readiness."
+        ),
+    )
+    parser.add_argument(
+        "--startup-max-vllm-restarts",
+        type=int,
+        default=DEFAULT_STARTUP_MAX_VLLM_RESTARTS,
+        help=(
+            "Maximum vLLM process restarts tolerated during startup before abandoning the host. "
+            "Use -1 to disable this watchdog."
+        ),
+    )
     parser.add_argument("--poll-interval-seconds", type=float, default=DEFAULT_POLL_INTERVAL_SECONDS, help="Polling interval for Vast and runtime readiness.")
     parser.add_argument("--api", choices=("auto", "embeddings", "responses", "chat_completions"), default="auto", help="Smoke probe type to run after /v1/models succeeds.")
     parser.add_argument("--runtype", default=DEFAULT_VAST_LAUNCH_PROFILE.runtype, help="Vast runtype to use. Defaults to the runtime profile launch metadata.")
@@ -2773,6 +2856,13 @@ def build_config_from_args(args: argparse.Namespace) -> VastSmokeConfig:
         startup_status_connect_timeout_seconds=max(
             1.0,
             float(getattr(args, "startup_status_connect_timeout_seconds", DEFAULT_STARTUP_STATUS_CONNECT_TIMEOUT_SECONDS)),
+        ),
+        startup_progress_stale_seconds=max(
+            0.0,
+            float(getattr(args, "startup_progress_stale_seconds", DEFAULT_STARTUP_PROGRESS_STALE_SECONDS)),
+        ),
+        startup_max_vllm_restarts=int(
+            getattr(args, "startup_max_vllm_restarts", DEFAULT_STARTUP_MAX_VLLM_RESTARTS)
         ),
         poll_interval_seconds=max(1.0, float(args.poll_interval_seconds)),
         api_kind=str(args.api).strip().lower(),

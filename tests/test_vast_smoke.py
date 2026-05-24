@@ -1325,7 +1325,7 @@ def test_runner_fails_fast_when_startup_status_never_accepts_connections() -> No
                 "actual_status": "running",
                 "cur_state": "running",
                 "public_ipaddr": "114.179.27.171",
-                "gpu_name": "RTX 5070 Ti",
+                "gpu_name": "RTX 5060 Ti",
                 "gpu_ram": 16303,
                 "dph_total": 0.12,
                 "geolocation": "Japan, JP",
@@ -1354,6 +1354,157 @@ def test_runner_fails_fast_when_startup_status_never_accepts_connections() -> No
     assert report["runtime"]["startup_status_poll_error"] == "connection refused"
     assert "http://114.179.27.171:40189/startup-status" in runtime.get_calls
     assert "http://114.179.27.171:40188/v1/models" in runtime.get_calls
+    assert api.destroyed == [424242]
+
+
+def test_runner_fails_stale_startup_progress_before_full_readiness_timeout() -> None:
+    clock = FakeClock()
+    api = FakeVastAPI(
+        offers=[
+            {
+                "id": 101,
+                "gpu_name": "RTX 5060 Ti",
+                "gpu_ram": 16303,
+                "dph_total": 0.12,
+                "reliability": 0.99,
+                "inet_down": 700,
+                "cuda_max_good": 13.0,
+                "disk_space": 120,
+                "direct_port_count": 4,
+            }
+        ],
+        instances=[
+            {
+                "actual_status": "running",
+                "cur_state": "running",
+                "public_ipaddr": "114.179.27.171",
+                "gpu_name": "RTX 5060 Ti",
+                "gpu_ram": 16303,
+                "dph_total": 0.12,
+                "geolocation": "Japan, JP",
+                "ports": {"8000/tcp": [{"HostPort": "40188"}], "8011/tcp": [{"HostPort": "40189"}]},
+            }
+        ],
+    )
+    warming_payload = {
+        "status": "warming",
+        "startup_stage": "warming_model",
+        "current_model": "google/gemma-4-E4B-it",
+        "recent_vllm_output": "Starting to load model google/gemma-4-E4B-it...",
+        "last_ready_error": "connection refused",
+    }
+    runtime = FakeRuntimeProbeClient(
+        get_responses=[
+            FakeResponse(200, warming_payload),
+            vast_smoke.httpx.ConnectError("connection refused"),
+            FakeResponse(200, warming_payload),
+            vast_smoke.httpx.ConnectError("connection refused"),
+            FakeResponse(200, warming_payload),
+        ],
+        post_responses=[],
+    )
+    config = vast_smoke.VastSmokeConfig(
+        api_key="secret",
+        model="google/gemma-4-E4B-it",
+        max_price=0.20,
+        startup_progress_stale_seconds=10,
+        readiness_timeout_seconds=1200,
+        poll_interval_seconds=5,
+    )
+
+    report = vast_smoke.VastSmokeRunner(
+        api,
+        runtime,
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+    ).run(config)
+
+    assert report["status"] == "error"
+    assert "startup progress stalled" in report["error"].lower()
+    assert report["requested"]["startup_progress_stale_seconds"] == 10
+    assert report["runtime"]["startup_status"]["startup_stage"] == "warming_model"
+    assert report["timings"]["total_seconds"] < 1200
+    assert api.destroyed == [424242]
+
+
+def test_runner_fails_vllm_restart_churn_before_full_readiness_timeout() -> None:
+    clock = FakeClock()
+    api = FakeVastAPI(
+        offers=[
+            {
+                "id": 101,
+                "gpu_name": "RTX 5060 Ti",
+                "gpu_ram": 16303,
+                "dph_total": 0.12,
+                "reliability": 0.99,
+                "inet_down": 700,
+                "cuda_max_good": 13.0,
+                "disk_space": 120,
+                "direct_port_count": 4,
+            }
+        ],
+        instances=[
+            {
+                "actual_status": "running",
+                "cur_state": "running",
+                "public_ipaddr": "114.179.27.171",
+                "gpu_name": "RTX 5060 Ti",
+                "gpu_ram": 16303,
+                "dph_total": 0.12,
+                "geolocation": "Japan, JP",
+                "ports": {"8000/tcp": [{"HostPort": "40188"}], "8011/tcp": [{"HostPort": "40189"}]},
+            }
+        ],
+    )
+    runtime = FakeRuntimeProbeClient(
+        get_responses=[
+            FakeResponse(
+                200,
+                {
+                    "status": "warming",
+                    "startup_stage": "warming_model",
+                    "recent_vllm_output": (
+                        "(APIServer pid=77) INFO 05-24 16:46:56 [utils.py:233] "
+                        "non-default args: {'model': 'google/gemma-4-E4B-it'}"
+                    ),
+                },
+            ),
+            vast_smoke.httpx.ConnectError("connection refused"),
+            FakeResponse(
+                200,
+                {
+                    "status": "warming",
+                    "startup_stage": "warming_model",
+                    "recent_vllm_output": (
+                        "(APIServer pid=71) INFO 05-24 16:50:02 [utils.py:233] "
+                        "non-default args: {'model': 'google/gemma-4-E4B-it'}"
+                    ),
+                },
+            ),
+        ],
+        post_responses=[],
+    )
+    config = vast_smoke.VastSmokeConfig(
+        api_key="secret",
+        model="google/gemma-4-E4B-it",
+        max_price=0.20,
+        startup_max_vllm_restarts=0,
+        readiness_timeout_seconds=1200,
+        poll_interval_seconds=5,
+    )
+
+    report = vast_smoke.VastSmokeRunner(
+        api,
+        runtime,
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+    ).run(config)
+
+    assert report["status"] == "error"
+    assert "vllm restarted" in report["error"].lower()
+    assert report["requested"]["startup_max_vllm_restarts"] == 0
+    assert report["runtime"]["startup_vllm_restart_count"] == 1
+    assert report["timings"]["total_seconds"] < 1200
     assert api.destroyed == [424242]
 
 
@@ -1473,18 +1624,15 @@ def test_should_allow_launch_grace_covers_common_vast_cold_start_statuses() -> N
     assert vast_smoke.should_allow_launch_grace("success, running anirdarrazi/autonomousc-ai-edge-runtime:single-cuda-latest")
 
 
-def test_wait_for_instance_treats_terminal_docker_pull_status_as_progress() -> None:
+def test_wait_for_instance_rejects_terminal_state_even_with_stale_progress_text() -> None:
     clock = FakeClock()
     api = FakeVastAPI(
         offers=[],
         instances=[
-            {"actual_status": "exited", "cur_state": "running", "status_msg": "Verifying Checksum"},
-            {"actual_status": "dead", "cur_state": "running", "status_msg": "Pull complete"},
             {
-                "actual_status": "running",
+                "actual_status": "exited",
                 "cur_state": "running",
-                "public_ipaddr": "114.179.27.171",
-                "ports": {"8000/tcp": [{"HostPort": "40188"}], "8011/tcp": [{"HostPort": "40189"}]},
+                "status_msg": "success, running anirdarrazi/autonomousc-ai-edge-runtime:single-cuda-latest",
             },
         ],
     )
@@ -1495,14 +1643,15 @@ def test_wait_for_instance_treats_terminal_docker_pull_status_as_progress() -> N
         sleep=clock.sleep,
     )
 
-    instance = runner.wait_for_instance(
-        424242,
-        timeout_seconds=1.0,
-        poll_interval_seconds=1.0,
-    )
+    with pytest.raises(vast_smoke.VastSmokeError) as error:
+        runner.wait_for_instance(
+            424242,
+            timeout_seconds=1.0,
+            poll_interval_seconds=1.0,
+        )
 
-    assert instance["actual_status"] == "running"
-    assert clock.now > 1001.0
+    assert "success, running" in str(error.value)
+    assert clock.now == 1000.0
 
 
 def test_wait_for_instance_respects_custom_launch_progress_grace() -> None:
