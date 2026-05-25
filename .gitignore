@@ -10,6 +10,7 @@ data/
 logs/
 diagnostics/
 test artifacts/
+test-artifacts/
 *.log
 build/
 dist/

@@ -86,6 +86,13 @@ def test_runtime_cuda_images_do_not_preload_models_by_default(dockerfile: str) -
     assert "ARG PRELOAD_HF_MODELS=BAAI/bge-large-en-v1.5" not in content
 
 
+def test_gitignore_excludes_live_drill_artifacts() -> None:
+    content = (RUNTIME_ROOT / ".gitignore").read_text(encoding="utf-8")
+
+    assert "test artifacts/" in content
+    assert "test-artifacts/" in content
+
+
 def test_built_wheel_includes_hidden_runtime_env_example(tmp_path: Path) -> None:
     completed = subprocess.run(
         [
