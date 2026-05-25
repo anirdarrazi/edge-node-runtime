@@ -63,6 +63,96 @@ def test_build_batch_manifest_pins_autonomousc_provider(tmp_path: Path) -> None:
     assert manifest["max_price"] == "0.0500"
 
 
+def test_append_event_writes_redacted_progress_line(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    config = minimal_config(tmp_path)
+
+    drill.append_event(
+        config,
+        "vast.launch.start",
+        node_id="node_1",
+        operator_token="autc_live_1234567890abcdef1234567890abcdef",
+    )
+
+    progress = config.artifact_dir / "progress.jsonl"
+    record = json.loads(progress.read_text(encoding="utf-8").strip())
+    assert record["event"] == "vast.launch.start"
+    assert record["node_id"] == "node_1"
+    assert record["operator_token"] == "***REDACTED***"
+    assert "vast.launch.start" in capsys.readouterr().out
+
+
+def test_resource_checkpoint_tracks_destroy_and_revoke_state(tmp_path: Path) -> None:
+    config = minimal_config(tmp_path)
+    node = drill.DrillNode(
+        node_id="node_1",
+        node_key="secret",
+        instance_id=123,
+        machine_ids=("host-a",),
+        destroyed=True,
+        revoked=False,
+    )
+    state = drill.DrillState(
+        run_id="run_1",
+        started_at="2026-05-25T00:00:00Z",
+        nodes=[node],
+        batch_id="batch_1",
+        quote_id="quote_1",
+    )
+
+    drill.write_resource_checkpoint(config, state)
+
+    checkpoint = json.loads((config.artifact_dir / "resource-checkpoint.json").read_text(encoding="utf-8"))
+    assert checkpoint["batch_id"] == "batch_1"
+    assert checkpoint["nodes"] == [
+        {
+            "node_id": "node_1",
+            "instance_id": 123,
+            "machine_ids": ["host-a"],
+            "destroyed": True,
+            "revoked": False,
+            "destroy_error": None,
+            "revoke_error": None,
+        }
+    ]
+
+
+def test_wait_for_batch_terminal_retries_transient_read_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = minimal_config(tmp_path)
+    state = drill.DrillState(run_id="run_1", started_at="2026-05-25T00:00:00Z")
+
+    class FakeBatchRouter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def get_batch(self, batch_id: str) -> dict[str, object]:
+            self.calls += 1
+            if self.calls == 1:
+                raise drill.httpx.ReadTimeout("poll timed out")
+            return {
+                "batch": {
+                    "id": batch_id,
+                    "state": "completed",
+                    "counts": {"total": 1, "completed": 1, "failed": 0, "canceled": 0},
+                }
+            }
+
+    monkeypatch.setattr(drill.time, "sleep", lambda _seconds: None)
+
+    payload = drill.wait_for_batch_terminal(
+        config=config,
+        batchrouter=FakeBatchRouter(),  # type: ignore[arg-type]
+        state=state,
+        batch_id="batch_1",
+    )
+
+    assert drill.batch_state(payload) == "completed"
+    progress = (config.artifact_dir / "progress.jsonl").read_text(encoding="utf-8")
+    assert "batchrouter.batch.poll.retry" in progress
+
+
 def test_build_node_enroll_payload_uses_static_drill_node_shape(tmp_path: Path) -> None:
     config = minimal_config(tmp_path)
     payload = drill.build_node_enroll_payload(config, label="node-label")
@@ -167,6 +257,8 @@ def test_build_config_parses_offer_controls(monkeypatch: pytest.MonkeyPatch, tmp
             "300",
             "--startup-max-vllm-restarts",
             "1",
+            "--launch-attempts-per-node",
+            "4",
         ]
     )
 
@@ -179,3 +271,4 @@ def test_build_config_parses_offer_controls(monkeypatch: pytest.MonkeyPatch, tmp
     assert config.launch_progress_grace_seconds == 90
     assert config.startup_progress_stale_seconds == 300
     assert config.startup_max_vllm_restarts == 1
+    assert config.launch_attempts_per_node == 4

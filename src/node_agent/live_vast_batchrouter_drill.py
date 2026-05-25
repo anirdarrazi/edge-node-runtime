@@ -54,6 +54,7 @@ DEFAULT_COMPLETION_TIMEOUT_SECONDS = 2700.0
 DEFAULT_POLL_SECONDS = 5.0
 DEFAULT_VAST_NODES = 2
 DEFAULT_VAST_MAX_PRICE = 0.25
+DEFAULT_NODE_LAUNCH_ATTEMPTS = 3
 DEFAULT_LAUNCH_TIMEOUT_SECONDS = 240.0
 DEFAULT_LAUNCH_PROGRESS_GRACE_SECONDS = 120.0
 DEFAULT_STARTUP_PROGRESS_STALE_SECONDS = 600.0
@@ -98,6 +99,7 @@ class DrillConfig:
     preferred_offer_ids: tuple[int, ...] = ()
     exclude_offer_ids: tuple[int, ...] = ()
     exclude_machine_ids: tuple[str, ...] = ()
+    launch_attempts_per_node: int = DEFAULT_NODE_LAUNCH_ATTEMPTS
     launch_timeout_seconds: float = DEFAULT_LAUNCH_TIMEOUT_SECONDS
     launch_progress_grace_seconds: float = DEFAULT_LAUNCH_PROGRESS_GRACE_SECONDS
     disk_gb: int = 80
@@ -133,6 +135,8 @@ class DrillConfig:
             )
         if not str(self.operator_token or "").strip():
             raise LiveVastBatchRouterDrillError("AUTONOMOUSC_OPERATOR_API_KEY is required.")
+        if self.launch_attempts_per_node < 1:
+            raise LiveVastBatchRouterDrillError("launch_attempts_per_node must be positive.")
 
 
 @dataclass
@@ -554,6 +558,45 @@ def json_default(value: Any) -> str:
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
+def resource_checkpoint_payload(state: DrillState) -> dict[str, Any]:
+    return {
+        "run_id": state.run_id,
+        "updated_at": now_iso(),
+        "batch_id": state.batch_id,
+        "quote_id": state.quote_id,
+        "nodes": [
+            {
+                "node_id": node.node_id,
+                "instance_id": node.instance_id,
+                "machine_ids": list(node.machine_ids),
+                "destroyed": node.destroyed,
+                "revoked": node.revoked,
+                "destroy_error": node.destroy_error,
+                "revoke_error": node.revoke_error,
+            }
+            for node in state.nodes
+        ],
+    }
+
+
+def write_resource_checkpoint(config: DrillConfig, state: DrillState) -> None:
+    write_json(config.artifact_dir / "resource-checkpoint.json", resource_checkpoint_payload(state))
+
+
+def append_event(config: DrillConfig, event: str, **fields: Any) -> None:
+    record = {
+        "at": now_iso(),
+        "event": event,
+        **dict(redact_sensitive_payload(fields)),
+    }
+    line = json.dumps(record, sort_keys=True, default=json_default)
+    config.artifact_dir.mkdir(parents=True, exist_ok=True)
+    with (config.artifact_dir / "progress.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(line)
+        handle.write("\n")
+    print(line, flush=True)
+
+
 def config_report(config: DrillConfig) -> dict[str, Any]:
     secret_keys = {"vast_api_key", "batchrouter_api_key", "operator_token", "hf_token"}
     return {
@@ -638,69 +681,152 @@ def launch_vast_nodes(config: DrillConfig, state: DrillState, edge: EdgeControlA
     try:
         runner = VastSmokeRunner(api, runtime)
         for index in range(config.launch_nodes):
-            label = f"batchrouter-drill-{state.run_id}-node-{index + 1}"
-            node = edge.enroll_node(config, label=label)
-            state.nodes.append(node)
-            smoke_config = VastSmokeConfig(
-                api_key=config.vast_api_key,
-                model=config.vast_model,
-                max_price=config.max_price,
-                image=config.image,
-                disk_gb=config.disk_gb,
-                min_vram_gb=15,
-                min_cuda_max_good=config.min_cuda_max_good,
-                min_reliability=config.min_reliability,
-                min_inet_down_mbps=config.min_inet_down_mbps,
-                preferred_offer_id=(
-                    int(config.preferred_offer_ids[index])
-                    if index < len(config.preferred_offer_ids)
-                    else None
-                ),
-                exclude_offer_ids=tuple(config.exclude_offer_ids),
-                exclude_machine_ids=tuple(sorted(set(config.exclude_machine_ids) | machine_exclusions)),
-                launch_timeout_seconds=config.launch_timeout_seconds,
-                launch_progress_grace_seconds=config.launch_progress_grace_seconds,
-                readiness_timeout_seconds=1200,
-                startup_status_connect_timeout_seconds=240,
-                startup_progress_stale_seconds=config.startup_progress_stale_seconds,
-                startup_max_vllm_restarts=config.startup_max_vllm_restarts,
-                poll_interval_seconds=10,
-                api_kind="responses",
-                max_context_tokens=config.max_context_tokens,
-                hf_token=config.hf_token,
-                benchmark_requests=0,
-                vllm_extra_args=DEFAULT_GEMMA_E4B_VLLM_EXTRA_ARGS,
-                durable_node=True,
-                edge_control_url=config.edge_control_url,
-                node_id=node.node_id,
-                node_key=node.node_key,
-                operator_token=config.operator_token,
-                node_region=config.node_region,
-                runtime_profile=config.runtime_profile,
-                max_batch_tokens=config.max_batch_tokens,
-                target_batch_items=config.target_batch_items,
-                max_batch_items=config.max_batch_items,
-                target_batch_tokens=config.target_batch_tokens,
-                max_concurrent_chunks=config.max_concurrent_chunks,
-                max_concurrent_assignments=config.max_concurrent_assignments,
-                max_local_queue_assignments=config.max_local_queue_assignments,
-                pull_bundle_size=config.pull_bundle_size,
-                vllm_startup_timeout_seconds=config.vllm_startup_timeout_seconds,
-            )
-            report = runner.run(smoke_config)
-            node.launch_report = report
-            write_json(config.artifact_dir / f"vast-node-{index + 1}.json", report)
-            if report.get("status") != "ok":
-                raise LiveVastBatchRouterDrillError(
-                    f"Vast node {index + 1} failed to launch: {report.get('error') or report.get('status')}"
+            ready_node: DrillNode | None = None
+            last_error = "Vast node launch did not run."
+            for attempt in range(config.launch_attempts_per_node):
+                label_suffix = f"node-{index + 1}" if attempt == 0 else f"node-{index + 1}-attempt-{attempt + 1}"
+                label = f"batchrouter-drill-{state.run_id}-{label_suffix}"
+                append_event(config, "node.enroll.start", node_index=index + 1, attempt=attempt + 1, label=label)
+                node = edge.enroll_node(config, label=label)
+                state.nodes.append(node)
+                write_resource_checkpoint(config, state)
+                append_event(
+                    config,
+                    "node.enrolled",
+                    node_index=index + 1,
+                    attempt=attempt + 1,
+                    node_id=node.node_id,
+                    label=label,
                 )
-            instance = report.get("instance")
-            if isinstance(instance, Mapping):
-                node.instance_id = int(instance.get("id") or 0) or None
-            selected_offer = report.get("selected_offer")
-            if isinstance(selected_offer, Mapping):
-                node.machine_ids = machine_ids_from_offer_report(selected_offer)
-                machine_exclusions.update(node.machine_ids)
+                smoke_config = VastSmokeConfig(
+                    api_key=config.vast_api_key,
+                    model=config.vast_model,
+                    max_price=config.max_price,
+                    image=config.image,
+                    disk_gb=config.disk_gb,
+                    min_vram_gb=15,
+                    min_cuda_max_good=config.min_cuda_max_good,
+                    min_reliability=config.min_reliability,
+                    min_inet_down_mbps=config.min_inet_down_mbps,
+                    preferred_offer_id=(
+                        int(config.preferred_offer_ids[index])
+                        if index < len(config.preferred_offer_ids) and attempt == 0
+                        else None
+                    ),
+                    exclude_offer_ids=tuple(config.exclude_offer_ids),
+                    exclude_machine_ids=tuple(sorted(set(config.exclude_machine_ids) | machine_exclusions)),
+                    launch_timeout_seconds=config.launch_timeout_seconds,
+                    launch_progress_grace_seconds=config.launch_progress_grace_seconds,
+                    readiness_timeout_seconds=1200,
+                    startup_status_connect_timeout_seconds=240,
+                    startup_progress_stale_seconds=config.startup_progress_stale_seconds,
+                    startup_max_vllm_restarts=config.startup_max_vllm_restarts,
+                    poll_interval_seconds=10,
+                    api_kind="responses",
+                    max_context_tokens=config.max_context_tokens,
+                    hf_token=config.hf_token,
+                    benchmark_requests=0,
+                    vllm_extra_args=DEFAULT_GEMMA_E4B_VLLM_EXTRA_ARGS,
+                    durable_node=True,
+                    edge_control_url=config.edge_control_url,
+                    node_id=node.node_id,
+                    node_key=node.node_key,
+                    operator_token=config.operator_token,
+                    node_region=config.node_region,
+                    runtime_profile=config.runtime_profile,
+                    max_batch_tokens=config.max_batch_tokens,
+                    target_batch_items=config.target_batch_items,
+                    max_batch_items=config.max_batch_items,
+                    target_batch_tokens=config.target_batch_tokens,
+                    max_concurrent_chunks=config.max_concurrent_chunks,
+                    max_concurrent_assignments=config.max_concurrent_assignments,
+                    max_local_queue_assignments=config.max_local_queue_assignments,
+                    pull_bundle_size=config.pull_bundle_size,
+                    vllm_startup_timeout_seconds=config.vllm_startup_timeout_seconds,
+                )
+                append_event(
+                    config,
+                    "vast.launch.start",
+                    node_index=index + 1,
+                    attempt=attempt + 1,
+                    node_id=node.node_id,
+                    excluded_machine_ids=sorted(set(config.exclude_machine_ids) | machine_exclusions),
+                )
+                try:
+                    report = runner.run(smoke_config)
+                except Exception as error:
+                    last_error = str(error) or error.__class__.__name__
+                    append_event(
+                        config,
+                        "vast.launch.error",
+                        node_index=index + 1,
+                        attempt=attempt + 1,
+                        node_id=node.node_id,
+                        error=last_error,
+                    )
+                    try:
+                        edge.revoke_node(node.node_id)
+                        node.revoked = True
+                        append_event(config, "node.revoke.after_launch_error", node_id=node.node_id)
+                    except Exception as revoke_error:  # pragma: no cover - live cleanup protection
+                        node.revoke_error = str(revoke_error) or revoke_error.__class__.__name__
+                        append_event(config, "node.revoke.after_launch_error.failed", node_id=node.node_id, error=node.revoke_error)
+                    write_resource_checkpoint(config, state)
+                    continue
+                node.launch_report = report
+                write_json(config.artifact_dir / f"vast-node-{index + 1}-attempt-{attempt + 1}.json", report)
+                if attempt == 0 or report.get("status") == "ok":
+                    write_json(config.artifact_dir / f"vast-node-{index + 1}.json", report)
+                instance = report.get("instance")
+                if isinstance(instance, Mapping):
+                    node.instance_id = int(instance.get("id") or 0) or None
+                cleanup = report.get("cleanup")
+                if isinstance(cleanup, Mapping) and cleanup.get("destroyed"):
+                    node.destroyed = True
+                selected_offer = report.get("selected_offer")
+                if isinstance(selected_offer, Mapping):
+                    node.machine_ids = machine_ids_from_offer_report(selected_offer)
+                    machine_exclusions.update(node.machine_ids)
+                write_resource_checkpoint(config, state)
+                if report.get("status") != "ok":
+                    last_error = str(report.get("error") or report.get("status") or "unknown launch error")
+                    append_event(
+                        config,
+                        "vast.launch.unhealthy",
+                        node_index=index + 1,
+                        attempt=attempt + 1,
+                        node_id=node.node_id,
+                        instance_id=node.instance_id,
+                        machine_ids=list(node.machine_ids),
+                        status=report.get("status"),
+                        error=report.get("error"),
+                    )
+                    try:
+                        edge.revoke_node(node.node_id)
+                        node.revoked = True
+                        append_event(config, "node.revoke.after_unhealthy_launch", node_id=node.node_id)
+                    except Exception as revoke_error:  # pragma: no cover - live cleanup protection
+                        node.revoke_error = str(revoke_error) or revoke_error.__class__.__name__
+                        append_event(config, "node.revoke.after_unhealthy_launch.failed", node_id=node.node_id, error=node.revoke_error)
+                    write_resource_checkpoint(config, state)
+                    continue
+                append_event(
+                    config,
+                    "vast.launch.ready",
+                    node_index=index + 1,
+                    attempt=attempt + 1,
+                    node_id=node.node_id,
+                    instance_id=node.instance_id,
+                    machine_ids=list(node.machine_ids),
+                    timings=report.get("timings") if isinstance(report.get("timings"), Mapping) else None,
+                )
+                ready_node = node
+                break
+            if ready_node is None:
+                raise LiveVastBatchRouterDrillError(
+                    f"Vast node {index + 1} failed to launch after "
+                    f"{config.launch_attempts_per_node} attempts: {last_error}"
+                )
     finally:
         runtime.close()
         api.close()
@@ -743,7 +869,15 @@ def wait_for_batch_terminal(
     deadline = time.monotonic() + config.completion_timeout_seconds
     polls: list[dict[str, Any]] = []
     while time.monotonic() < deadline:
-        payload = batchrouter.get_batch(batch_id)
+        try:
+            payload = batchrouter.get_batch(batch_id)
+        except (httpx.TimeoutException, httpx.TransportError) as error:
+            poll_error = str(error) or error.__class__.__name__
+            polls.append({"at": now_iso(), "error": poll_error})
+            write_json(config.artifact_dir / "batch-polls.json", polls)
+            append_event(config, "batchrouter.batch.poll.retry", batch_id=batch_id, error=poll_error)
+            time.sleep(config.poll_seconds)
+            continue
         state.batch = payload
         current_state = batch_state(payload)
         counts = dict(batch_counts(payload))
@@ -763,6 +897,7 @@ def destroy_node_instance(config: DrillConfig, node: DrillNode) -> None:
     try:
         api.destroy_instance(node.instance_id)
         node.destroyed = True
+        append_event(config, "vast.instance.destroyed", node_id=node.node_id, instance_id=node.instance_id)
     finally:
         api.close()
 
@@ -774,20 +909,33 @@ def cleanup_resources(config: DrillConfig, state: DrillState, edge: EdgeControlA
         for node in state.nodes:
             if node.instance_id is not None and not node.destroyed:
                 try:
+                    append_event(config, "cleanup.destroy.start", node_id=node.node_id, instance_id=node.instance_id)
                     api.destroy_instance(node.instance_id)
                     node.destroyed = True
                     cleanup["destroyed_instances"].append(node.instance_id)
+                    append_event(config, "cleanup.destroy.ok", node_id=node.node_id, instance_id=node.instance_id)
                 except Exception as error:  # pragma: no cover - live cleanup protection
                     node.destroy_error = str(error) or error.__class__.__name__
                     cleanup["errors"].append({"instance_id": node.instance_id, "error": node.destroy_error})
+                    append_event(
+                        config,
+                        "cleanup.destroy.error",
+                        node_id=node.node_id,
+                        instance_id=node.instance_id,
+                        error=node.destroy_error,
+                    )
             if not node.revoked:
                 try:
+                    append_event(config, "cleanup.revoke.start", node_id=node.node_id)
                     edge.revoke_node(node.node_id)
                     node.revoked = True
                     cleanup["revoked_nodes"].append(node.node_id)
+                    append_event(config, "cleanup.revoke.ok", node_id=node.node_id)
                 except Exception as error:  # pragma: no cover - live cleanup protection
                     node.revoke_error = str(error) or error.__class__.__name__
                     cleanup["errors"].append({"node_id": node.node_id, "error": node.revoke_error})
+                    append_event(config, "cleanup.revoke.error", node_id=node.node_id, error=node.revoke_error)
+            write_resource_checkpoint(config, state)
     finally:
         api.close()
     return cleanup
@@ -813,21 +961,44 @@ def run_drill(config: DrillConfig) -> dict[str, Any]:
     error_message: str | None = None
     try:
         write_json(config.artifact_dir / "drill-config.redacted.json", {"run_id": run_id, "config": config_report(config)})
+        append_event(config, "drill.started", run_id=run_id, batch_size=config.batch_size, launch_nodes=config.launch_nodes)
         launch_vast_nodes(config, state, edge)
+        ready_nodes = [
+            node
+            for node in state.nodes
+            if isinstance(node.launch_report, Mapping) and node.launch_report.get("status") == "ok"
+        ]
+        append_event(config, "vast.nodes.ready", node_count=len(ready_nodes), launch_attempts=len(state.nodes))
         manifest = build_batch_manifest(config, run_id=run_id)
+        append_event(config, "batchrouter.quote.start", item_count=config.batch_size)
         quote = batchrouter.quote_batch(manifest)
         ensure_quote_under_cap(quote, max_quote_usd=config.max_quote_usd)
         state.quote_id = extract_quote_id(quote)
         write_json(config.artifact_dir / "batchrouter-quote.json", quote)
+        write_resource_checkpoint(config, state)
+        append_event(config, "batchrouter.quote.ok", quote_id=state.quote_id)
         create_manifest = {**manifest, "quote_id": state.quote_id}
+        append_event(config, "batchrouter.create.start", quote_id=state.quote_id)
         created = batchrouter.create_batch(create_manifest, idempotency_key=f"{run_id}-create")
         state.batch_id = extract_batch_id(created)
         write_json(config.artifact_dir / "batchrouter-created.json", created)
+        write_resource_checkpoint(config, state)
+        append_event(config, "batchrouter.create.ok", batch_id=state.batch_id)
 
+        append_event(config, "assignment.wait.start", batch_id=state.batch_id)
         victim = wait_for_assignment(config=config, d1=d1, state=state, batch_id=state.batch_id)
         state.victim_node_id = victim.node_id
         state.victim_instance_id = victim.instance_id
+        write_resource_checkpoint(config, state)
+        append_event(
+            config,
+            "assignment.victim.selected",
+            batch_id=state.batch_id,
+            node_id=victim.node_id,
+            instance_id=victim.instance_id,
+        )
         destroy_node_instance(config, victim)
+        write_resource_checkpoint(config, state)
 
         final_batch = wait_for_batch_terminal(
             config=config,
@@ -848,6 +1019,14 @@ def run_drill(config: DrillConfig) -> dict[str, Any]:
         write_json(config.artifact_dir / "batchrouter-final-batch.json", final_batch)
         write_json(config.artifact_dir / "batchrouter-results.json", state.results)
         write_json(config.artifact_dir / "batchrouter-billing-receipt.json", state.billing_receipt)
+        write_resource_checkpoint(config, state)
+        append_event(
+            config,
+            "batchrouter.batch.terminal",
+            batch_id=state.batch_id,
+            state=batch_state(final_batch),
+            counts=dict(batch_counts(final_batch)),
+        )
 
         counts = batch_counts(final_batch)
         completed = int(counts.get("completed") or 0)
@@ -861,8 +1040,10 @@ def run_drill(config: DrillConfig) -> dict[str, Any]:
         status = "ok"
     except Exception as error:
         error_message = str(error) or error.__class__.__name__
+        append_event(config, "drill.error", error=error_message)
     finally:
         cleanup = cleanup_resources(config, state, edge)
+        append_event(config, "cleanup.finished", cleanup=cleanup)
         batchrouter.close()
         edge.close()
 
@@ -899,6 +1080,7 @@ def run_drill(config: DrillConfig) -> dict[str, Any]:
         "notes": state.notes,
     }
     write_json(config.artifact_dir / "summary.json", summary)
+    append_event(config, "drill.finished", status=status, error=error_message, batch_id=state.batch_id)
     return redact_sensitive_payload(summary)
 
 
@@ -974,6 +1156,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--exclude-offer-ids", default="", help="Comma-separated Vast offer ids to exclude.")
     parser.add_argument("--exclude-machine-ids", default="", help="Comma-separated Vast machine/host ids to exclude.")
+    parser.add_argument(
+        "--launch-attempts-per-node",
+        type=int,
+        default=DEFAULT_NODE_LAUNCH_ATTEMPTS,
+        help="Fresh Vast search/enrollment attempts allowed for each required ready node.",
+    )
     parser.add_argument(
         "--launch-timeout-seconds",
         type=float,
@@ -1089,6 +1277,10 @@ def build_config_from_args(args: argparse.Namespace) -> DrillConfig:
                 list(getattr(args, "exclude_machine_id", []) or ()),
                 csv_value=str(getattr(args, "exclude_machine_ids", "") or ""),
             )
+        ),
+        launch_attempts_per_node=max(
+            1,
+            int(getattr(args, "launch_attempts_per_node", DEFAULT_NODE_LAUNCH_ATTEMPTS)),
         ),
         launch_timeout_seconds=max(30.0, float(args.launch_timeout_seconds)),
         launch_progress_grace_seconds=max(0.0, float(args.launch_progress_grace_seconds)),
