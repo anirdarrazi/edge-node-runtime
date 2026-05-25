@@ -313,8 +313,8 @@ bash publish-latest-image.sh        # Linux/macOS
 ### Model Preloading
 ```bash
 # Control which models are pre-loaded (default: bootstrap model)
-PRELOAD_HF_MODELS=BAAI/bge-large-en-v1.5 bash build-manager-image.sh
-PRELOAD_HF_MODELS= bash build-manager-image.sh  # No preloading
+PRELOAD_HF_MODELS= bash build-manager-image.sh  # Lean default, no preloading
+PRELOAD_HF_MODELS=BAAI/bge-large-en-v1.5 bash build-manager-image.sh  # Opt-in preloading
 ```
 
 ---

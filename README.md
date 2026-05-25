@@ -69,7 +69,7 @@ Windows PowerShell:
 .\build-manager-image.ps1
 ```
 
-The regular runtime images now preseed the public bootstrap-model cache into the image layer by default so a fresh Vast boot can reuse local model files instead of redownloading them after startup. Override or disable that during build with `PRELOAD_HF_MODELS`, for example `PRELOAD_HF_MODELS=BAAI/bge-large-en-v1.5 bash build-single-image.sh` or `PRELOAD_HF_MODELS= bash build-manager-image.sh`.
+Runtime images do not preseed model weights by default, keeping production Vast images small and avoiding unrelated cache layers. Opt in per profile with `PRELOAD_HF_MODELS` when a specific starter model should be baked into the image, for example `PRELOAD_HF_MODELS=BAAI/bge-large-en-v1.5 bash build-single-image.sh`. Leave it empty, such as `PRELOAD_HF_MODELS= bash build-manager-image.sh`, for the lean default.
 
 ### Vast.ai RTX 5060 Ti Gemma profile
 

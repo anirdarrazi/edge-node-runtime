@@ -1,5 +1,6 @@
 ARG VLLM_BASE_IMAGE=vllm/vllm-openai@sha256:d9a5c1c1614c959fde8d2a4d68449db184572528a6055afdd0caf1e66fb51504
-FROM docker:27-cli AS docker-cli
+ARG DOCKER_CLI_IMAGE=docker:27-cli@sha256:851f91d241214e7c6db86513b270d58776379aacc5eb9c4a87e5b47115e3065c
+FROM ${DOCKER_CLI_IMAGE} AS docker-cli
 
 ARG VLLM_BASE_IMAGE
 FROM ${VLLM_BASE_IMAGE}
@@ -13,7 +14,7 @@ COPY pyproject.toml /app/pyproject.toml
 COPY src /app/src
 
 ENV HF_HOME=/var/lib/autonomousc/data/model-cache
-ARG PRELOAD_HF_MODELS=BAAI/bge-large-en-v1.5
+ARG PRELOAD_HF_MODELS=
 ENV AUTONOMOUSC_PRELOADED_HF_MODELS=${PRELOAD_HF_MODELS}
 
 RUN mkdir -p /usr/local/libexec/docker/cli-plugins \
@@ -28,10 +29,6 @@ ENV INFERENCE_BASE_URL=http://127.0.0.1:8000
 ENV VLLM_BASE_URL=http://127.0.0.1:8000
 ENV VLLM_HOST=0.0.0.0
 ENV VLLM_PORT=8000
-ENV CREDENTIALS_PATH=/var/lib/autonomousc/data/credentials/node-credentials.json
-ENV ATTESTATION_STATE_PATH=/var/lib/autonomousc/data/credentials/attestation-state.json
-ENV RECOVERY_NOTE_PATH=/var/lib/autonomousc/data/credentials/recovery-note.txt
-ENV AUTOPILOT_STATE_PATH=/var/lib/autonomousc/data/scratch/autopilot-state.json
 
 EXPOSE 8765 8000
 

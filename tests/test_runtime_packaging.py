@@ -60,6 +60,32 @@ def test_single_container_dockerfile_does_not_bake_credential_paths_as_env() -> 
     assert "ENV AUTOPILOT_STATE_PATH=" not in content
 
 
+@pytest.mark.parametrize("dockerfile", ("Dockerfile", "Dockerfile.service", "Dockerfile.single"))
+def test_runtime_dockerfiles_pin_external_base_images(dockerfile: str) -> None:
+    content = (RUNTIME_ROOT / dockerfile).read_text(encoding="utf-8")
+
+    for line in content.splitlines():
+        if line.startswith(("ARG PYTHON_BASE_IMAGE=", "ARG DOCKER_CLI_IMAGE=", "ARG VLLM_BASE_IMAGE=")):
+            assert "@sha256:" in line
+
+
+def test_service_dockerfile_lets_runtime_code_own_credential_paths() -> None:
+    content = (RUNTIME_ROOT / "Dockerfile.service").read_text(encoding="utf-8")
+
+    assert "ENV CREDENTIALS_PATH=" not in content
+    assert "ENV ATTESTATION_STATE_PATH=" not in content
+    assert "ENV RECOVERY_NOTE_PATH=" not in content
+    assert "ENV AUTOPILOT_STATE_PATH=" not in content
+
+
+@pytest.mark.parametrize("dockerfile", ("Dockerfile.service", "Dockerfile.single"))
+def test_runtime_cuda_images_do_not_preload_models_by_default(dockerfile: str) -> None:
+    content = (RUNTIME_ROOT / dockerfile).read_text(encoding="utf-8")
+
+    assert "ARG PRELOAD_HF_MODELS=\n" in content
+    assert "ARG PRELOAD_HF_MODELS=BAAI/bge-large-en-v1.5" not in content
+
+
 def test_built_wheel_includes_hidden_runtime_env_example(tmp_path: Path) -> None:
     completed = subprocess.run(
         [
