@@ -42,6 +42,7 @@ from .vast_smoke import (
     offer_machine_id_values,
     parse_identity_list,
     redact_sensitive_payload,
+    vast_account_launch_blocker_for_api,
 )
 
 
@@ -784,6 +785,9 @@ def launch_vast_nodes(config: DrillConfig, state: DrillState, edge: EdgeControlA
     try:
         runner = VastSmokeRunner(api, runtime)
         for index in range(config.launch_nodes):
+            account_blocker = vast_account_launch_blocker_for_api(api)
+            if account_blocker:
+                raise LiveVastBatchRouterDrillError(account_blocker)
             ready_node: DrillNode | None = None
             last_error = "Vast node launch did not run."
             for attempt in range(config.launch_attempts_per_node):

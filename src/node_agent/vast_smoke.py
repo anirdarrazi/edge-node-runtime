@@ -181,6 +181,10 @@ class VastRealizedCostExceededError(VastSmokeError):
     pass
 
 
+class VastAccountLaunchError(VastSmokeError):
+    pass
+
+
 def redact_sensitive_text(value: str) -> str:
     redacted = str(value)
     for pattern in SENSITIVE_TEXT_PATTERNS:
@@ -581,6 +585,12 @@ class VastAPI:
             raise VastSmokeError("Vast offer search returned an unexpected payload.")
         return [offer for offer in offers if isinstance(offer, dict)]
 
+    def current_user(self) -> dict[str, Any]:
+        response = self._request_with_retries("get", "/users/current/")
+        response.raise_for_status()
+        body = response.json()
+        return body if isinstance(body, dict) else {}
+
     def create_instance(
         self,
         offer_id: int,
@@ -688,6 +698,15 @@ def _float_value(payload: dict[str, Any], key: str, default: float = 0.0) -> flo
         return default
 
 
+def _optional_float_value(value: Any) -> float | None:
+    if value in {None, ""}:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _int_value(payload: dict[str, Any], key: str, default: int = 0) -> int:
     try:
         return int(float(payload.get(key) or default))
@@ -758,6 +777,43 @@ def response_json_object(response: Any) -> dict[str, Any] | None:
     except (AttributeError, TypeError, ValueError):
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def vast_account_launch_blocker(user: Mapping[str, Any] | None) -> str | None:
+    if not isinstance(user, Mapping):
+        return None
+    can_pay = user.get("can_pay")
+    if can_pay is False:
+        return "Vast account cannot launch instances right now: can_pay=false."
+    balance = _optional_float_value(user.get("balance"))
+    threshold = _optional_float_value(user.get("balance_threshold"))
+    credit = _optional_float_value(user.get("credit"))
+    threshold_enabled = bool(user.get("balance_threshold_enabled"))
+    credit_only = bool(user.get("billing_creditonly"))
+    if threshold_enabled and balance is not None and threshold is not None and balance <= threshold:
+        credit_text = "unknown" if credit is None else f"${credit:.6f}"
+        return (
+            "Vast account balance is below its launch threshold: "
+            f"balance=${balance:.6f}, threshold=${threshold:.6f}, credit={credit_text}. "
+            "Add credit before launching production drills."
+        )
+    if credit_only and credit is not None and credit <= 0 and balance is not None and balance < 0:
+        return (
+            "Vast account has no remaining credit for credit-only billing: "
+            f"balance=${balance:.6f}, credit=${credit:.6f}. "
+            "Add credit before launching production drills."
+        )
+    return None
+
+
+def vast_account_launch_blocker_for_api(api: Any) -> str | None:
+    current_user = getattr(api, "current_user", None)
+    if current_user is None:
+        return None
+    try:
+        return vast_account_launch_blocker(current_user())
+    except Exception:
+        return None
 
 
 def is_retryable_offer_error(body: dict[str, Any] | None) -> bool:
@@ -2358,6 +2414,9 @@ class VastSmokeRunner:
         successful_launch_started_at: float | None = None
         ready_at: float | None = None
         try:
+            account_blocker = vast_account_launch_blocker_for_api(self.api)
+            if account_blocker:
+                raise VastAccountLaunchError(account_blocker)
             offers = self.api.search_offers(config)
             candidate_offers = affordable_offers(
                 offers,

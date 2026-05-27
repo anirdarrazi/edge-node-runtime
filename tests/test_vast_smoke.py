@@ -54,14 +54,21 @@ class FakeVastAPI:
         offers: list[dict[str, object]],
         instances: list[dict[str, object] | None],
         create_errors: dict[int, Exception] | None = None,
+        current_user_payload: dict[str, object] | None = None,
     ) -> None:
         self.offers = offers
         self.instances = list(instances)
         self.create_errors = dict(create_errors or {})
+        self.current_user_payload = dict(current_user_payload or {})
         self.created: list[dict[str, object]] = []
         self.destroyed: list[int] = []
+        self.searched = 0
+
+    def current_user(self) -> dict[str, object]:
+        return dict(self.current_user_payload)
 
     def search_offers(self, config: vast_smoke.VastSmokeConfig) -> list[dict[str, object]]:
+        self.searched += 1
         return list(self.offers)
 
     def create_instance(
@@ -127,6 +134,58 @@ class FakeRuntimeProbeClient:
         if isinstance(result, Exception):
             raise result
         return result
+
+
+def test_vast_account_launch_blocker_flags_exhausted_credit() -> None:
+    message = vast_smoke.vast_account_launch_blocker(
+        {
+            "can_pay": True,
+            "balance": -0.103849,
+            "balance_threshold": -0.01,
+            "balance_threshold_enabled": True,
+            "billing_creditonly": 1,
+            "credit": 0,
+        }
+    )
+
+    assert message is not None
+    assert "below its launch threshold" in message
+    assert "Add credit" in message
+
+
+def test_runner_fails_fast_before_offer_search_when_vast_credit_is_exhausted() -> None:
+    api = FakeVastAPI(
+        offers=[
+            {
+                "id": 1001,
+                "gpu_name": "RTX 5060 Ti",
+                "gpu_ram": 16384,
+                "dph_total": 0.25,
+                "reliability": 0.997,
+                "inet_down": 900,
+                "cuda_max_good": 13.0,
+            }
+        ],
+        instances=[],
+        current_user_payload={
+            "can_pay": True,
+            "balance": -0.103849,
+            "balance_threshold": -0.01,
+            "balance_threshold_enabled": True,
+            "billing_creditonly": 1,
+            "credit": 0,
+        },
+    )
+
+    report = vast_smoke.VastSmokeRunner(
+        api,
+        FakeRuntimeProbeClient(get_responses=[], post_responses=[]),
+    ).run(vast_smoke.VastSmokeConfig(api_key="secret", max_price=0.30))
+
+    assert report["status"] == "error"
+    assert "below its launch threshold" in report["error"]
+    assert api.searched == 0
+    assert api.created == []
 
 
 class AlwaysFailRuntimeProbeClient:
