@@ -627,13 +627,13 @@ def test_runner_durable_gemma_node_uses_full_mode_and_stays_live() -> None:
     assert env["SUPPORTED_MODELS"] == "google/gemma-4-E4B-it"
     assert env["NODE_REGION"] == "eu-se-1"
     assert env["MAX_CONTEXT_TOKENS"] == "32768"
-    assert env["MAX_BATCH_TOKENS"] == "32768"
+    assert env["MAX_BATCH_TOKENS"] == "524288"
     assert env["TARGET_BATCH_ITEMS"] == "100"
     assert env["MAX_BATCH_ITEMS"] == "250"
-    assert env["TARGET_BATCH_TOKENS"] == "12000"
+    assert env["TARGET_BATCH_TOKENS"] == "262144"
     assert env["MAX_CONCURRENT_CHUNKS"] == "4"
     assert env["AVAILABLE_QUEUE_ITEMS"] == "5000"
-    assert env["AVAILABLE_QUEUE_TOKENS"] == "262144"
+    assert env["AVAILABLE_QUEUE_TOKENS"] == "2097152"
     assert env["MAX_QUEUED_ITEMS"] == "5000"
     assert env["BATCHROUTER_CAPACITY_TIER"] == "edge"
     assert env["MAX_CONCURRENT_ASSIGNMENTS"] == "8"
@@ -1995,7 +1995,7 @@ def test_fleet_plan_marks_expensive_operator_override(monkeypatch) -> None:
     assert any("exceeds the rtx_5060_ti_16gb_gemma4_e4b_it profile safety ceiling" in note for note in plan["notes"])
 
 
-def test_durable_gemma_defaults_keep_the_local_reservoir_shallow() -> None:
+def test_durable_gemma_defaults_keep_item_chunks_small_but_token_window_large() -> None:
     config = vast_smoke.build_config_from_args(
         vast_smoke.parse_args(
             [
@@ -2016,7 +2016,7 @@ def test_durable_gemma_defaults_keep_the_local_reservoir_shallow() -> None:
 
     assert config.target_batch_items == 100
     assert config.max_batch_items == 250
-    assert config.target_batch_tokens == 12000
+    assert config.target_batch_tokens == 262144
     assert config.max_concurrent_chunks == 4
     assert config.max_concurrent_assignments == 8
     assert config.max_local_queue_assignments == 4

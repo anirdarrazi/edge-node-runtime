@@ -21,6 +21,9 @@ from .vast_smoke import (
     DEFAULT_DURABLE_MAX_CONCURRENT_ASSIGNMENTS,
     DEFAULT_DURABLE_MAX_CONCURRENT_CHUNKS,
     DEFAULT_DURABLE_MAX_LOCAL_QUEUE_ASSIGNMENTS,
+    DEFAULT_DURABLE_AVAILABLE_QUEUE_ITEMS,
+    DEFAULT_DURABLE_AVAILABLE_QUEUE_TOKENS,
+    DEFAULT_DURABLE_MAX_QUEUED_ITEMS,
     DEFAULT_DURABLE_NODE_REGION,
     DEFAULT_DURABLE_PULL_BUNDLE_SIZE,
     DEFAULT_DURABLE_RUNTIME_PROFILE,
@@ -114,6 +117,9 @@ class DrillConfig:
     max_concurrent_chunks: int = DEFAULT_DURABLE_MAX_CONCURRENT_CHUNKS
     max_concurrent_assignments: int = DEFAULT_DURABLE_MAX_CONCURRENT_ASSIGNMENTS
     max_local_queue_assignments: int = DEFAULT_DURABLE_MAX_LOCAL_QUEUE_ASSIGNMENTS
+    available_queue_items: int = DEFAULT_DURABLE_AVAILABLE_QUEUE_ITEMS
+    available_queue_tokens: int = DEFAULT_DURABLE_AVAILABLE_QUEUE_TOKENS
+    max_queued_items: int = DEFAULT_DURABLE_MAX_QUEUED_ITEMS
     pull_bundle_size: int = DEFAULT_DURABLE_PULL_BUNDLE_SIZE
     vllm_startup_timeout_seconds: int = 1800
     startup_progress_stale_seconds: float = DEFAULT_STARTUP_PROGRESS_STALE_SECONDS
@@ -495,9 +501,9 @@ def build_node_enroll_payload(config: DrillConfig, *, label: str) -> dict[str, A
             "max_concurrent_chunks": config.max_concurrent_chunks,
             "max_local_queue_assignments": config.max_local_queue_assignments,
             "max_pull_bundle_assignments": max(config.max_local_queue_assignments, config.pull_bundle_size),
-            "available_queue_items": 5000,
-            "available_queue_tokens": 262144,
-            "max_queued_items": 5000,
+            "available_queue_items": config.available_queue_items,
+            "available_queue_tokens": config.available_queue_tokens,
+            "max_queued_items": config.max_queued_items,
             "capacity_status": "active",
             "heartbeat_ttl_seconds": 120,
             "batchrouter_capacity_tier": "edge",
@@ -1322,6 +1328,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--node-region", default=DEFAULT_DURABLE_NODE_REGION)
     parser.add_argument("--runtime-profile", default=DEFAULT_DURABLE_RUNTIME_PROFILE)
+    parser.add_argument("--max-batch-tokens", type=int, default=DEFAULT_DURABLE_MAX_BATCH_TOKENS)
+    parser.add_argument("--target-batch-tokens", type=int, default=DEFAULT_DURABLE_TARGET_BATCH_TOKENS)
+    parser.add_argument("--available-queue-items", type=int, default=DEFAULT_DURABLE_AVAILABLE_QUEUE_ITEMS)
+    parser.add_argument("--available-queue-tokens", type=int, default=DEFAULT_DURABLE_AVAILABLE_QUEUE_TOKENS)
+    parser.add_argument("--max-queued-items", type=int, default=DEFAULT_DURABLE_MAX_QUEUED_ITEMS)
     parser.add_argument("--image", default=DEFAULT_VAST_SMOKE_IMAGE)
     parser.add_argument("--hf-token", default="", help="Defaults to HUGGING_FACE_HUB_TOKEN, then HF_TOKEN.")
     parser.add_argument("--min-cuda-max-good", type=float, default=DEFAULT_MIN_CUDA_MAX_GOOD)
@@ -1440,6 +1451,11 @@ def build_config_from_args(args: argparse.Namespace) -> DrillConfig:
         require_accepted_assignment=not bool(args.allow_assigned_victim),
         node_region=str(args.node_region or DEFAULT_DURABLE_NODE_REGION).strip(),
         runtime_profile=str(args.runtime_profile or DEFAULT_DURABLE_RUNTIME_PROFILE).strip(),
+        max_batch_tokens=max(1, int(args.max_batch_tokens)),
+        target_batch_tokens=max(1, int(args.target_batch_tokens)),
+        available_queue_items=max(0, int(args.available_queue_items)),
+        available_queue_tokens=max(0, int(args.available_queue_tokens)),
+        max_queued_items=max(0, int(args.max_queued_items)),
         image=str(args.image or DEFAULT_VAST_SMOKE_IMAGE).strip(),
         hf_token=first_nonempty(str(args.hf_token or ""), os.getenv("HUGGING_FACE_HUB_TOKEN"), os.getenv("HF_TOKEN")),
         min_cuda_max_good=float(args.min_cuda_max_good) if args.min_cuda_max_good is not None else None,

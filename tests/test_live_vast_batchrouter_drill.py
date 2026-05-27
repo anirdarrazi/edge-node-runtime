@@ -194,6 +194,9 @@ def test_build_node_enroll_payload_uses_static_drill_node_shape(tmp_path: Path) 
     assert payload["label"] == "node-label"
     assert payload["capabilities"]["batchrouter_capacity_tier"] == "edge"
     assert payload["capabilities"]["max_batch_items"] == 250
+    assert payload["capabilities"]["target_batch_tokens"] == 262144
+    assert payload["capabilities"]["max_batch_tokens"] == 524288
+    assert payload["capabilities"]["available_queue_tokens"] == 2097152
     assert payload["runtime"]["deployment_target"] == "vast_ai"
     assert payload["runtime"]["docker_image"].endswith(":single-cuda-latest")
 
