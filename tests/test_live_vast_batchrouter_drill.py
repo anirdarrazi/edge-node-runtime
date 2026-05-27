@@ -65,6 +65,13 @@ def test_build_batch_manifest_pins_autonomousc_provider(tmp_path: Path) -> None:
     assert manifest["max_price"] == "0.0500"
 
 
+def test_build_batch_manifest_can_skip_failure_drill(tmp_path: Path) -> None:
+    config = replace(minimal_config(tmp_path), launch_nodes=1, destroy_node_after_assignment=False)
+    manifest = drill.build_batch_manifest(config, run_id="run_123")
+
+    assert manifest["metadata"]["failure_mode"] == "none"
+
+
 def test_manifest_file_batch_payload_references_uploaded_input_file(tmp_path: Path) -> None:
     config = replace(minimal_config(tmp_path), batch_size=100_000)
     manifest = drill.build_manifest_file_batch_payload(

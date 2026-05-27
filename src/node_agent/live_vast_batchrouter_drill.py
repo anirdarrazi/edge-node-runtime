@@ -95,6 +95,7 @@ class DrillConfig:
     assignment_timeout_seconds: float = DEFAULT_ASSIGNMENT_TIMEOUT_SECONDS
     completion_timeout_seconds: float = DEFAULT_COMPLETION_TIMEOUT_SECONDS
     require_accepted_assignment: bool = True
+    destroy_node_after_assignment: bool = True
     node_region: str = DEFAULT_DURABLE_NODE_REGION
     runtime_profile: str = DEFAULT_DURABLE_RUNTIME_PROFILE
     image: str = DEFAULT_VAST_SMOKE_IMAGE
@@ -128,8 +129,10 @@ class DrillConfig:
     request_timeout_seconds: float = 90.0
 
     def __post_init__(self) -> None:
-        if self.launch_nodes < 2:
+        if self.destroy_node_after_assignment and self.launch_nodes < 2:
             raise LiveVastBatchRouterDrillError("At least two Vast nodes are required for the failure drill.")
+        if self.launch_nodes < 1:
+            raise LiveVastBatchRouterDrillError("At least one Vast node is required.")
         if self.batch_size < 1:
             raise LiveVastBatchRouterDrillError("batch_size must be positive.")
         if self.max_output_tokens < 1:
@@ -574,7 +577,11 @@ def build_batch_base_payload(config: DrillConfig, *, run_id: str) -> dict[str, A
         "metadata": {
             "live_vast_batchrouter_drill": True,
             "run_id": run_id,
-            "failure_mode": "destroy_node_after_assignment",
+            "failure_mode": (
+                "destroy_node_after_assignment"
+                if config.destroy_node_after_assignment
+                else "none"
+            ),
             "provider": config.provider,
         },
         "max_price": f"{config.max_quote_usd:.4f}",
@@ -1183,8 +1190,17 @@ def run_drill(config: DrillConfig) -> dict[str, Any]:
             node_id=victim.node_id,
             instance_id=victim.instance_id,
         )
-        destroy_node_instance(config, victim)
-        write_resource_checkpoint(config, state)
+        if config.destroy_node_after_assignment:
+            destroy_node_instance(config, victim)
+            write_resource_checkpoint(config, state)
+        else:
+            append_event(
+                config,
+                "assignment.failure_drill.skipped",
+                batch_id=state.batch_id,
+                node_id=victim.node_id,
+                instance_id=victim.instance_id,
+            )
 
         final_batch = wait_for_batch_terminal(
             config=config,
@@ -1326,6 +1342,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Allow destroying a node after an assigned row even if it has not reached accepted yet.",
     )
+    parser.add_argument(
+        "--skip-failure-drill",
+        action="store_true",
+        help="Do not destroy a node after assignment; use the full launched fleet for throughput runs.",
+    )
     parser.add_argument("--node-region", default=DEFAULT_DURABLE_NODE_REGION)
     parser.add_argument("--runtime-profile", default=DEFAULT_DURABLE_RUNTIME_PROFILE)
     parser.add_argument("--max-batch-tokens", type=int, default=DEFAULT_DURABLE_MAX_BATCH_TOKENS)
@@ -1436,7 +1457,7 @@ def build_config_from_args(args: argparse.Namespace) -> DrillConfig:
         edge_control_cwd=edge_control_cwd,
         executions_d1_database=str(args.executions_d1_database or DEFAULT_EXECUTIONS_D1).strip(),
         artifact_dir=artifact_dir,
-        launch_nodes=max(2, int(args.launch_nodes)),
+        launch_nodes=max(1 if bool(args.skip_failure_drill) else 2, int(args.launch_nodes)),
         batch_size=max(1, int(args.batch_size)),
         provider=str(args.provider or DEFAULT_BATCHROUTER_PROVIDER).strip(),
         batchrouter_model=str(args.batchrouter_model or DEFAULT_BATCHROUTER_MODEL).strip(),
@@ -1449,6 +1470,7 @@ def build_config_from_args(args: argparse.Namespace) -> DrillConfig:
         assignment_timeout_seconds=max(1.0, float(args.assignment_timeout_seconds)),
         completion_timeout_seconds=max(1.0, float(args.completion_timeout_seconds)),
         require_accepted_assignment=not bool(args.allow_assigned_victim),
+        destroy_node_after_assignment=not bool(args.skip_failure_drill),
         node_region=str(args.node_region or DEFAULT_DURABLE_NODE_REGION).strip(),
         runtime_profile=str(args.runtime_profile or DEFAULT_DURABLE_RUNTIME_PROFILE).strip(),
         max_batch_tokens=max(1, int(args.max_batch_tokens)),
