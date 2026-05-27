@@ -11,6 +11,7 @@ logs/
 diagnostics/
 test artifacts/
 test-artifacts/
+live-drill-artifacts/
 *.log
 build/
 dist/

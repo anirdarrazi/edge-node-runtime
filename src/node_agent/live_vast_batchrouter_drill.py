@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -49,6 +50,7 @@ DEFAULT_VAST_MODEL = "google/gemma-4-E4B-it"
 DEFAULT_BATCH_SIZE = 500
 DEFAULT_MAX_OUTPUT_TOKENS = 64
 DEFAULT_MAX_QUOTE_USD = 0.05
+DEFAULT_MANIFEST_UPLOAD_THRESHOLD_ITEMS = 5_000
 DEFAULT_ASSIGNMENT_TIMEOUT_SECONDS = 900.0
 DEFAULT_COMPLETION_TIMEOUT_SECONDS = 2700.0
 DEFAULT_POLL_SECONDS = 5.0
@@ -84,6 +86,7 @@ class DrillConfig:
     vast_model: str = DEFAULT_VAST_MODEL
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
     max_quote_usd: float = DEFAULT_MAX_QUOTE_USD
+    manifest_upload_threshold_items: int = DEFAULT_MANIFEST_UPLOAD_THRESHOLD_ITEMS
     max_price: float = DEFAULT_VAST_MAX_PRICE
     poll_seconds: float = DEFAULT_POLL_SECONDS
     assignment_timeout_seconds: float = DEFAULT_ASSIGNMENT_TIMEOUT_SECONDS
@@ -125,6 +128,8 @@ class DrillConfig:
             raise LiveVastBatchRouterDrillError("batch_size must be positive.")
         if self.max_output_tokens < 1:
             raise LiveVastBatchRouterDrillError("max_output_tokens must be positive.")
+        if self.manifest_upload_threshold_items < 0:
+            raise LiveVastBatchRouterDrillError("manifest_upload_threshold_items cannot be negative.")
         if self.poll_seconds <= 0:
             raise LiveVastBatchRouterDrillError("poll_seconds must be positive.")
         if not str(self.vast_api_key or "").strip():
@@ -143,6 +148,7 @@ class DrillConfig:
 class DrillNode:
     node_id: str
     node_key: str
+    launch_label: str | None = None
     instance_id: int | None = None
     machine_ids: tuple[str, ...] = ()
     launch_report: dict[str, Any] | None = None
@@ -166,6 +172,9 @@ class DrillState:
     nodes: list[DrillNode] = field(default_factory=list)
     batch_id: str | None = None
     quote_id: str | None = None
+    input_file_id: str | None = None
+    input_manifest_path: str | None = None
+    input_manifest_bytes: int | None = None
     victim_node_id: str | None = None
     victim_instance_id: int | None = None
     assignment_distribution_before_failure: list[dict[str, Any]] = field(default_factory=list)
@@ -233,6 +242,41 @@ class BatchRouterClient:
     def get_billing_receipt(self, batch_id: str) -> dict[str, Any]:
         return self._request_json("GET", f"/v1/batches/{batch_id}/billing-receipt")
 
+    def upload_input_manifest(
+        self,
+        manifest_path: Path,
+        *,
+        item_count: int,
+        sha256: str,
+        size_bytes: int,
+    ) -> dict[str, Any]:
+        headers = {
+            "content-type": "application/x-ndjson",
+            "content-length": str(size_bytes),
+            "x-batchrouter-item-count": str(item_count),
+            "x-content-sha256": sha256,
+        }
+        with manifest_path.open("rb") as handle:
+            response = self._client.post(
+                "/v1/batches/input-manifests",
+                content=handle,
+                headers=headers,
+            )
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as error:
+            detail = response.text[:1200]
+            raise LiveVastBatchRouterDrillError(
+                f"BatchRouter POST /v1/batches/input-manifests returned HTTP "
+                f"{response.status_code}: {detail}"
+            ) from error
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise LiveVastBatchRouterDrillError(
+                "BatchRouter POST /v1/batches/input-manifests returned a non-object payload."
+            )
+        return payload
+
 
 class EdgeControlAPI:
     def __init__(self, base_url: str, operator_token: str, *, timeout_seconds: float = 60.0) -> None:
@@ -283,7 +327,7 @@ class EdgeControlAPI:
             raise LiveVastBatchRouterDrillError(
                 f"Enrolled node {node_id} is not approved. Use an AUTONOMOUSc operator API key for this drill."
             )
-        return DrillNode(node_id=node_id, node_key=node_key)
+        return DrillNode(node_id=node_id, node_key=node_key, launch_label=label)
 
     def revoke_node(self, node_id: str) -> dict[str, Any]:
         return self._request_json("POST", f"/operator/nodes/{node_id}/revoke", json_body={})
@@ -484,33 +528,32 @@ def build_node_enroll_payload(config: DrillConfig, *, label: str) -> dict[str, A
     }
 
 
-def build_batch_manifest(config: DrillConfig, *, run_id: str) -> dict[str, Any]:
-    items: list[dict[str, Any]] = []
-    for index in range(config.batch_size):
-        items.append(
-            {
-                "customer_item_id": f"{run_id}-{index:06d}",
-                "operation": "responses",
-                "model": config.batchrouter_model,
-                "input": {
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": (
-                                "Return one short sentence that includes the item number "
-                                f"{index} and the word ready."
-                            ),
-                        }
-                    ],
-                    "max_output_tokens": config.max_output_tokens,
-                },
-                "metadata": {
-                    "live_vast_batchrouter_drill": True,
-                    "run_id": run_id,
-                    "item_index": index,
-                },
-            }
-        )
+def build_batch_item(config: DrillConfig, *, run_id: str, index: int) -> dict[str, Any]:
+    return {
+        "customer_item_id": f"{run_id}-{index:06d}",
+        "operation": "responses",
+        "model": config.batchrouter_model,
+        "input": {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": (
+                        "Return one short sentence that includes the item number "
+                        f"{index} and the word ready."
+                    ),
+                }
+            ],
+            "max_output_tokens": config.max_output_tokens,
+        },
+        "metadata": {
+            "live_vast_batchrouter_drill": True,
+            "run_id": run_id,
+            "item_index": index,
+        },
+    }
+
+
+def build_batch_base_payload(config: DrillConfig, *, run_id: str) -> dict[str, Any]:
     return {
         "sla_tier": "standard",
         "routing_mode": "cheapest",
@@ -529,7 +572,50 @@ def build_batch_manifest(config: DrillConfig, *, run_id: str) -> dict[str, Any]:
             "provider": config.provider,
         },
         "max_price": f"{config.max_quote_usd:.4f}",
-        "items": items,
+    }
+
+
+def build_batch_manifest(config: DrillConfig, *, run_id: str) -> dict[str, Any]:
+    return {
+        **build_batch_base_payload(config, run_id=run_id),
+        "items": [build_batch_item(config, run_id=run_id, index=index) for index in range(config.batch_size)],
+    }
+
+
+def build_manifest_file_batch_payload(
+    config: DrillConfig,
+    *,
+    run_id: str,
+    input_file_id: str,
+    item_count: int,
+) -> dict[str, Any]:
+    return {
+        **build_batch_base_payload(config, run_id=run_id),
+        "input_file_id": input_file_id,
+        "input_item_count": item_count,
+    }
+
+
+def write_batch_manifest_jsonl(config: DrillConfig, *, run_id: str) -> dict[str, Any]:
+    config.artifact_dir.mkdir(parents=True, exist_ok=True)
+    path = config.artifact_dir / "batchrouter-input-manifest.jsonl"
+    digest = hashlib.sha256()
+    size_bytes = 0
+    with path.open("wb") as handle:
+        for index in range(config.batch_size):
+            line = json.dumps(
+                build_batch_item(config, run_id=run_id, index=index),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8") + b"\n"
+            handle.write(line)
+            digest.update(line)
+            size_bytes += len(line)
+    return {
+        "path": path,
+        "item_count": config.batch_size,
+        "size_bytes": size_bytes,
+        "sha256": digest.hexdigest(),
     }
 
 
@@ -564,9 +650,13 @@ def resource_checkpoint_payload(state: DrillState) -> dict[str, Any]:
         "updated_at": now_iso(),
         "batch_id": state.batch_id,
         "quote_id": state.quote_id,
+        "input_file_id": state.input_file_id,
+        "input_manifest_path": state.input_manifest_path,
+        "input_manifest_bytes": state.input_manifest_bytes,
         "nodes": [
             {
                 "node_id": node.node_id,
+                "launch_label": node.launch_label,
                 "instance_id": node.instance_id,
                 "machine_ids": list(node.machine_ids),
                 "destroyed": node.destroyed,
@@ -701,6 +791,7 @@ def launch_vast_nodes(config: DrillConfig, state: DrillState, edge: EdgeControlA
                 smoke_config = VastSmokeConfig(
                     api_key=config.vast_api_key,
                     model=config.vast_model,
+                    label=label,
                     max_price=config.max_price,
                     image=config.image,
                     disk_gb=config.disk_gb,
@@ -902,26 +993,65 @@ def destroy_node_instance(config: DrillConfig, node: DrillNode) -> None:
         api.close()
 
 
+def active_vast_instance_ids_for_label(api: VastAPI, label: str | None) -> list[int]:
+    normalized_label = str(label or "").strip()
+    if not normalized_label:
+        return []
+    response = api._request_with_retries("get", "/instances/")
+    response.raise_for_status()
+    body = response.json()
+    instances = body.get("instances") if isinstance(body, Mapping) else body
+    matched: list[int] = []
+    for instance in instances or []:
+        if not isinstance(instance, Mapping):
+            continue
+        instance_label = str(instance.get("label") or instance.get("name") or "").strip()
+        if instance_label != normalized_label:
+            continue
+        try:
+            instance_id = int(instance.get("id") or 0)
+        except (TypeError, ValueError):
+            instance_id = 0
+        if instance_id > 0:
+            matched.append(instance_id)
+    return matched
+
+
 def cleanup_resources(config: DrillConfig, state: DrillState, edge: EdgeControlAPI) -> dict[str, Any]:
     cleanup: dict[str, Any] = {"destroyed_instances": [], "revoked_nodes": [], "errors": []}
     api = VastAPI(config.vast_api_key)
     try:
         for node in state.nodes:
-            if node.instance_id is not None and not node.destroyed:
+            instance_ids = [node.instance_id] if node.instance_id is not None else []
+            if node.instance_id is None and not node.destroyed:
                 try:
-                    append_event(config, "cleanup.destroy.start", node_id=node.node_id, instance_id=node.instance_id)
-                    api.destroy_instance(node.instance_id)
+                    instance_ids.extend(active_vast_instance_ids_for_label(api, node.launch_label))
+                except Exception as error:  # pragma: no cover - live cleanup protection
+                    cleanup["errors"].append(
+                        {
+                            "node_id": node.node_id,
+                            "launch_label": node.launch_label,
+                            "error": str(error) or error.__class__.__name__,
+                        }
+                    )
+            for instance_id in dict.fromkeys(instance_ids):
+                if instance_id is None or node.destroyed:
+                    continue
+                try:
+                    append_event(config, "cleanup.destroy.start", node_id=node.node_id, instance_id=instance_id)
+                    api.destroy_instance(instance_id)
+                    node.instance_id = int(instance_id)
                     node.destroyed = True
-                    cleanup["destroyed_instances"].append(node.instance_id)
-                    append_event(config, "cleanup.destroy.ok", node_id=node.node_id, instance_id=node.instance_id)
+                    cleanup["destroyed_instances"].append(instance_id)
+                    append_event(config, "cleanup.destroy.ok", node_id=node.node_id, instance_id=instance_id)
                 except Exception as error:  # pragma: no cover - live cleanup protection
                     node.destroy_error = str(error) or error.__class__.__name__
-                    cleanup["errors"].append({"instance_id": node.instance_id, "error": node.destroy_error})
+                    cleanup["errors"].append({"instance_id": instance_id, "error": node.destroy_error})
                     append_event(
                         config,
                         "cleanup.destroy.error",
                         node_id=node.node_id,
-                        instance_id=node.instance_id,
+                        instance_id=instance_id,
                         error=node.destroy_error,
                     )
             if not node.revoked:
@@ -969,8 +1099,58 @@ def run_drill(config: DrillConfig) -> dict[str, Any]:
             if isinstance(node.launch_report, Mapping) and node.launch_report.get("status") == "ok"
         ]
         append_event(config, "vast.nodes.ready", node_count=len(ready_nodes), launch_attempts=len(state.nodes))
-        manifest = build_batch_manifest(config, run_id=run_id)
-        append_event(config, "batchrouter.quote.start", item_count=config.batch_size)
+        use_manifest_file = config.batch_size > config.manifest_upload_threshold_items
+        if use_manifest_file:
+            append_event(
+                config,
+                "batchrouter.input_manifest.write.start",
+                item_count=config.batch_size,
+            )
+            input_manifest = write_batch_manifest_jsonl(config, run_id=run_id)
+            state.input_manifest_path = str(input_manifest["path"])
+            state.input_manifest_bytes = int(input_manifest["size_bytes"])
+            append_event(
+                config,
+                "batchrouter.input_manifest.write.ok",
+                item_count=input_manifest["item_count"],
+                size_bytes=input_manifest["size_bytes"],
+            )
+            append_event(
+                config,
+                "batchrouter.input_manifest.upload.start",
+                item_count=input_manifest["item_count"],
+                size_bytes=input_manifest["size_bytes"],
+            )
+            upload = batchrouter.upload_input_manifest(
+                input_manifest["path"],
+                item_count=int(input_manifest["item_count"]),
+                sha256=str(input_manifest["sha256"]),
+                size_bytes=int(input_manifest["size_bytes"]),
+            )
+            write_json(config.artifact_dir / "batchrouter-input-file.json", upload)
+            state.input_file_id = str(upload.get("input_file_id") or "").strip()
+            if not state.input_file_id:
+                raise LiveVastBatchRouterDrillError("BatchRouter input manifest upload did not return input_file_id.")
+            write_resource_checkpoint(config, state)
+            append_event(
+                config,
+                "batchrouter.input_manifest.upload.ok",
+                input_file_id=state.input_file_id,
+            )
+            manifest = build_manifest_file_batch_payload(
+                config,
+                run_id=run_id,
+                input_file_id=state.input_file_id,
+                item_count=config.batch_size,
+            )
+        else:
+            manifest = build_batch_manifest(config, run_id=run_id)
+        append_event(
+            config,
+            "batchrouter.quote.start",
+            item_count=config.batch_size,
+            request_source="input_file" if use_manifest_file else "inline",
+        )
         quote = batchrouter.quote_batch(manifest)
         ensure_quote_under_cap(quote, max_quote_usd=config.max_quote_usd)
         state.quote_id = extract_quote_id(quote)
@@ -1056,6 +1236,9 @@ def run_drill(config: DrillConfig) -> dict[str, Any]:
         "artifact_dir": str(config.artifact_dir),
         "batch_id": state.batch_id,
         "quote_id": state.quote_id,
+        "input_file_id": state.input_file_id,
+        "input_manifest_path": state.input_manifest_path,
+        "input_manifest_bytes": state.input_manifest_bytes,
         "victim_node_id": state.victim_node_id,
         "victim_instance_id": state.victim_instance_id,
         "batch_state": batch_state(state.batch or {}),
@@ -1067,6 +1250,7 @@ def run_drill(config: DrillConfig) -> dict[str, Any]:
         "nodes": [
             {
                 "node_id": node.node_id,
+                "launch_label": node.launch_label,
                 "instance_id": node.instance_id,
                 "machine_ids": list(node.machine_ids),
                 "destroyed": node.destroyed,
@@ -1118,6 +1302,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--vast-model", default=DEFAULT_VAST_MODEL)
     parser.add_argument("--max-output-tokens", type=int, default=DEFAULT_MAX_OUTPUT_TOKENS)
     parser.add_argument("--max-quote-usd", type=float, default=DEFAULT_MAX_QUOTE_USD)
+    parser.add_argument(
+        "--manifest-upload-threshold-items",
+        type=int,
+        default=DEFAULT_MANIFEST_UPLOAD_THRESHOLD_ITEMS,
+        help=(
+            "Use BatchRouter's input_file_id manifest flow once batch-size exceeds this item count. "
+            "Use 0 to always upload a manifest."
+        ),
+    )
     parser.add_argument("--max-price", type=float, default=DEFAULT_VAST_MAX_PRICE)
     parser.add_argument("--poll-seconds", type=float, default=DEFAULT_POLL_SECONDS)
     parser.add_argument("--assignment-timeout-seconds", type=float, default=DEFAULT_ASSIGNMENT_TIMEOUT_SECONDS)
@@ -1239,6 +1432,7 @@ def build_config_from_args(args: argparse.Namespace) -> DrillConfig:
         vast_model=str(args.vast_model or DEFAULT_VAST_MODEL).strip(),
         max_output_tokens=max(1, int(args.max_output_tokens)),
         max_quote_usd=max(0.0, float(args.max_quote_usd)),
+        manifest_upload_threshold_items=max(0, int(args.manifest_upload_threshold_items)),
         max_price=max(0.0, float(args.max_price)),
         poll_seconds=max(1.0, float(args.poll_seconds)),
         assignment_timeout_seconds=max(1.0, float(args.assignment_timeout_seconds)),

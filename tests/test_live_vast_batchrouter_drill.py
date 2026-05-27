@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -63,6 +65,38 @@ def test_build_batch_manifest_pins_autonomousc_provider(tmp_path: Path) -> None:
     assert manifest["max_price"] == "0.0500"
 
 
+def test_manifest_file_batch_payload_references_uploaded_input_file(tmp_path: Path) -> None:
+    config = replace(minimal_config(tmp_path), batch_size=100_000)
+    manifest = drill.build_manifest_file_batch_payload(
+        config,
+        run_id="run_123",
+        input_file_id="file_input_123",
+        item_count=100_000,
+    )
+    assert manifest["input_file_id"] == "file_input_123"
+    assert manifest["input_item_count"] == 100_000
+    assert "items" not in manifest
+    assert manifest["provider_preferences"]["only"] == ["autonomousc"]
+
+
+def test_write_batch_manifest_jsonl_streams_items_to_file(tmp_path: Path) -> None:
+    config = replace(minimal_config(tmp_path), batch_size=3)
+    manifest = drill.write_batch_manifest_jsonl(config, run_id="run_123")
+    path = manifest["path"]
+    assert isinstance(path, Path)
+    body = path.read_bytes()
+    assert manifest["item_count"] == 3
+    assert manifest["size_bytes"] == len(body)
+    assert manifest["sha256"] == hashlib.sha256(body).hexdigest()
+    rows = [json.loads(line) for line in body.decode("utf-8").splitlines()]
+    assert [row["customer_item_id"] for row in rows] == [
+        "run_123-000000",
+        "run_123-000001",
+        "run_123-000002",
+    ]
+    assert {row["model"] for row in rows} == {"gemma-4-e4b-it"}
+
+
 def test_append_event_writes_redacted_progress_line(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     config = minimal_config(tmp_path)
 
@@ -106,6 +140,7 @@ def test_resource_checkpoint_tracks_destroy_and_revoke_state(tmp_path: Path) -> 
     assert checkpoint["nodes"] == [
         {
             "node_id": "node_1",
+            "launch_label": None,
             "instance_id": 123,
             "machine_ids": ["host-a"],
             "destroyed": True,
@@ -229,6 +264,30 @@ def test_wrangler_d1_query_uses_json_remote_command(monkeypatch: pytest.MonkeyPa
     assert command[-1].endswith(";")
 
 
+def test_active_vast_instance_ids_for_label_matches_exact_label() -> None:
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "instances": [
+                    {"id": 11, "label": "drill-node-1"},
+                    {"id": 12, "label": "drill-node-10"},
+                    {"id": "13", "name": "drill-node-1"},
+                    {"id": 0, "label": "drill-node-1"},
+                ]
+            }
+
+    class FakeVastAPI:
+        def _request_with_retries(self, method: str, path: str):
+            assert method == "get"
+            assert path == "/instances/"
+            return FakeResponse()
+
+    assert drill.active_vast_instance_ids_for_label(FakeVastAPI(), "drill-node-1") == [11, 13]  # type: ignore[arg-type]
+
+
 def test_build_config_parses_offer_controls(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("VAST_API_KEY", "vast-secret")
     monkeypatch.setenv("BATCHROUTER_API_KEY", "br-secret")
@@ -272,3 +331,22 @@ def test_build_config_parses_offer_controls(monkeypatch: pytest.MonkeyPatch, tmp
     assert config.startup_progress_stale_seconds == 300
     assert config.startup_max_vllm_restarts == 1
     assert config.launch_attempts_per_node == 4
+    assert config.manifest_upload_threshold_items == 5000
+
+
+def test_build_config_accepts_manifest_upload_threshold(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("VAST_API_KEY", "vast-secret")
+    monkeypatch.setenv("BATCHROUTER_API_KEY", "br-secret")
+    monkeypatch.setenv("AUTONOMOUSC_OPERATOR_API_KEY", "autc_live_secret")
+    args = drill.parse_args(
+        [
+            "--edge-control-cwd",
+            str(tmp_path),
+            "--manifest-upload-threshold-items",
+            "0",
+        ]
+    )
+
+    config = drill.build_config_from_args(args)
+
+    assert config.manifest_upload_threshold_items == 0
