@@ -198,6 +198,8 @@ RTX_5060_TI_16GB_VLLM_EXTRA_ARGS = (
 )
 RUNTIME_SETTINGS_VERSION = 1
 INSTALLER_STATE_VERSION = 1
+AUTONOMOUSc_ADVANCED_ENV_MODE = "AUTONOMOUSc_ADVANCED_MODE"
+ADVANCED_ENV_TRUE_VALUES = {"1", "true", "yes", "on"}
 INSTALLER_FLOW = [
     ("checking_docker", "Checking Docker"),
     ("checking_nvidia_runtime", "Checking NVIDIA runtime"),
@@ -2902,7 +2904,7 @@ class GuidedInstaller:
         settings_env = self.runtime_settings_to_env(settings_payload)
         if settings_env:
             values.update(settings_env)
-        if self.env_path.exists():
+        if self.advanced_mode_enabled() and self.env_path.exists():
             values.update(parse_env_file(self.env_path))
         return values
 
@@ -2914,13 +2916,18 @@ class GuidedInstaller:
 
     def effective_runtime_env(self) -> dict[str, str]:
         values = self.load_effective_env()
-        if self.env_path.exists():
+        if self.advanced_mode_enabled() and self.env_path.exists():
             values.update(parse_env_file(self.env_path))
         values.update(self.runtime_env_overrides())
         return values
 
     def config_present(self) -> bool:
-        return self.runtime_settings_path.exists() or self.env_path.exists()
+        return self.runtime_settings_path.exists() or (
+            self.advanced_mode_enabled() and self.env_path.exists()
+        )
+
+    def advanced_mode_enabled(self) -> bool:
+        return os.getenv(AUTONOMOUSc_ADVANCED_ENV_MODE, "").strip().lower() in ADVANCED_ENV_TRUE_VALUES
 
     def write_runtime_settings(self, env_values: dict[str, str]) -> None:
         self.service_dir.mkdir(parents=True, exist_ok=True)

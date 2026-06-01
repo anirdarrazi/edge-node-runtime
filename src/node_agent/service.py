@@ -146,7 +146,17 @@ RUNTIME_TUPLE_ENV_KEYS = (
     "LLAMA_CPP_POOLING",
 )
 
-SENSITIVE_ENV_MARKERS = ("TOKEN", "SECRET", "KEY", "PASSWORD", "COOKIE", "CERT")
+SENSITIVE_ENV_EXACT_KEYS = {
+    "AUTONOMOUSc_OPERATOR_API_KEY",
+    "AUTONOMOUSC_OPERATOR_API_KEY",
+    "NODE_ID",
+    "NODE_KEY",
+    "OPERATOR_TOKEN",
+    "HUGGING_FACE_HUB_TOKEN",
+    "HF_TOKEN",
+    "VAST_API_KEY",
+}
+SENSITIVE_ENV_MARKERS = ("TOKEN", "SECRET", "PASSWORD", "COOKIE", "CERT", "KEY", "API_KEY", "AUTH", "CREDENTIAL")
 DOCKER_DESKTOP_INSTALL_URL = "https://www.docker.com/products/docker-desktop/"
 DOCKER_GPU_SUPPORT_URL = "https://docs.docker.com/desktop/features/gpu/"
 NVIDIA_DRIVER_DOWNLOAD_URL = "https://www.nvidia.com/Download/index.aspx"
@@ -209,6 +219,27 @@ def format_relative_time(value: str | None) -> str:
     if delta_seconds < 86400:
         return f"{delta_seconds // 3600}h ago"
     return f"{delta_seconds // 86400}d ago"
+
+
+def is_sensitive_env_key(key: str) -> bool:
+    normalized = str(key).strip().upper()
+    if not normalized:
+        return False
+    if normalized in SENSITIVE_ENV_EXACT_KEYS:
+        return True
+    return any(marker in normalized for marker in SENSITIVE_ENV_MARKERS)
+
+
+def redact_sensitive_payload(value: Any, *, key: str | None = None) -> Any:
+    if key is not None and is_sensitive_env_key(key):
+        text = str(value)
+        return "***REDACTED***" if text else ""
+
+    if isinstance(value, dict):
+        return {item_key: redact_sensitive_payload(item_value, key=item_key) for item_key, item_value in value.items()}
+    if isinstance(value, list):
+        return [redact_sensitive_payload(item) for item in value]
+    return value
 
 
 def format_usd(amount: Any) -> str:
@@ -364,6 +395,7 @@ class UpdateState:
     last_checked_at: str | None = None
     last_result: str = "No update checks have run yet."
     last_error: str | None = None
+    last_recommended_fix: str | None = None
     pending_restart: bool = False
     updated_images: list[str] = field(default_factory=list)
     release_version: str | None = None
@@ -2576,7 +2608,11 @@ class NodeRuntimeService:
             self.log(
                 f"[request {rollback_id}] Automatic rollback after the failed update canary did not recover cleanly: {error}"
             )
-            return False, str(error) or "Automatic rollback failed."
+            detail = str(error) or "Automatic rollback failed."
+            return (
+                False,
+                f"{detail} Run Fix it (POST /api/repair), then rerun Check now and Download and apply.",
+            )
 
         message = (
             "The update canary failed, so the node rolled back automatically to the last known healthy "
@@ -6137,6 +6173,7 @@ class NodeRuntimeService:
         if not runtime_backend_supports_compose(self.runtime_backend):
             self.update_state.last_checked_at = now_iso()
             self.update_state.last_error = None
+            self.update_state.last_recommended_fix = None
             self.update_state.pending_restart = False
             self.update_state.last_result = (
                 "The unified runtime image updates by pulling a new container image and recreating the container."
@@ -6155,6 +6192,7 @@ class NodeRuntimeService:
             self.update_state.release_version = manifest.version
             self.update_state.release_channel = release_channel
             self.update_state.last_error = None
+            self.update_state.last_recommended_fix = None
             if not release_channel_matches_preference(
                 release_channel=release_channel,
                 preferred_channel=preferred_channel,
@@ -6191,7 +6229,26 @@ class NodeRuntimeService:
                 target_ref = target_release[RELEASE_ENV_VAR_BY_SERVICE[service]]
                 before = self.docker_image_id(target_ref)
                 if service in changed_services or before is None:
-                    self.command_runner(["docker", "pull", target_ref], self.runtime_dir)
+                    try:
+                        self.command_runner(["docker", "pull", target_ref], self.runtime_dir)
+                    except Exception as error:
+                        failure = str(error) or "No docker error detail was available."
+                        self.log(
+                            f"[request {rollout_id}] Signed release {manifest.version} could not download {service}: {failure}"
+                        )
+                        self.update_state.updated_images = []
+                        self.update_state.last_error = (
+                            f"Signed release {manifest.version} could not download {service} image {target_ref}."
+                        )
+                        self.update_state.last_result = (
+                            f"{self.update_state.last_error} {failure}"
+                        )
+                        self.update_state.last_recommended_fix = (
+                            "Run Fix it once to recheck Docker/network prerequisites, then retry Check now + Download and apply."
+                        )
+                        self.update_state.pending_restart = False
+                        self.save_state()
+                        return self.status_payload()
                     after = self.docker_image_id(target_ref)
                     if after and before != after:
                         updated.append(service)
@@ -6213,6 +6270,7 @@ class NodeRuntimeService:
                     f"Signed release {manifest.version} was downloaded and is ready to apply."
                 )
                 self.update_state.pending_restart = True
+                self.update_state.last_recommended_fix = None
                 self.log(
                     f"[request {rollout_id}] Downloaded signed release {manifest.version} "
                     f"for: {', '.join(changed_services)}."
@@ -6244,6 +6302,9 @@ class NodeRuntimeService:
                         f"Signed release {manifest.version} failed the local canary and rolled back automatically. "
                         f"{rollback_message}"
                     )
+                    self.update_state.last_recommended_fix = (
+                        "Run Local Doctor once to validate setup, then re-run Check now and Download and apply."
+                    )
                     self.record_owner_timeline_event(
                         code="update_rolled_back",
                         title="Update rolled back automatically",
@@ -6256,6 +6317,9 @@ class NodeRuntimeService:
                     self.update_state.last_error = (
                         f"Signed release {manifest.version} could not be applied automatically, and rollback needs attention. "
                         f"Check the service log with request id {rollout_id}."
+                    )
+                    self.update_state.last_recommended_fix = (
+                        "Open Setup fixes (Fix it) or POST /api/repair, then retry this update."
                     )
                     self.update_state.last_result = "Automatic rollback after the failed signed release update needs attention."
                 self.update_state.pending_restart = False
@@ -6283,6 +6347,9 @@ class NodeRuntimeService:
             self.update_state.last_checked_at = now_iso()
             self.update_state.updated_images = []
             self.update_state.pending_restart = False
+            self.update_state.last_recommended_fix = (
+                "Repair or reinstall the local runtime bundle, then run Check now again."
+            )
             self.update_state.last_error = (
                 f"Signed runtime release verification failed. Check the service log with request id {rollout_id}."
             )
@@ -6293,6 +6360,9 @@ class NodeRuntimeService:
             self.update_state.last_checked_at = now_iso()
             self.update_state.updated_images = []
             self.update_state.pending_restart = False
+            self.update_state.last_recommended_fix = (
+                "Run Fix it once (POST /api/repair) and retry Check now and Download and apply."
+            )
             self.update_state.last_error = (
                 f"Signed runtime release check failed. Check the service log with request id {rollout_id}."
             )
@@ -6320,27 +6390,15 @@ class NodeRuntimeService:
         env_values = self.guided_installer.effective_runtime_env()
         lines: list[str] = []
         for key, value in env_values.items():
-            if any(marker in key for marker in SENSITIVE_ENV_MARKERS):
-                redacted = "***REDACTED***" if value else ""
-                lines.append(f"{key}={redacted}")
-            else:
-                lines.append(f"{key}={value}")
+            redacted = str(redact_sensitive_payload(value, key=key))
+            lines.append(f"{key}={redacted}")
         return "\n".join(lines) + ("\n" if lines else "")
 
     def redacted_runtime_settings(self) -> str:
         payload = self.guided_installer.load_runtime_settings()
         if not payload:
             return ""
-
-        config = payload.get("config")
-        if isinstance(config, dict):
-            redacted = dict(config)
-            for key in list(redacted):
-                if any(marker.lower() in key.lower() for marker in SENSITIVE_ENV_MARKERS):
-                    redacted[key] = "***REDACTED***" if redacted[key] else ""
-            payload = dict(payload)
-            payload["config"] = redacted
-        return json.dumps(payload, indent=2) + "\n"
+        return json.dumps(redact_sensitive_payload(payload), indent=2) + "\n"
 
     def command_output(self, args: list[str]) -> str:
         try:

@@ -823,6 +823,7 @@
               <strong>Auto-update</strong>
               <span id="update-pill" class="pill">Checking</span>
               <p id="update-copy" class="meta"></p>
+              <p id="update-fix-copy" class="meta" hidden></p>
             </div>
             <div class="status-card">
               <strong>Launch on sign-in</strong>
@@ -1936,6 +1937,10 @@
         );
         document.getElementById("update-copy").textContent =
           updates.last_error || updates.last_result || "No update checks have run yet.";
+        const updateFixCopy = document.getElementById("update-fix-copy");
+        const updateFix = String(updates.last_recommended_fix || "").trim();
+        updateFixCopy.textContent = updateFix;
+        updateFixCopy.hidden = updateFix.length === 0;
         document.getElementById("update-policy-copy").textContent =
           applianceRelease.detail || "The service can periodically fetch signed appliance releases, verify them locally, and apply them for you.";
         document.getElementById("update-release-copy").textContent =

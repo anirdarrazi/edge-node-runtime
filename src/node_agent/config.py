@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import uuid
 from typing import Any, Literal
 
@@ -27,9 +28,20 @@ from .inference_engine import (
 from .release_manifest import DEFAULT_NODE_AGENT_IMAGE
 from .runtime_backend import detect_runtime_backend
 
+AUTONOMOUSc_ADVANCED_ENV_MODE = "AUTONOMOUSc_ADVANCED_MODE"
+_ADVANCED_ENV_TRUE_VALUES = {"1", "true", "yes", "on"}
+
+
+def _is_advanced_mode_enabled() -> bool:
+    return os.getenv(AUTONOMOUSc_ADVANCED_ENV_MODE, "").strip().lower() in _ADVANCED_ENV_TRUE_VALUES
+
+
+def _node_agent_env_files() -> tuple[str, ...]:
+    return (".env",) if _is_advanced_mode_enabled() else ()
+
 
 class NodeAgentSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=_node_agent_env_files(), extra="ignore")
 
     edge_control_url: str = Field(default="http://edge-control:8787")
     edge_control_fallback_urls: str | None = None

@@ -282,6 +282,7 @@ Notes:
 - The repo-local launch scripts now require Python 3.11 or newer explicitly and guide owners toward reinstalling cleanly if the local environment is incomplete.
 - The local UI runs at `http://127.0.0.1:8765` by default and stays available while the background service is running.
 - Automatic updates now follow the signed runtime release manifest and only pull digest-pinned images.
+- Failed update attempts keep the previous runtime state, auto-roll back when possible, and surface explicit repair guidance in the UI (`Run Fix it` / `/api/repair`) when rollback cannot complete.
 - Repo-local installs still use the checked-out `docker-compose.yml`, which builds `node-agent` from source for development.
 - Manager-container installs use the bundled runtime assets and the published digest-pinned `anirdarrazi/autonomousc-ai-edge-runtime` image instead of rebuilding from source.
 - Diagnostics bundles are written to `./data/diagnostics`.
