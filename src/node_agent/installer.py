@@ -267,6 +267,58 @@ WARMUP_OOM_MARKERS = (
     "cublas_status_alloc_failed",
     "allocation on device",
 )
+WARMUP_PORT_BIND_MARKERS = (
+    "address already in use",
+    "bind: address already in use",
+    "ports are not available",
+    "only one usage of each socket address",
+    "failed to bind",
+    "listen tcp",
+)
+DOCKER_PORT_BIND_ERROR_MARKERS = (
+    "address already in use",
+    "ports are not available",
+    "only one usage of each socket address",
+    "failed to bind",
+    "listen tcp",
+    "bind: address already in use",
+)
+DOCKER_DAEMON_ERROR_MARKERS = (
+    "cannot connect to the docker daemon",
+    "error while trying to connect to docker",
+    "connection to the docker daemon failed",
+    "docker daemon is not running",
+    "permission denied while trying to connect to the docker daemon",
+)
+DOCKER_MISSING_ERROR_MARKERS = (
+    "is not installed or is not available on PATH",
+    "no such file or directory",
+    "the system cannot find the file specified",
+    "file not found",
+)
+DOCKER_NVIDIA_RUNTIME_MARKERS = (
+    "nvidia-container-runtime",
+    "nvidia container toolkit",
+    "could not select device driver \"nvidia\"",
+)
+HF_ACCESS_NETWORK_ERROR_MARKERS = (
+    "connection refused",
+    "connection timed out",
+    "certificate verify failed",
+    "temporary failure in name resolution",
+    "name or service not known",
+    "failed to resolve",
+    "max retries exceeded",
+)
+CONTROL_PLANE_TRANSIENT_ERROR_MARKERS = (
+    "connection error",
+    "connection refused",
+    "connection timed out",
+    "temporary failure in name resolution",
+    "name or service not known",
+    "failed to establish a new connection",
+    "timed out",
+)
 WINDOWS_FIREWALL_RULE_PREFIX = "AUTONOMOUSc Edge Node"
 LOCAL_SERVICE_PORT = 8765
 LOCAL_INFERENCE_PORT = 8000
@@ -2315,6 +2367,15 @@ class GuidedInstaller:
                 "message": (
                     f"This node cannot run {startup_model} because the model files could not be found during warm-up. "
                     "Check that the startup model name and revision are valid, then retry Quick Start."
+                ),
+                "warm_runtime_log_excerpt": excerpt,
+            }
+        if any(marker in normalized for marker in WARMUP_PORT_BIND_MARKERS):
+            return {
+                "kind": "port_conflict",
+                "message": (
+                    f"Local runtime startup could not bind the inference port while warming {startup_model}. "
+                    f"Stop the process using TCP port {LOCAL_INFERENCE_PORT}, then retry Quick Start."
                 ),
                 "warm_runtime_log_excerpt": excerpt,
             }
@@ -6164,6 +6225,34 @@ class GuidedInstaller:
                 services[current_service]["has_build"] = True
         return services
 
+    @staticmethod
+    def _error_text(error: Exception | str) -> str:
+        return str(error).strip().lower()
+
+    @classmethod
+    def _classify_docker_runtime_error(cls, error: Exception) -> str | None:
+        message = cls._error_text(error)
+        if any(marker in message for marker in DOCKER_MISSING_ERROR_MARKERS):
+            return (
+                "Docker is not available right now. Install Docker Desktop, ensure the Docker CLI is on PATH, "
+                "then restart Quick Start."
+            )
+        if any(marker in message for marker in DOCKER_PORT_BIND_ERROR_MARKERS):
+            return (
+                f"Local runtime startup is blocked because port {LOCAL_INFERENCE_PORT} is already in use. "
+                "Stop the process currently using that port (often another local inference service), then retry."
+            )
+        if any(marker in message for marker in DOCKER_DAEMON_ERROR_MARKERS):
+            return (
+                "Docker is not running or not reachable right now. Open Docker Desktop and wait for the daemon to be ready."
+            )
+        if any(marker in message for marker in DOCKER_NVIDIA_RUNTIME_MARKERS):
+            return (
+                "Docker is running, but the NVIDIA container runtime is not available in Docker yet. "
+                "Enable NVIDIA runtime support in Docker Desktop, then retry."
+            )
+        return None
+
     def validate_nvidia_runtime(self, env_values: dict[str, str], *, preflight: dict[str, Any] | None = None) -> None:
         detected = preflight.get("gpu") if isinstance(preflight, dict) else None
         if not isinstance(detected, dict) or not detected.get("detected"):
@@ -6172,6 +6261,39 @@ class GuidedInstaller:
             raise RuntimeError(
                 "No NVIDIA GPU runtime was detected. Quick Start currently requires a supported NVIDIA GPU with the NVIDIA runtime available."
             )
+
+        runtime_backend = str(preflight.get("runtime_backend") or self.current_runtime_backend()) if isinstance(preflight, dict) else self.current_runtime_backend()
+        if runtime_backend_supports_compose(runtime_backend):
+            preflight_payload = preflight if isinstance(preflight, dict) else {}
+            docker_cli_ok = bool(preflight_payload.get("docker_cli"))
+            compose_ok = bool(preflight_payload.get("docker_compose"))
+            daemon_ok = bool(preflight_payload.get("docker_daemon"))
+            if not (docker_cli_ok and compose_ok and daemon_ok):
+                docker_message = str(preflight_payload.get("docker_error") or "Docker is not ready yet.")
+                self.update_stage_progress(
+                    "Quick Start still needs Docker for container runtime checks.",
+                    nvidia_container_runtime_error=docker_message,
+                )
+                raise RuntimeError(
+                    "Docker is not available for container runtime checks yet. "
+                    "Install/open Docker Desktop and wait for the engine to be ready, then retry."
+                )
+            container_runtime = preflight_payload.get("nvidia_container_runtime") if preflight_payload else None
+            if not isinstance(container_runtime, dict) or not container_runtime.get("visible"):
+                visible = container_runtime.get("error") if isinstance(container_runtime, dict) else None
+                detail = (
+                    str(visible)
+                    if isinstance(visible, str) and visible
+                    else "Docker is running, but the NVIDIA container runtime is not visible for containers yet."
+                )
+                self.update_stage_progress(
+                    "The node needs an exposed NVIDIA container runtime.",
+                    nvidia_container_runtime_error=detail,
+                )
+                raise RuntimeError(
+                    "Docker is running, but this machine still needs NVIDIA container runtime visibility. "
+                    "Enable NVIDIA runtime support in Docker Desktop and restart Docker before continuing."
+                )
 
         gpu_name = str(detected.get("name") or env_values.get("GPU_NAME") or "NVIDIA GPU")
         gpu_memory_gb = _safe_float(detected.get("memory_gb") or env_values.get("GPU_MEMORY_GB"), 0.0)
@@ -6235,6 +6357,20 @@ class GuidedInstaller:
         try:
             response = httpx.get(f"https://huggingface.co/api/models/{repository}", **request_kwargs)
         except httpx.HTTPError as error:
+            error_detail = str(error).strip()
+            normalized_error = error_detail.lower()
+            if any(marker in normalized_error for marker in HF_ACCESS_NETWORK_ERROR_MARKERS):
+                self.update_stage_progress(
+                    f"Could not validate Hugging Face access for {repository} due to a network issue.",
+                    hf_repository=repository,
+                    hf_token_required=token_required,
+                    hf_validated=False,
+                    hf_failure_kind="network",
+                    hf_failure_detail=error_detail,
+                )
+                raise RuntimeError(
+                    "Could not reach Hugging Face to validate the startup model. Check DNS/network access, then retry Quick Start."
+                ) from error
             self.update_stage_progress(
                 hf_repository=repository,
                 hf_token_required=token_required,
@@ -6269,7 +6405,18 @@ class GuidedInstaller:
                 hf_http_status=response.status_code,
             )
             raise RuntimeError(
-                f"Hugging Face denied access to {repository}. Make sure HUGGING_FACE_HUB_TOKEN is valid and approved for this model, then retry."
+                f"Hugging Face denied access to {repository}. Make sure the token is valid, not expired, and approved for this model, then retry."
+            )
+        if response.status_code in {HTTPStatus.TOO_MANY_REQUESTS, HTTPStatus.SERVICE_UNAVAILABLE, HTTPStatus.GATEWAY_TIMEOUT}:
+            self.update_stage_progress(
+                hf_repository=repository,
+                hf_token_required=token_required,
+                hf_validated=False,
+                hf_failure_kind="hf_service_unavailable",
+                hf_http_status=response.status_code,
+            )
+            raise RuntimeError(
+                "Hugging Face is temporarily unavailable or throttling requests. Retry after a short delay."
             )
         if response.status_code == HTTPStatus.NOT_FOUND:
             self.update_stage_progress(
@@ -6335,7 +6482,13 @@ class GuidedInstaller:
                 download_current_item=service,
             )
             self.log(f"Pulling the {service} runtime image ({index}/{total}) so the first startup is less disruptive.")
-            self.command_runner(self.compose_command(["pull", service]), self.runtime_dir)
+            try:
+                self.command_runner(self.compose_command(["pull", service]), self.runtime_dir)
+            except RuntimeError as error:
+                runtime_error = self._classify_docker_runtime_error(error)
+                if runtime_error is not None:
+                    raise RuntimeError(runtime_error) from error
+                raise
             self.update_stage_progress(
                 progress_message,
                 download_total_items=total,
@@ -6355,7 +6508,13 @@ class GuidedInstaller:
                 start_node="node-agent" in requested,
             )
             return
-        self.command_runner(self.compose_command(["up", "-d", *services]), self.runtime_dir)
+        try:
+            self.command_runner(self.compose_command(["up", "-d", *services]), self.runtime_dir)
+        except RuntimeError as error:
+            runtime_error = self._classify_docker_runtime_error(error)
+            if runtime_error is not None:
+                raise RuntimeError(runtime_error) from error
+            raise
 
     def maybe_enable_autostart(self) -> None:
         try:
@@ -6504,6 +6663,7 @@ class GuidedInstaller:
         seconds_without_progress = 0
         download_stalled = False
         download_slow = False
+        last_readiness_error: str | None = None
         while time.time() < deadline:
             now = time.time()
             if self.faults.consume("warm_gpu_oom"):
@@ -6663,8 +6823,8 @@ class GuidedInstaller:
                         warm_source_order=warm_source["order"],
                     )
                     return
-            except httpx.HTTPError:
-                pass
+            except httpx.HTTPError as error:
+                last_readiness_error = str(error).strip()
             if download_stalled:
                 log_diagnosis = self.diagnose_warmup_logs(
                     startup_model=startup_model,
@@ -6716,6 +6876,27 @@ class GuidedInstaller:
                 warm_free_disk_bytes=free_disk_bytes,
                 warm_missing_disk_bytes=expected_missing_bytes,
                 warm_runtime_log_excerpt=log_diagnosis.get("warm_runtime_log_excerpt"),
+            )
+        if last_readiness_error is not None:
+            self.fail_warmup(
+                f"{startup_model} did not report a ready inference endpoint at {readiness_url}. Last readiness check failed with: "
+                f"{last_readiness_error}. Check vLLM startup logs and port availability, then retry.",
+                kind="runtime_not_ready",
+                warm_model=startup_model,
+                warm_expected_bytes=expected_bytes,
+                warm_downloaded_bytes=cached_model_bytes,
+                warm_progress_percent=progress_percent,
+                warm_reusing_cache=reuse_existing_cache,
+                warm_observed_cache_bytes=observed_cache_bytes,
+                warm_resuming_download=resuming_download,
+                warm_resume_from_bytes=baseline_cache_bytes,
+                warm_download_rate_bps=download_rate_bps,
+                warm_download_slow=download_slow,
+                warm_download_stalled=download_stalled,
+                warm_seconds_without_progress=seconds_without_progress,
+                warm_free_disk_bytes=free_disk_bytes,
+                warm_missing_disk_bytes=expected_missing_bytes,
+                warm_runtime_log_excerpt=warmup_log_excerpt(self.recent_runtime_logs("vllm")),
             )
         if expected_bytes and not reuse_existing_cache:
             if download_stalled:
@@ -6988,9 +7169,41 @@ class GuidedInstaller:
             set_stage("claiming_node", "Creating a secure approval link and QR code for this machine.")
             settings = self.build_installer_settings(env_values)
             control = self.control_client_factory(settings)
+
+            def raise_control_plane_error(action: str, error: Exception) -> None:
+                lowered = self._error_text(error)
+                if control.is_auth_error(error):
+                    message = (
+                        f"The control plane rejected this {action} step. Confirm TRUST_TIER and the node identity values match "
+                        "the environment, then retry Quick Start."
+                    )
+                elif control.is_transient_network_error(error) or any(marker in lowered for marker in CONTROL_PLANE_TRANSIENT_ERROR_MARKERS):
+                    message = (
+                        f"Quick Start could not reach the control plane while {action}. "
+                        "Check EDGE_CONTROL_URL, DNS/proxy/firewall settings, and network access, then retry."
+                    )
+                else:
+                    message = (
+                        f"Quick Start could not {action} with the control plane right now. "
+                        f"Original error: {self._error_text(error) or 'unknown'}."
+                    )
+                raise RuntimeError(message) from error
+
+            def create_claim_session() -> NodeClaimSession:
+                try:
+                    return control.create_node_claim_session()
+                except Exception as error:
+                    raise_control_plane_error("start a node claim session", error)
+
+            def poll_claim_session(claim_session: NodeClaimSession):
+                try:
+                    return control.poll_node_claim_session(claim_session.claim_id, claim_session.poll_token)
+                except Exception as error:
+                    raise_control_plane_error("poll the node claim session", error)
+
             resumed_claim = self.reusable_claim_session()
             if resumed_claim is None:
-                claim = control.create_node_claim_session()
+                claim = create_claim_session()
                 renewal_count = 0
                 active_claims = [claim]
                 self.set_claim(self.build_claim_state(claim, renewal_count=renewal_count))
@@ -7016,7 +7229,7 @@ class GuidedInstaller:
                 next_active_claims: list[NodeClaimSession] = []
                 claim_completed = False
                 for active_claim in active_claims:
-                    result = control.poll_node_claim_session(active_claim.claim_id, active_claim.poll_token)
+                    result = poll_claim_session(active_claim)
                     active_claim.expires_at = result.expires_at
                     self.update_claim_status(
                         active_claim.claim_id,
@@ -7042,7 +7255,7 @@ class GuidedInstaller:
                 active_claims = next_active_claims
                 if not active_claims:
                     renewal_count += 1
-                    refreshed_claim = control.create_node_claim_session()
+                    refreshed_claim = create_claim_session()
                     active_claims = [refreshed_claim]
                     self.set_claim(self.build_claim_state(refreshed_claim, renewal_count=renewal_count))
                     self.log(
@@ -7060,7 +7273,7 @@ class GuidedInstaller:
                 ):
                     renewal_count += 1
                     refreshed_claim_ids.add(displayed_claim.claim_id)
-                    refreshed_claim = control.create_node_claim_session()
+                    refreshed_claim = create_claim_session()
                     active_claims.append(refreshed_claim)
                     self.set_claim(self.build_claim_state(refreshed_claim, renewal_count=renewal_count))
                     self.log(
