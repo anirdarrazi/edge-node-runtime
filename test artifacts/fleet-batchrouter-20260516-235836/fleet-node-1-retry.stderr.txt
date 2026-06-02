@@ -1,9 +1,0 @@
-wrangler.cmd : [33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1m⚠️ This process may take some time, during which your D1 database will be unavailable 
-to serve queries.[0m
-At C:\Users\Anir\Documents\AI eco future\AUTONOMOUSc Edge Node Network\edge-node-runtime\test 
-artifacts\fleet-batchrouter-20260516-235836\launch-fleet-node.ps1:97 char:3
-+   & '..\node_modules\.bin\wrangler.CMD' d1 execute autonomousc-edge-n ...
-+   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    + CategoryInfo          : NotSpecified: ([33m▲ [43;3...ve queries.[0m:String) [], RemoteException
-    + FullyQualifiedErrorId : NativeCommandError
- 

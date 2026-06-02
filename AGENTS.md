@@ -26,9 +26,9 @@
 ```
 
 **Related Projects**:
-- OpenBatch/ - Batch AI job routing
-- [`edge-control/`](../edge-control/) - Central control plane
-- [`marketplace-console/`](../marketplace-console/) - Operator dashboard frontend
+- Batch Router - Batch AI job routing
+- Edge Control (sibling repo): edge-control/
+- Marketplace Console (sibling repo): marketplace-console/
 
 ---
 
@@ -125,10 +125,10 @@
 ## Integration Points
 
 ### Upstream (Control Plane)
-- **Edge Control** ([`edge-control/`](../edge-control/)) - node enrollment, assignment polling, status reporting, trust management
+- **Edge Control** (edge-control/) - node enrollment, assignment polling, status reporting, trust management
 
 ### Downstream (Inference Consumers)
-- **OpenBatch** (OpenBatch) - batch job routing
+- **Batch Router** - batch job routing
 - **External Clients** - direct inference requests via vllm API
 
 ### Data Sources
@@ -254,6 +254,16 @@ docker run --gpus all \
   anirdarrazi/autonomousc-ai-edge-runtime:latest
 ```
 
+### Local Development Commands
+
+```bash
+cd edge-node-runtime
+bash app.sh
+bash stop.sh
+bash repair.sh
+python -m pytest
+```
+
 ### Commands Reference
 
 **Repo-Local Launcher**:
@@ -354,12 +364,23 @@ Then open `http://127.0.0.1:8765` and click "Quick Start".
 ## Related Documentation
 
 - **CLAUDE.md** - Complete technical documentation (identical to this file)
-- **OpenBatch/** - Batch job routing
+- **Batch Router** - Batch job routing
 - **edge-control/** - Central control plane
 - **marketplace-console/** - Operator dashboards
 - **README.md** - Original project README
 
 ---
+
+## Docs Maintenance Checklist
+
+- Keep AGENTS.md and CLAUDE.md synchronized for every docs change.
+- Keep command references in command sections only (fenced code blocks and list items).
+- Avoid documenting runtime commands unless the command or script exists.
+- Avoid adding `npm run check:ci` references unless the `check:ci` script is explicitly defined.
+- Before review, run:
+  - `node ./scripts/verify-workflow-commands.mjs`
+  - `python scripts/verify_agent_claude_sync.py --strict`
+- Record command-policy changes in `CHANGELOG.md`.
 
 ## Qdrant Semantic Memory (Optional)
 
@@ -373,7 +394,7 @@ curl http://localhost:6333/healthz
 - **Available** (`healthz check passed`): use `qdrant-find` to surface prior context before starting work, and `qdrant-store` to persist architectural decisions, non-obvious patterns, and bug root causes.
 - **Not available** (timeout / connection refused): proceed normally without it. Do not prompt the developer to set it up unless they ask — it is a local-only tool, not shared infrastructure.
 
-To set it up: [`../QDRANT.md`](../QDRANT.md) · Full agent usage guide: [`../QDRANT-AGENTS.md`](../QDRANT-AGENTS.md)
+Use `QDRANT.md` and `QDRANT-AGENTS.md` from your workspace root if available.
 
 ---
 

@@ -1,4 +1,4 @@
-name: AGENTS/CLAUDE mirror sync
+name: docs-contract
 
 on:
   pull_request:
@@ -10,14 +10,79 @@ permissions:
   contents: read
 
 jobs:
-  verify-doc-mirror:
+  agent-doc-sync:
+    name: verify:agent-doc-sync
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: verify:agent-doc-sync/cache-cleanup-setup
+        run: |
+          mkdir -p "${{ runner.temp }}/npm-cache" "${{ runner.temp }}/pycache" "${{ runner.temp }}/.cache"
+          echo "NPM_CONFIG_CACHE=${{ runner.temp }}/npm-cache" >> "$GITHUB_ENV"
+          echo "PYTHONPYCACHEPREFIX=${{ runner.temp }}/pycache" >> "$GITHUB_ENV"
+          echo "XDG_CACHE_HOME=${{ runner.temp }}/.cache" >> "$GITHUB_ENV"
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Verify AGENTS.md and CLAUDE.md
-        run: python scripts/verify_agent_claude_sync.py
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: verify:agent-doc-sync/clean-room
+        run: node ./scripts/verify-clean-room.mjs
+
+      - name: verify:agent-doc-sync
+        run: python scripts/verify_agent_claude_sync.py --strict
+
+      - name: verify:agent-doc-sync/workflow-command-contract
+        run: node ./scripts/verify-workflow-commands.mjs
+
+      - name: verify:agent-doc-sync/cleanup
+        if: always()
+        run: |
+          rm -rf .build-venv .installer-venv .pytest_cache __pycache__ .cache dist build runtime-state state data test artifacts
+
+  docs:
+    name: verify:docs
+    needs: agent-doc-sync
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: verify:docs/cache-cleanup-setup
+        run: |
+          mkdir -p "${{ runner.temp }}/npm-cache" "${{ runner.temp }}/pycache" "${{ runner.temp }}/.cache"
+          echo "NPM_CONFIG_CACHE=${{ runner.temp }}/npm-cache" >> "$GITHUB_ENV"
+          echo "PYTHONPYCACHEPREFIX=${{ runner.temp }}/pycache" >> "$GITHUB_ENV"
+          echo "XDG_CACHE_HOME=${{ runner.temp }}/.cache" >> "$GITHUB_ENV"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: verify:docs
+        run: node ./scripts/verify-docs-hygiene.mjs
+
+      - name: verify:docs/tracked-line-endings
+        run: node ./scripts/verify-tracked-line-endings.mjs
+
+      - name: verify:docs/tracked-artifact-size
+        run: node ./scripts/verify-tracked-artifact-size.mjs
+
+      - name: verify:docs/cleanup
+        if: always()
+        run: |
+          rm -rf .build-venv .installer-venv .pytest_cache __pycache__ .cache dist build runtime-state state data test artifacts
