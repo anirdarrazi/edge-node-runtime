@@ -26,7 +26,7 @@
 ```
 
 **Related Projects**:
-- [`OpenBatch/`](../OpenBatch/) - Batch AI job routing
+- OpenBatch/ - Batch AI job routing
 - [`edge-control/`](../edge-control/) - Central control plane
 - [`marketplace-console/`](../marketplace-console/) - Operator dashboard frontend
 
@@ -128,7 +128,7 @@
 - **Edge Control** ([`edge-control/`](../edge-control/)) - node enrollment, assignment polling, status reporting, trust management
 
 ### Downstream (Inference Consumers)
-- **OpenBatch** ([`OpenBatch/`](../OpenBatch/)) - batch job routing
+- **OpenBatch** (OpenBatch) - batch job routing
 - **External Clients** - direct inference requests via vllm API
 
 ### Data Sources
