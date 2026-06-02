@@ -1,6 +1,6 @@
 # Edge Node Runtime - Comprehensive Documentation
 
-> **IMPORTANT**: Keep this file in sync with `AGENTS.md`. Both should contain identical comprehensive documentation. When updating technical details, update both files.
+> **IMPORTANT**: Keep this file in sync with `CLAUDE.md`. Both should contain identical comprehensive documentation. When updating technical details, update both files.
 
 ## System Architecture Overview
 
@@ -48,54 +48,152 @@
 
 ---
 
+## Main Capabilities
+
+### Node Management
+- Automatic enrollment in AUTONOMOUSc network
+- Hardware auto-detection (GPU type, VRAM, compute capabilities)
+- Guided setup UI (no manual configuration needed for normal setup)
+- Local credential storage (mounted volume)
+- Operator and admin control endpoints
+- Multi-tier trust classification
+- Service lifecycle management (start, stop, restart, update)
+
+### Inference Execution
+- LLM inference via vllm serving
+- Multi-model support with dynamic loading
+- GPU-accelerated execution (NVIDIA CUDA)
+- Assignment polling from control plane
+- Async execution with timeout handling
+- Retry mechanisms for transient failures
+- Per-item error reporting
+- Model warmup and cache management
+
+### Container Orchestration
+- **Manager Mode** - orchestrates multiple containers via Docker Compose
+  - Separate vllm, node-agent, and vector containers
+  - Graceful startup and shutdown
+  - Service health checks and recovery
+  - Docker socket access required
+
+- **Single Container Mode** - unified container for all services
+  - No Docker socket required
+  - All components in one NVIDIA container
+  - Simplified deployment for single machines
+  - No sibling container management
+
+- **Auto-Detection** - automatically chooses mode
+  - Detects Docker socket availability
+  - Falls back to single-container if needed
+  - Single setup UI for both modes
+
+### Hardware Support
+- NVIDIA GPU detection and configuration
+- Vast.ai integration for temporary/burst capacity
+- RTX series GPU optimization (5060 Ti, 4090, A100, etc.)
+- VRAM-based model selection
+- Context length management per hardware
+- GPU utilization monitoring
+- Memory pressure handling
+
+### Trust & Security
+- Runtime receipt generation with audit evidence
+  - Assignment nonce
+  - Runtime image digest
+  - Declared model
+  - Model manifest digest
+  - Tokenizer digest
+  - Aggregated usage metrics
+- Hardware-backed attestation support (optional)
+- Community vs trusted tier classification
+- Server-side trust enforcement (not in runtime)
+- Open-source code reviewability
+- Audit logging for compliance
+
+---
+
+## Deployment Targets
+- **NVIDIA GPU Hardware** - RTX series, Tesla, A100, etc.
+- **Vast.ai Marketplace** - temporary burst capacity with specific profiles
+- **Docker Swarm** - orchestrated edge clusters
+- **Kubernetes** - containerized deployment (via Docker images)
+- **On-Premise** - single node appliances
+- **Cloud GPU Instances** - AWS, GCP, Azure GPU VMs
+
+---
+
+## Integration Points
+
+### Upstream (Control Plane)
+- **Edge Control** ([`edge-control/`](../edge-control/)) - node enrollment, assignment polling, status reporting, trust management
+
+### Downstream (Inference Consumers)
+- **OpenBatch** ([`OpenBatch/`](../OpenBatch/)) - batch job routing
+- **External Clients** - direct inference requests via vllm API
+
+### Data Sources
+- **Model Registries** - Hugging Face for model pulls and metadata
+- **Hardware Metrics** - GPU monitoring and reporting
+- **Vector Database** - optional semantic search capability
+
+---
+
+## Primary Development Workflows
+
+### 1. Add Hardware Profile
+- Define in advanced environment or UI
+- Register capabilities with control plane
+- Set appropriate capacity limits
+- Test with representative workloads
+
+### 2. Modify Inference Engine
+- Change vllm configuration
+- Implement alternative inference engine
+- Test with multiple models
+- Validate performance
+
+### 3. Update Model Support
+- Add to model manifest (`model-artifacts.json`)
+- Update bootstrap preloading
+- Verify tokenizer digests
+- Test on target hardware
+
+### 4. Improve Startup Flow
+- Enhance setup UI logic
+- Refine hardware detection
+- Improve model selection algorithm
+- Add user guidance
+
+### 5. Add Health Checks
+- Extend runtime verification
+- Add metrics collection
+- Implement diagnostics
+- Create alert conditions
+
+---
+
+## Performance & Scale Characteristics
+
+- **Multi-Model Serving**: Concurrent model loading with memory management
+- **GPU Queue Management**: Efficient batching and request queuing
+- **Async Polling**: Configurable polling intervals for control plane
+- **Containerized Isolation**: Resource isolation between workloads
+- **Graceful Degradation**: Reduces load when resources constrained
+- **Auto Scaling**: Manager mode can add/remove containers dynamically
+
+---
+
 ## Technology Stack
 
 - **Language**: Python 3.11+
 - **Containerization**: Docker with multi-image strategy
-- **Inference Engine**: vllm (LLM serving with vLLM OpenAI-compatible API)
-- **Vector Store**: Vector database support for semantic search
+- **Inference Engine**: vllm (LLM serving with OpenAI-compatible API)
+- **Vector Store**: Vector database support
 - **Testing**: pytest
 - **GPU Support**: NVIDIA CUDA via Docker runtime
 - **Setup UI**: Browser-based (http://127.0.0.1:8765)
 - **Orchestration**: Docker Compose for local development
-- **Distribution**: Public Docker images on Docker Hub (`anirdarrazi/autonomousc-ai-edge-runtime`)
-
----
-
-## Architecture
-
-### Operating Modes
-
-1. **Manager Mode** - Runtime orchestrates sibling containers (vllm, node-agent, vector) via Docker Compose
-2. **Single Container Mode** - All components run in one NVIDIA container
-3. **Auto-Detection** - System automatically chooses based on Docker socket availability
-
-### Key Components
-
-- **`src/node_agent/`** - Core agent logic
-  - Node enrollment with control plane
-  - Assignment polling loop
-  - Execution dispatch and monitoring
-  - Status reporting and health checks
-
-- **Inference Engine**
-  - vllm for LLM serving
-  - NVIDIA GPU acceleration
-  - Model caching and warmup
-  - Request queuing and batching
-
-- **Setup UI** - Browser-based owner application
-  - Hardware auto-detection
-  - Guided enrollment flow
-  - Model selection
-  - Credential storage and management
-  - Service lifecycle controls (start, stop, restart, update)
-  - Diagnostics collection and export
-
-- **Docker Images**
-  - `Dockerfile` - Main unified public image
-  - `Dockerfile.single` - Legacy single-container variant
-  - `docker-compose.yml` - Local development stack
+- **Distribution**: Public Docker images (`anirdarrazi/autonomousc-ai-edge-runtime`)
 
 ---
 
@@ -112,31 +210,25 @@ edge-node-runtime/
 │       └── reporting.py      # Status reporting
 ├── Dockerfile                # Main unified public image
 ├── Dockerfile.single         # Legacy single-container variant
-├── Dockerfile.service        # Service wrapper
 ├── docker-compose.yml        # Local development setup
 ├── .env.example              # Advanced-mode environment template
 ├── app.sh / app.ps1          # Repo-local owner app launcher
 ├── build-manager-image.sh/ps1    # Build unified image
 ├── publish-latest-image.sh/ps1   # Publish to Docker Hub
-├── install.sh/ps1, start.sh/ps1  # Legacy setup scripts
-├── repair.sh/ps1, stop.sh/ps1    # Service management scripts
 ├── scripts/
 │   ├── generate_model_artifacts_manifest.py
 │   └── other utilities
 ├── runtime_bundle/           # Runtime artifact management
 │   └── model-artifacts.json  # Model manifest and checksums
-├── data/                     # Local runtime data (gitignored)
-│   ├── service/
-│   │   ├── runtime-settings.json
-│   │   └── runtime.env
-│   ├── credentials/          # Node credentials
-│   └── diagnostics/          # Support diagnostic bundles
-└── pytest.ini, setup.cfg     # Test configuration
+└── data/                     # Local runtime data (gitignored)
+    ├── service/
+    ├── credentials/
+    └── diagnostics/
 ```
 
 ---
 
-## Local Development
+## Local Development Guide
 
 ### Prerequisites
 - Docker and Docker Compose
@@ -158,60 +250,36 @@ AUTONOMOUSc\ Edge\ Node\ App.cmd  # Windows double-click
 # OR manual Docker setup
 docker run --gpus all \
   -p 8765:8765 \
-  -p 8000:8000 \
   -v autonomousc-edge:/var/lib/autonomousc \
   anirdarrazi/autonomousc-ai-edge-runtime:latest
-
-# Then open http://127.0.0.1:8765 in browser
 ```
 
 ### Commands Reference
 
 **Repo-Local Launcher**:
-- `bash app.sh` / `.\app.ps1` - Open owner app (start service if needed)
-- `bash stop.sh` / `.\stop.ps1` - Stop background service
-- `bash repair.sh` / `.\repair.ps1` - Repair local app and restart
+- `bash app.sh` / `.\app.ps1` - Open owner app
+- `bash stop.sh` / `.\stop.ps1` - Stop service
+- `bash repair.sh` / `.\repair.ps1` - Repair and restart
 
 **Building Images**:
 ```bash
-# Unified public image (single/manager auto-detect)
 bash build-manager-image.sh         # Linux/macOS
 .\build-manager-image.ps1           # Windows
-
-# Publish to Docker Hub
-bash publish-latest-image.sh        # Linux/macOS
-.\publish-latest-image.ps1          # Windows
+bash publish-latest-image.sh        # Push to Docker Hub
 ```
 
 **Testing**:
 ```bash
-python -m pytest                    # Run all tests
-python -m pytest -v                 # Verbose output
-python -m pytest tests/enrollment_test.py  # Specific test file
-```
-
-### Environment Variables
-
-**Normal Setup** (via UI):
-- No manual environment variables needed
-- Setup UI auto-detects hardware
-- Generates `./data/service/runtime.env` automatically
-
-**Advanced Mode** (`.env.example` template):
-```env
-RUNTIME_PROFILE=rtx_5060_ti_16gb_gemma4_e4b_it
-DEPLOYMENT_TARGET=vast_ai
-INFERENCE_ENGINE=vllm
-RUNTIME_IMAGE=anirdarrazi/autonomousc-ai-edge-runtime:single-cuda-latest
-CAPACITY_CLASS=elastic_burst
-TEMPORARY_NODE=true
+python -m pytest
+python -m pytest -v
+python -m pytest tests/test_file.py
 ```
 
 ---
 
 ## Public Installation
 
-Single command with automatic setup (no manual configuration needed):
+Single command with fully automatic setup:
 
 ```bash
 docker run --gpus all \
@@ -221,44 +289,7 @@ docker run --gpus all \
   anirdarrazi/autonomousc-ai-edge-runtime:latest
 ```
 
-Then:
-1. Open `http://127.0.0.1:8765` in browser
-2. Click "Quick Start"
-3. Enter node name (auto-detects hardware)
-4. Complete browser approval flow
-5. Service auto-starts inference engine
-6. Ready for workload assignment
-
----
-
-## Key Features
-
-### Hardware Management
-- **Auto-Detection**: GPU type, VRAM, compute capabilities, region
-- **Profile Selection**: Matches startup model to available hardware
-- **Resource Monitoring**: Real-time GPU utilization and memory tracking
-- **Graceful Degradation**: Reduces workload if resources constrained
-
-### Model Management
-- **Auto-Selection**: Picks best startup model for detected hardware
-- **Model Caching**: Pre-loads bootstrap models into image layer
-- **Hugging Face Integration**: Supports HuggingFace model repositories
-- **Token Management**: Stores HF tokens locally for authenticated models
-- **Model Warmup**: Pre-loads and verifies models before accepting work
-
-### Trust & Security
-- **Runtime Receipts**: Audit evidence with assignment nonce, digests
-- **Hardware-Backed Attestation**: Optional for restricted workloads
-- **Community Nodes**: Untrusted by default, community-eligible workloads
-- **Trusted Nodes**: First-party or admin-approved, all workload types
-- **Open-Source Design**: Node owners can inspect and modify code
-
-### Service Management
-- **One-Click Installation**: No complex configuration needed
-- **Browser-Based UI**: Setup and controls all in browser
-- **Automatic Updates**: Updates via signed release manifest
-- **Health Checks**: Startup model verification and warmup
-- **Diagnostics**: Bundles collected to `./data/diagnostics/`
+Then open `http://127.0.0.1:8765` and click "Quick Start".
 
 ---
 
@@ -266,139 +297,63 @@ Then:
 
 ### RTX 5060 Ti Gemma Profile
 - **Name**: `rtx_5060_ti_16gb_gemma4_e4b_it`
-- **Hardware**: NVIDIA RTX 5060 Ti 16GB
+- **Hardware**: RTX 5060 Ti 16GB
 - **Engine**: vllm
 - **Model**: google/gemma-4-E4B-it
 - **Context**: 32k tokens
 - **Deployment**: Vast.ai marketplace
-- **Capacity**: Elastic burst with up to 12 concurrent assignments
-
-### Building Custom Profiles
-1. Create Docker image with desired specs
-2. Register profile in control plane
-3. Advertise capabilities in node registration
-4. Let control plane route appropriate workloads
+- **Capacity**: Elastic burst, up to 12 concurrent assignments
 
 ---
 
-## Testing
-
-```bash
-python -m pytest                    # Run all tests
-python -m pytest -v                 # Verbose output
-python -m pytest tests/test_file.py # Specific test file
-python -m pytest -k "test_name"     # Specific test
-```
-
----
-
-## Build & Publishing
-
-### Build Unified Public Image Locally
-```bash
-bash build-manager-image.sh         # Linux/macOS
-.\build-manager-image.ps1           # Windows
-```
-
-### Build and Push to Docker Hub
-```bash
-bash publish-latest-image.sh        # Linux/macOS
-.\publish-latest-image.ps1          # Windows
-```
-
-### Image Variants
-- `anirdarrazi/autonomousc-ai-edge-runtime:latest` - Current public release
-- `anirdarrazi/autonomousc-ai-edge-runtime:single-cuda-latest` - Single container variant
-
-### Model Preloading
-```bash
-# Control which models are pre-loaded (default: bootstrap model)
-PRELOAD_HF_MODELS= bash build-manager-image.sh  # Lean default, no preloading
-PRELOAD_HF_MODELS=BAAI/bge-large-en-v1.5 bash build-manager-image.sh  # Opt-in preloading
-```
-
----
-
-## Configuration & Advanced Setup
+## Configuration
 
 ### Normal Setup (Recommended)
 - Use browser UI at `http://127.0.0.1:8765`
 - Hardware auto-detection
-- Guided enrollment flow
+- Guided enrollment
 - Model auto-selection
 - Service auto-management
 
 ### Advanced Mode (`.env.example` Template)
 - Manual environment variables
-- Legacy enrollment via `NODE_ID`, `NODE_KEY`
-- `OPERATOR_TOKEN` for auth
+- Legacy enrollment tokens
 - Custom model overrides
 - Deployment target selection
-
-### Control Plane Configuration
-- Default: Production at `https://edge.autonomousc.com`
-- Local development: Override with `CONTROL_PLANE_URL`
-- Staging environments: Custom URLs via environment
+- For development/support only
 
 ---
 
 ## Security Model
 
 ### Trust Enforcement
-- **Open-Source Code**: Assume owners can inspect and modify
-- **Server-Side Validation**: Control plane enforces trust, not runtime
-- **Community Nodes**: Untrusted by default, best-effort workloads
-- **Trusted Nodes**: First-party or admin-approved partners
-- **Restricted Workloads**: Require hardware-backed attestation
+- **Open-Source Design**: Owners can inspect and modify
+- **Server-Side Validation**: Control plane enforces trust
+- **Community Nodes**: Untrusted by default, community workloads
+- **Trusted Nodes**: First-party or admin-approved
+- **Restricted Workloads**: Hardware-backed attestation required
 
 ### Data Protection
-- **Local Credentials**: Stored in `./data/credentials/` (mounted volume)
-- **Sensitive Files**: `.env`, credentials, diagnostics excluded from repo
-- **Audit Logging**: All operations logged for compliance
-- **.gitignore**: Protects sensitive data from version control
+- **Local Credentials**: In mounted volume, not in container
+- **Audit Logging**: All operations logged
+- **Sensitive Files**: Excluded from version control (`.gitignore`)
 
 ---
 
 ## Notes & Constraints
 
-- **GPU Required**: NVIDIA GPU with CUDA support recommended
-- **Preloaded Models**: Included in image layer for faster startup
-- **Setup UI Only**: Normal setup should use browser, not environment variables
-- **Operator Token**: Legacy, use browser flow instead
+- **GPU Required**: NVIDIA GPU with CUDA support
+- **Preloaded Models**: Included in image layer for fast startup
 - **Vast.ai Support**: Market-data fallback with specific profile
-- **Docker Socket**: Manager mode auto-detects and uses if available
-- **Public Image**: Digest-pinned for reproducibility and security
-
----
-
-## Integration with Control Plane
-
-### Node Enrollment
-1. Manager container starts and opens setup UI
-2. Owner enters node name and signs in
-3. Creates claim session
-4. Browser approval creates credentials
-5. Agent enrolls with control plane
-6. Receives trust tier and approval status
-
-### Assignment Execution
-1. Agent polls control plane for assignments
-2. Receives execution request with model, parameters
-3. Dispatches to vllm if not already loaded
-4. Returns results to control plane
-5. Emits runtime receipt with audit data
-
-### Status Reporting
-- Continuous health heartbeats
-- Metrics reporting (GPU utilization, model load)
-- Error reporting for failed assignments
-- Graceful shutdown notification
+- **Public Image**: Digest-pinned for reproducibility
+- **Normal Setup**: Use browser UI, not environment variables
+- **Auto-Detect**: System automatically chooses manager vs single-container mode
 
 ---
 
 ## Related Documentation
 
-- **AGENTS.md** - Agent-focused view (identical to this file)
+- **CLAUDE.md** - Complete technical documentation (identical to this file)
 - **OpenBatch/** - Batch job routing
 - **edge-control/** - Central control plane
 - **marketplace-console/** - Operator dashboards
