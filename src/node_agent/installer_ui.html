@@ -607,7 +607,7 @@
             <strong>Approve this node</strong>
             <div class="claim-layout">
               <div class="claim-support">
-                <p id="claim-help" class="supporting">Quick Start opens the sign-in and approval page automatically. If nothing appears, use the button below. The installer keeps polling and will finish automatically.</p>
+                <p id="claim-help" class="supporting">Quick Start opens the sign-in and approval page automatically. If nothing appears, use the button below or scan the QR code. Quick Start is waiting for approval and will keep polling while it is open.</p>
                 <p class="meta"><strong>Claim code:</strong> <span id="claim-code"></span></p>
                 <p class="meta"><strong>Approval link:</strong> <a id="claim-url" target="_blank" rel="noreferrer noopener"></a></p>
                 <p class="meta"><strong>Expires:</strong> <span id="claim-expiry"></span></p>
@@ -942,7 +942,7 @@
         setPill(document.getElementById("claim-pill"), claimReady ? "Approved" : (claim ? claim.status : "Waiting"), pillTone(claimReady, true));
         document.getElementById("claim-copy").textContent =
           claimReady
-            ? "Credentials are stored locally for this machine."
+            ? "This machine already has credentials and approval saved locally. Rerun Quick Start on this same machine."
             : (claim
               ? `Claim code ${claim.claim_code}. ${claimRefreshCopy(claim)}`
               : "Quick Start will open the browser approval page automatically and show a QR code here.");
@@ -972,8 +972,8 @@
           }
           const opened = presentClaim(claim);
           claimHelp.textContent = opened
-            ? "Quick Start opened the sign-in and approval page in a new tab. If it did not appear, use the button below or scan the QR code. The installer keeps polling and refreshes this approval link automatically if needed."
-            : "Quick Start is waiting for approval. If the sign-in page did not open automatically, use the button below or scan the QR code. The installer keeps polling and refreshes this approval link automatically if needed.";
+            ? "Quick Start opened the sign-in and approval page in a new tab. If it did not appear, use the button below or scan the QR code. Quick Start is waiting for approval and keeps polling and refreshing this approval link automatically."
+            : "Quick Start is waiting for approval. If the sign-in page did not open automatically, use the button below or scan the QR code. Keep this machine running; approval can continue while you wait.";
         } else {
           claimCard.hidden = true;
           claimUrlText.removeAttribute("href");
@@ -981,7 +981,7 @@
           claimRefresh.textContent = "This approval link refreshes automatically if sign-in takes a while.";
           claimQrShell.hidden = true;
           claimQr.removeAttribute("src");
-          claimHelp.textContent = "Quick Start opens the sign-in and approval page automatically. If nothing appears, use the button below. The installer keeps polling and will finish automatically.";
+          claimHelp.textContent = "Quick Start opens the sign-in and approval page automatically. If nothing appears, use the button below. This machine is waiting for approval; keep this window open to let Quick Start finish automatically.";
           if (claimReady || !state.busy) {
             resetPrimedClaimWindow(false);
           }

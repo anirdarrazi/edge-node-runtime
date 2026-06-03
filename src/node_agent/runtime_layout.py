@@ -10,6 +10,12 @@ from .runtime_backend import default_service_access_host, detect_runtime_backend
 
 RUNTIME_DIR_ENV = "AUTONOMOUSC_RUNTIME_DIR"
 RUNTIME_HOST_ENV = "AUTONOMOUSC_RUNTIME_HOST"
+COMPOSE_HARDENING_OVERRIDE_NAME = "docker-compose.hardening.yml"
+COMPOSE_HARDENING_OVERRIDE_CONTENT = """services:
+  vllm:
+    ports: !override
+      - "127.0.0.1:8000:8000"
+"""
 
 
 def package_dir() -> Path:
@@ -54,6 +60,25 @@ def service_access_host() -> str:
     return default_service_access_host(detect_runtime_backend())
 
 
+def runtime_compose_hardening_override_path(runtime_dir: Path) -> Path:
+    return runtime_dir.resolve() / COMPOSE_HARDENING_OVERRIDE_NAME
+
+
+def ensure_runtime_compose_hardening_override(runtime_dir: Path) -> Path:
+    target = runtime_compose_hardening_override_path(runtime_dir)
+    if target.exists() and target.read_text(encoding="utf-8") == COMPOSE_HARDENING_OVERRIDE_CONTENT:
+        return target
+    target.write_text(COMPOSE_HARDENING_OVERRIDE_CONTENT, encoding="utf-8")
+    return target
+
+
+def runtime_compose_file_args(runtime_dir: Path) -> list[str]:
+    override_path = runtime_compose_hardening_override_path(runtime_dir)
+    if not override_path.exists():
+        return []
+    return ["-f", "docker-compose.yml", "-f", override_path.name]
+
+
 def ensure_runtime_bundle(runtime_dir: Path) -> Path:
     target = runtime_dir.resolve()
     source = bundled_runtime_dir()
@@ -77,4 +102,5 @@ def ensure_runtime_bundle(runtime_dir: Path) -> Path:
         target_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source_path, target_path)
     verify_runtime_bundle_dir(target)
+    ensure_runtime_compose_hardening_override(target)
     return target

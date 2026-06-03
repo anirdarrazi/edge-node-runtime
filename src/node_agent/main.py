@@ -2294,13 +2294,15 @@ def run_worker_loop(control: EdgeControlClient, runtime: VLLMRuntime, attest_on_
                 )
                 control.write_recovery_note(
                     "This node lost control-plane access because its credentials were rejected or revoked. "
-                    "Open the setup UI and run Quick Start to re-approve this machine. "
+                    "The machine already has local state; if approval already exists, rerun Quick Start on the same machine "
+                    "to re-approve this node. "
                     "Use `node-agent bootstrap` only for direct terminal debugging."
                 )
                 control.clear_credentials()
                 raise RuntimeError(
                     "Node credentials were rejected by the control plane. "
-                    "Open the setup UI and run Quick Start to reclaim this node."
+                    "The machine already has local state; if approval already exists, rerun Quick Start on the same machine "
+                    "to reclaim this node."
                 ) from error
             if control.is_transient_network_error(error):
                 LOGGER.warning("control plane connectivity degraded temporarily: %s", error)

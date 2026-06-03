@@ -30,7 +30,12 @@ Contents:
 - `manager` mode when `/var/run/docker.sock` is mounted
 - `single_container` mode when Docker socket access is unavailable and the image is running as one NVIDIA container
 
-In both cases, the same setup UI is exposed on `:8765`.
+## Owner contract
+
+- install + Quick Start + browser approval from same machine, only `127.0.0.1:8765` needs exposure.
+
+The setup UI is local. Run locally. Open 127.0.0.1:8765 only.
+Owner launchers run the owner flow in strict loopback-only mode (--strict-owner-mode) by default.
 Manager mode has root-equivalent access to the host through Docker. It should only be enabled explicitly on machines dedicated to this runtime.
 
 ### Public setup
@@ -39,8 +44,7 @@ Normal setup is one command and one browser screen:
 
 ```bash
 docker run --gpus all \
-  -p 127.0.0.1:8765:8765 \
-  -p 127.0.0.1:8000:8000 \
+-p 127.0.0.1:8765:8765 \
   -v autonomousc-edge:/var/lib/autonomousc \
   anirdarrazi/autonomousc-ai-edge-runtime:latest
 ```
@@ -103,7 +107,7 @@ SUPPORTED_MODELS=google/gemma-4-E4B-it
 VLLM_EXTRA_ARGS=--quantization fp8 --kv-cache-dtype fp8 --gpu-memory-utilization 0.913 --max-num-seqs 8 --generation-config vllm --skip-mm-profiling
 ```
 
-The control plane catalogs this profile as exact-model, audited-safetensors, `restricted`-eligible, and `elastic_exact_vast`. The durable Vast launcher uses a 32k context on 16 GB RTX 5060 Ti nodes, advertises 250-item hard BatchRouter chunks with four concurrent chunk lanes, and keeps the local pull reservoir capped at four assignments so slower hosts do not hoard queued chunks from faster fleet peers. It runs vLLM with FP8 weight quantization and FP8 KV cache over the BF16 safetensors source repo, allows a long first-load Gemma warmup, and keeps the contract alive after smoke success. Offer selection is intentionally narrow for this profile: one RTX 5060 Ti 16GB GPU, `cuda_max_good >= 12.9`, at least 80 GB disk, a basic reliability floor, and direct mappings for the runtime/status ports. Failed smoke candidates are destroyed before the launcher tries the next cheapest viable host.
+The control plane catalogs this profile as exact-model, audited-safetensors, `restricted`-eligible, and `elastic_exact_vast`. The durable Vast launcher uses a 32k context on 16 GB RTX 5060 Ti nodes, advertises 250-item hard BatchRouter chunks with four concurrent chunk lanes, and keeps the local pull reservoir capped at four assignments so slower hosts do not hoard queued chunks from faster fleet peers. It runs vLLM with FP8 weight quantization and FP8 KV cache over the BF16 safetensors source repo, allows a long first-load Gemma warmup, and keeps the contract alive after smoke success. Offer selection is intentionally narrow for this profile: one RTX 5060 Ti 16GB GPU, `cuda_max_good >= 12.9`, at least 80 GB disk, a basic reliability floor, and direct runtime/status endpoint wiring. Failed smoke candidates are destroyed before the launcher tries the next cheapest viable host.
 
 Durable Vast launch helper:
 
@@ -144,6 +148,17 @@ The planner now uses the same host-quality constraints as the launcher and inspe
 
 Required runtime secrets are read from environment variables: `VAST_API_KEY`, `HUGGING_FACE_HUB_TOKEN`, `EDGE_CONTROL_URL`, `NODE_ID`, and `NODE_KEY`. Do not commit these values.
 
+### Advanced/Support paths
+
+The following flows are for owner support, maintenance, and controlled migration work only. They are explicitly **not** the normal owner Quick Start path.
+
+#### Advanced/Support: remote workflows
+
+These helper commands are advanced/support operator/maintenance flows:
+
+- `python -m node_agent.vast_smoke ...`
+- `python -m node_agent.vast_fleet_plan ...`
+
 Build and push the public `latest` image:
 
 ```bash
@@ -156,19 +171,14 @@ Windows PowerShell:
 .\publish-latest-image.ps1
 ```
 
-### Advanced and compatibility paths
-
-These remain available for development, support, or controlled migrations, but they are no longer the normal public install story.
-
-#### Local manager mode
+#### Advanced/Support: local manager mode
 
 Use this when the runtime should manage sibling containers through the host Docker engine:
 
 ```bash
 docker run --rm \
   --gpus all \
-  -p 127.0.0.1:8765:8765 \
-  -p 127.0.0.1:8000:8000 \
+-p 127.0.0.1:8765:8765 \
   -e AUTONOMOUSC_RUNTIME_BACKEND=manager \
   --add-host=host.docker.internal:host-gateway \
   -v /var/run/docker.sock:/var/run/docker.sock \
@@ -180,16 +190,16 @@ Then open `http://127.0.0.1:8765` and complete Quick Start.
 
 Notes:
 
-- The setup UI should be published only on loopback. Use an authenticated tunnel or firewall rule for remote access.
+- The owner setup UI is local. Run locally. Open 127.0.0.1:8765 only.
 - In one-container mode, the service starts `vllm` and `node-agent` inside the same container.
 - In manager mode, the service orchestrates sibling `vllm`, `node-agent`, and `vector` containers through Docker Compose.
 - `Dockerfile.single` remains in the repo for compatibility testing, but `:latest` is the supported install path.
 - If you intentionally need advanced operator/admin controls in the UI, open `http://127.0.0.1:8765/?operator=1`.
 - If you intentionally need legacy env-based enrollment, `OPERATOR_TOKEN`, `NODE_ID`, and `NODE_KEY` still work, but they are advanced-mode fallbacks rather than the normal install path.
 
-## Repo-local owner app
+### Advanced/Support: repo-local launchers and legacy scripts
 
-If you are running from a checked-out repo for support or development, use one app launcher instead of deciding between install vs open.
+If you are running from a checked-out repo for support or development, use the repo-local owner app instead of deciding between install vs open.
 
 Linux/macOS:
 
@@ -286,7 +296,8 @@ Notes:
 - Repo-local installs still use the checked-out `docker-compose.yml`, which builds `node-agent` from source for development.
 - Manager-container installs use the bundled runtime assets and the published digest-pinned `anirdarrazi/autonomousc-ai-edge-runtime` image instead of rebuilding from source.
 - Diagnostics bundles are written to `./data/diagnostics`.
-- `node-agent-bootstrap` is still available for support/debugging, but normal owners should stay in the setup UI and let Quick Start open the browser approval flow.
+- `node-agent-bootstrap` is explicitly an advanced/support debug path; normal owners should stay in the setup UI and let Quick Start run the local browser approval flow.
+- `docker-compose.yml` usage here is advanced/support-only and intended only for repo-local development or support workflows.
 - `node-agent` runs headless after credentials have been stored in `./data/credentials`.
 - `OPERATOR_TOKEN`, `NODE_ID`, and `NODE_KEY` are now legacy fallbacks for development, support, or controlled migrations rather than the normal install flow.
 - `ATTESTATION_PROVIDER=simulated` is fine for local bring-up, but restricted work now requires hardware-backed attestation metadata before the control plane will schedule it.

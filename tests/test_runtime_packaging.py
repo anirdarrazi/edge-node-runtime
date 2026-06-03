@@ -45,7 +45,10 @@ def test_inference_compose_command_keeps_container_shell_variables(compose_path:
 
 def test_manager_mode_readme_requests_gpu_access() -> None:
     readme = (RUNTIME_ROOT / "README.md").read_text(encoding="utf-8")
-    manager_section = readme.split("#### Local manager mode", 1)[1].split("Then open", 1)[0]
+    manager_section_parts = readme.split("#### Advanced/Support: local manager mode", 1)
+    if len(manager_section_parts) == 1:
+        manager_section_parts = readme.split("#### Local manager mode", 1)
+    manager_section = manager_section_parts[1].split("Then open", 1)[0]
 
     assert "docker run --rm \\\n  --gpus all \\" in manager_section
 

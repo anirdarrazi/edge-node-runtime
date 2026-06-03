@@ -29,4 +29,4 @@ echo "Preparing the local AUTONOMOUSc Edge Node app..."
 "$VENV_PYTHON" -m pip install -e .
 
 echo "Repairing the local node runtime service..."
-"$VENV_PYTHON" -m node_agent.service repair --open
+"$VENV_PYTHON" -m node_agent.service repair --strict-owner-mode --open

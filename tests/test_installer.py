@@ -20,7 +20,7 @@ def normalize_compose_args(args: list[str]) -> list[str]:
         return args
     normalized = ["docker", "compose"]
     index = 2
-    while index + 1 < len(args) and args[index] == "--env-file":
+    while index + 1 < len(args) and args[index] in {"--env-file", "-f"}:
         index += 2
     normalized.extend(args[index:])
     return normalized
@@ -1548,6 +1548,49 @@ def test_run_install_skips_claim_when_credentials_exist(tmp_path: Path, monkeypa
 def test_installer_rejects_remote_bind_even_if_remote_flag_is_requested() -> None:
     with pytest.raises(ValueError, match="non-loopback"):
         installer_module.require_secure_bind_host("0.0.0.0", True)
+
+
+def test_installer_main_rejects_non_loopback_in_strict_owner_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUTONOMOUSC_ALLOW_CONTAINER_BIND", "1")
+    with pytest.raises(ValueError, match="loopback"):
+        installer_module.main(["--host", "0.0.0.0", "--strict-owner-mode"])
+
+
+def test_installer_main_rejects_non_loopback_with_owner_loopback_only_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUTONOMOUSC_ALLOW_CONTAINER_BIND", "1")
+    with pytest.raises(ValueError, match="loopback"):
+        installer_module.main(["--host", "0.0.0.0", "--owner-loopback-only"])
+
+
+def test_resolve_owner_mode_host_falls_back_to_loopback_for_non_loopback_host(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    host = installer_module._resolve_owner_mode_host(
+        "192.168.0.10",
+        strict_owner_mode=False,
+        allow_remote_owner_host=False,
+    )
+    captured = capsys.readouterr()
+    assert host == "127.0.0.1"
+    assert "Startup warning" in captured.out
+    assert "Owner mode is local-first." in captured.out
+
+
+def test_resolve_owner_mode_host_allows_remote_with_explicit_flag(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    host = installer_module._resolve_owner_mode_host(
+        "192.168.0.10",
+        strict_owner_mode=False,
+        allow_remote_owner_host=True,
+    )
+    captured = capsys.readouterr()
+    assert host == "192.168.0.10"
+    assert "non-loopback host" in captured.out
 
 
 def test_installer_cli_rejects_removed_allow_remote_flag() -> None:

@@ -25,6 +25,8 @@ dist/
 *.tmp.json
 *.tmp.txt
 *.tmp.log
+*.stacktrace
+*.coverage.json
 *.log
 codex-*.json
 *stress*.json
@@ -32,6 +34,9 @@ stress*.json
 stress-*.json
 stress*.log
 *stress*.log
+*stress*.out.log
+*stress*.err.log
+*stress*.err.txt
 stress-*.out
 stress*.err
 stress*.err.txt
@@ -51,6 +56,7 @@ runtime-state/
 live-drill-artifacts/
 diagnostics/
 coverage/
+coverage/**/
 *.jsonl
 *.json.err
 *.json.err.txt
@@ -58,5 +64,7 @@ coverage/
 *.json.out
 *.json.out.log
 *.json.out.txt
+*.json.err*
+*.json.out*
 **/*.json.err*
 **/*.json.out*

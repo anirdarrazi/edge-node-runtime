@@ -96,7 +96,7 @@ function Start-NodeApp {
   Set-Location $RootPath
   $venvPython = Get-NodeServiceVenvPython -RootPath $RootPath -Create -RefreshDependencies:$RefreshDependencies
   Write-Host "Opening the AUTONOMOUSc Edge Node app..."
-  & $venvPython -m node_agent.service start --open
+  & $venvPython -m node_agent.service start --strict-owner-mode --open
 }
 
 function Stop-NodeApp {
@@ -122,5 +122,5 @@ function Repair-NodeApp {
   Set-Location $RootPath
   $venvPython = Get-NodeServiceVenvPython -RootPath $RootPath -Create -RefreshDependencies:$RefreshDependencies
   Write-Host "Repairing the AUTONOMOUSc Edge Node app..."
-  & $venvPython -m node_agent.service repair --open
+  & $venvPython -m node_agent.service repair --strict-owner-mode --open
 }

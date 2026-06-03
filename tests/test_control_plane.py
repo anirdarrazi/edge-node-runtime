@@ -257,7 +257,7 @@ def test_bootstrap_requires_interactive_terminal_without_credentials(tmp_path: P
     settings = build_settings(credentials_path, operator_token=None)
     client = EdgeControlClient(settings)
 
-    with pytest.raises(RuntimeError, match="Open the setup UI and run Quick Start"):
+    with pytest.raises(RuntimeError, match="Quick Start"):
         client.bootstrap(interactive=False)
 
 
@@ -266,7 +266,7 @@ def test_require_credentials_points_missing_nodes_back_to_setup_ui(tmp_path: Pat
     settings = build_settings(credentials_path, operator_token=None)
     client = EdgeControlClient(settings)
 
-    with pytest.raises(RuntimeError, match="Open the setup UI and run Quick Start"):
+    with pytest.raises(RuntimeError, match="Quick Start"):
         client.require_credentials()
 
 

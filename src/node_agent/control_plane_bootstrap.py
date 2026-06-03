@@ -37,7 +37,9 @@ class NodeBootstrapOrchestrator:
     @staticmethod
     def setup_ui_claim_message() -> str:
         return (
-            "No stored node credentials were found. Open the setup UI and run Quick Start to claim this node. "
+            "No stored node credentials were found. If you already approved this machine on this host, "
+            "rerun Quick Start on the same machine. "
+            "Otherwise open the setup UI and run Quick Start to claim this node. "
             "Use `node-agent bootstrap` only for direct terminal debugging."
         )
 
@@ -110,12 +112,16 @@ class NodeBootstrapOrchestrator:
                 return self.persist_from_response(result.model_dump())
             if result.status == "consumed":
                 raise RuntimeError(
-                    "Node claim was consumed but did not return credentials. Start Quick Start again from the setup UI, "
+                    "Node claim was consumed but did not return credentials. If approval already exists for this machine, "
+                    "rerun Quick Start on the same machine. "
+                    "Otherwise start Quick Start again from the setup UI, "
                     "or rerun `node-agent bootstrap` if you are using the direct terminal flow."
                 )
             if result.status == "expired":
                 raise RuntimeError(
-                    "Node claim expired before approval completed. Start Quick Start again from the setup UI, "
+                    "Node claim expired before approval completed. If approval already exists for this machine, "
+                    "rerun Quick Start on the same machine. "
+                    "Otherwise start Quick Start again from the setup UI, "
                     "or rerun `node-agent bootstrap` if you are using the direct terminal flow."
                 )
             remaining = self.format_remaining_time(result.expires_at)

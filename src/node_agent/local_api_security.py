@@ -59,6 +59,15 @@ def require_secure_bind_host(host: str, allow_remote: bool | None = None) -> Non
         )
 
 
+def require_owner_mode_bind_host(host: str, *, strict_owner_mode: bool) -> None:
+    if strict_owner_mode and not is_loopback_host(host):
+        raise ValueError(
+            "Refusing to bind the AUTONOMOUSc owner setup UI to a non-loopback host. "
+            "Use `127.0.0.1`/`localhost` and open it in your local browser."
+        )
+    require_secure_bind_host(host)
+
+
 def request_query_param(path: str, name: str) -> str | None:
     values = parse_qs(urlsplit(path).query).get(name)
     if not values:

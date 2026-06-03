@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import errno
 from contextlib import contextmanager
 import hashlib
 import json
 import os
+import socket
 import signal
 import shutil
 import subprocess
@@ -74,10 +76,12 @@ from .local_api_security import (
     LOCAL_SESSION_COOKIE,
     LocalSessionStore,
     browser_access_host,
+    is_loopback_host,
     cookie_value,
     generate_admin_token,
     origin_matches_host,
     request_query_param,
+    require_owner_mode_bind_host,
     require_secure_bind_host,
     serialize_cookie,
     tighten_private_path,
@@ -98,7 +102,7 @@ from .runtime_backend import (
     runtime_backend_required_services,
     runtime_backend_supports_compose,
 )
-from .runtime_layout import ensure_runtime_bundle, resolve_runtime_dir, service_access_host
+from .runtime_layout import ensure_runtime_bundle, resolve_runtime_dir, runtime_compose_file_args, service_access_host
 from .single_container import EmbeddedRuntimeSupervisor
 
 RUNTIME_SERVICES = ("vllm", "node-agent", "vector")
@@ -118,6 +122,21 @@ LOCAL_DOCTOR_INTERVAL_SECONDS = 4 * 60 * 60
 LOCAL_DOCTOR_LOOP_SECONDS = 5 * 60
 OWNER_TIMELINE_LIMIT = 20
 OWNER_TIMELINE_DISPLAY_LIMIT = 6
+LOCAL_UI_PORT_BUSY_MESSAGE = (
+    "Port 8765 is already in use, usually by another AUTONOMOUSc setup/runtime instance on this machine. "
+    "If this machine already has an active approval link, it is still valid. "
+    "Wait for that setup flow to finish, then rerun Quick Start on the same machine."
+)
+OWNER_MODE_HOST_WARNING = (
+    "Startup warning: Owner mode requested with non-loopback host {host}. "
+    "Normal owner flow is local-first on 127.0.0.1:8765. "
+    "Use --allow-remote-owner-host for an advanced remote-owner flow."
+)
+OWNER_MODE_HOST_FALLBACK_NOTE = (
+    "Owner mode is local-first. Non-loopback --host is not allowed without --allow-remote-owner-host, so this run uses "
+    "127.0.0.1:8765."
+)
+
 RUNTIME_TUPLE_ENV_KEYS = (
     "SETUP_PROFILE",
     "RUNTIME_PROFILE",
@@ -240,6 +259,56 @@ def redact_sensitive_payload(value: Any, *, key: str | None = None) -> Any:
     if isinstance(value, list):
         return [redact_sensitive_payload(item) for item in value]
     return value
+
+
+def _is_bind_address_in_use_error(error: OSError) -> bool:
+    error_code = getattr(error, "errno", None)
+    if error_code in {errno.EADDRINUSE, 10048, 48}:
+        return True
+    message = str(error).lower()
+    return any(
+        marker in message
+        for marker in (
+            "address already in use",
+            "bind: address already in use",
+            "only one usage of each socket address",
+            "failed to bind",
+            "listen tcp",
+        )
+    )
+
+
+def _is_port_available(host: str, port: int) -> bool:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            probe.bind((host, port))
+        return True
+    except OSError:
+        return False
+
+
+def _resolve_owner_mode_host(
+    host: str,
+    *,
+    strict_owner_mode: bool,
+    allow_remote_owner_host: bool,
+) -> str:
+    if is_loopback_host(host):
+        require_owner_mode_bind_host(host, strict_owner_mode=strict_owner_mode)
+        return host
+
+    print(OWNER_MODE_HOST_WARNING.format(host=host), flush=True)
+
+    if strict_owner_mode:
+        # Preserve strict mode hard fail for accidental remote exposure.
+        require_owner_mode_bind_host(host, strict_owner_mode=True)
+
+    if allow_remote_owner_host:
+        return host
+
+    print(OWNER_MODE_HOST_FALLBACK_NOTE, flush=True)
+    return "127.0.0.1"
 
 
 def format_usd(amount: Any) -> str:
@@ -1192,6 +1261,7 @@ class NodeRuntimeService:
             raise RuntimeError("Docker Compose is unavailable in the unified in-container runtime mode.")
         self.guided_installer.sync_runtime_env()
         command = ["docker", "compose"]
+        command.extend(runtime_compose_file_args(self.runtime_dir))
         if self.release_env_path.exists():
             command.extend(["--env-file", str(self.release_env_path)])
         if self.guided_installer.runtime_env_path.exists():
@@ -2228,7 +2298,10 @@ class NodeRuntimeService:
             issue_action_label = str(startup_issue.get("issue_action_label") or "Fix it")
         elif not credentials_present and config_present:
             issue_code = "approval_required"
-            issue_detail = "This machine still needs approval before the runtime can come online."
+            issue_detail = (
+                "Quick Start is waiting for approval. If approval or credentials already exist for this machine, "
+                "this claim link is still valid, and you should rerun Quick Start on the same machine to retry."
+            )
             manual_fix_available = True
             issue_action_label = "Resume setup"
 
@@ -4136,7 +4209,7 @@ class NodeRuntimeService:
                 blocked_reason
                 or runtime.get("message")
                 or health.get("issue_detail")
-                or "Open the approval page to finish bringing this machine online."
+                or "Quick Start is waiting for approval. Open the approval page to finish bringing this machine online."
             )
             return {
                 "value": "Waiting for approval",
@@ -4984,7 +5057,11 @@ class NodeRuntimeService:
         elif runtime.get("stage") in {"registration_required", "ready"}:
             health_value = "Waiting"
             health_tone = "warning"
-            health_detail = str(runtime.get("message") or "This machine still needs approval before it can serve work.")
+            health_detail = str(
+                runtime.get("message")
+                or "Quick Start is waiting for approval. If approval or credentials already exist for this machine, "
+                "this claim link is still valid, and you should rerun Quick Start on the same machine to retry."
+            )
         else:
             health_value = "Starting"
             health_tone = "warning"
@@ -6107,7 +6184,11 @@ class NodeRuntimeService:
             elif not allow_quickstart_resume:
                 self.update_self_heal_state(
                     status="attention",
-                    last_result="Local setup files were repaired, but this machine still needs approval before it can come online.",
+                    last_result=(
+                        "Local setup files were repaired. Quick Start is waiting for approval for this machine. "
+                        "If approval or credentials already exist, the claim link is still valid and rerunning Quick Start on "
+                        "the same machine will retry approval."
+                    ),
                     last_issue=str(health.get("issue_detail") or ""),
                     last_error=None,
                     last_action="waiting_for_approval",
@@ -7194,14 +7275,34 @@ def clear_service_meta(runtime_dir: Path) -> None:
             path.unlink()
 
 
-def command_run(host: str, port: int) -> int:
-    require_secure_bind_host(host)
+def command_run(
+    host: str,
+    port: int,
+    *,
+    strict_owner_mode: bool = False,
+    allow_remote_owner_host: bool = False,
+) -> int:
+    host = _resolve_owner_mode_host(
+        host,
+        strict_owner_mode=strict_owner_mode,
+        allow_remote_owner_host=allow_remote_owner_host,
+    )
     service = NodeRuntimeService()
     service.host = host
     service.port = port
     service.write_meta()
-    service.log(f"Node runtime service started at http://{host}:{port}")
     service.resume_setup_if_needed()
+    server_ref: dict[str, ThreadingHTTPServer] = {}
+    handler = make_handler(service, server_ref)
+
+    try:
+        server = ThreadingHTTPServer((host, port), handler)
+    except OSError as error:
+        if _is_bind_address_in_use_error(error) and port == 8765:
+            print(LOCAL_UI_PORT_BUSY_MESSAGE, flush=True)
+            return 1
+        raise
+    server_ref["server"] = server
     access_url = f"http://{browser_access_host(host)}:{port}"
     print(f"AUTONOMOUSc node setup UI is available at {access_url}", flush=True)
     print(
@@ -7210,10 +7311,6 @@ def command_run(host: str, port: int) -> int:
         flush=True,
     )
 
-    server_ref: dict[str, ThreadingHTTPServer] = {}
-    handler = make_handler(service, server_ref)
-    server = ThreadingHTTPServer((host, port), handler)
-    server_ref["server"] = server
     auto_thread = threading.Thread(target=service.auto_update_loop, daemon=True)
     auto_thread.start()
     local_doctor_thread = threading.Thread(target=service.local_doctor_loop, daemon=True)
@@ -7244,8 +7341,20 @@ def command_run(host: str, port: int) -> int:
     return 0
 
 
-def command_start(runtime_dir: Path, host: str, port: int, open_ui_flag: bool) -> int:
-    require_secure_bind_host(host)
+def command_start(
+    runtime_dir: Path,
+    host: str,
+    port: int,
+    open_ui_flag: bool,
+    *,
+    strict_owner_mode: bool = False,
+    allow_remote_owner_host: bool = False,
+) -> int:
+    host = _resolve_owner_mode_host(
+        host,
+        strict_owner_mode=strict_owner_mode,
+        allow_remote_owner_host=allow_remote_owner_host,
+    )
     meta = load_meta(runtime_dir)
     if meta:
         existing_host = str(meta.get("host", host))
@@ -7258,6 +7367,13 @@ def command_start(runtime_dir: Path, host: str, port: int, open_ui_flag: bool) -
             return 0
         except RuntimeError:
             pass
+
+    if not _is_port_available(host, port):
+        if port == 8765:
+            print(LOCAL_UI_PORT_BUSY_MESSAGE, flush=True)
+            return 1
+        print(f"Port {host}:{port} is already in use.", flush=True)
+        return 1
 
     spawn_background(runtime_dir, host, port)
     wait_for_service(host, port)
@@ -7323,8 +7439,23 @@ def command_status(runtime_dir: Path) -> int:
     return 0
 
 
-def command_repair(runtime_dir: Path, host: str, port: int, open_ui_flag: bool) -> int:
-    command_start(runtime_dir, host, port, False)
+def command_repair(
+    runtime_dir: Path,
+    host: str,
+    port: int,
+    open_ui_flag: bool,
+    *,
+    strict_owner_mode: bool = False,
+    allow_remote_owner_host: bool = False,
+) -> int:
+    command_start(
+        runtime_dir,
+        host,
+        port,
+        False,
+        strict_owner_mode=strict_owner_mode,
+        allow_remote_owner_host=allow_remote_owner_host,
+    )
     meta = load_meta(runtime_dir)
     if not meta:
         raise RuntimeError("The local node runtime service could not be reached for repair.")
@@ -7355,38 +7486,119 @@ def command_repair(runtime_dir: Path, host: str, port: int, open_ui_flag: bool) 
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="AUTONOMOUSc local node runtime service.")
+    parser = argparse.ArgumentParser(
+        description="AUTONOMOUSc local node runtime service.",
+        allow_abbrev=False,
+    )
     subparsers = parser.add_subparsers(dest="command", required=False)
 
-    run_parser = subparsers.add_parser("run", help="Run the node runtime service in the foreground.")
-    run_parser.add_argument("--host", default="127.0.0.1")
+    run_parser = subparsers.add_parser(
+        "run",
+        help="Run the node runtime service in the foreground.",
+        allow_abbrev=False,
+    )
+    run_parser.add_argument("--host", default="127.0.0.1", help="Owner setup bind host (default: 127.0.0.1).")
     run_parser.add_argument("--port", type=int, default=8765)
+    run_parser.add_argument(
+        "--strict-owner-mode",
+        action="store_true",
+        help="Require loopback-only binding for owner setup flows.",
+    )
+    run_parser.add_argument(
+        "--owner-loopback-only",
+        action="store_true",
+        dest="owner_loopback_only",
+        help="Alias for --strict-owner-mode. Require loopback-only owner setup binding.",
+    )
+    run_parser.add_argument(
+        "--allow-remote-owner-host",
+        action="store_true",
+        help="Allow owner setup to bind to a non-loopback host for advanced/remote workflows.",
+    )
 
-    start_parser = subparsers.add_parser("start", help="Start the node runtime service in the background.")
-    start_parser.add_argument("--host", default="127.0.0.1")
+    start_parser = subparsers.add_parser(
+        "start",
+        help="Start the node runtime service in the background.",
+        allow_abbrev=False,
+    )
+    start_parser.add_argument("--host", default="127.0.0.1", help="Owner setup bind host (default: 127.0.0.1).")
     start_parser.add_argument("--port", type=int, default=8765)
     start_parser.add_argument("--open", action="store_true")
+    start_parser.add_argument(
+        "--strict-owner-mode",
+        action="store_true",
+        help="Require loopback-only binding for owner setup flows.",
+    )
+    start_parser.add_argument(
+        "--owner-loopback-only",
+        action="store_true",
+        dest="owner_loopback_only",
+        help="Alias for --strict-owner-mode. Require loopback-only owner setup binding.",
+    )
+    start_parser.add_argument(
+        "--allow-remote-owner-host",
+        action="store_true",
+        help="Allow owner setup to bind to a non-loopback host for advanced/remote workflows.",
+    )
 
     subparsers.add_parser("stop", help="Stop the node runtime service.")
     subparsers.add_parser("status", help="Print the current runtime status.")
 
-    open_parser = subparsers.add_parser("open", help="Open the local runtime UI in your browser.")
+    open_parser = subparsers.add_parser(
+        "open",
+        help="Open the local runtime UI in your browser.",
+        allow_abbrev=False,
+    )
     open_parser.add_argument("--host", default="127.0.0.1")
     open_parser.add_argument("--port", type=int, default=8765)
 
-    repair_parser = subparsers.add_parser("repair", help="Repair local owner setup and restart the runtime when safe.")
-    repair_parser.add_argument("--host", default="127.0.0.1")
+    repair_parser = subparsers.add_parser(
+        "repair",
+        help="Repair local owner setup and restart the runtime when safe.",
+        allow_abbrev=False,
+    )
+    repair_parser.add_argument("--host", default="127.0.0.1", help="Owner setup bind host (default: 127.0.0.1).")
     repair_parser.add_argument("--port", type=int, default=8765)
     repair_parser.add_argument("--open", action="store_true")
+    repair_parser.add_argument(
+        "--strict-owner-mode",
+        action="store_true",
+        help="Require loopback-only binding for owner setup flows.",
+    )
+    repair_parser.add_argument(
+        "--owner-loopback-only",
+        action="store_true",
+        dest="owner_loopback_only",
+        help="Alias for --strict-owner-mode. Require loopback-only owner setup binding.",
+    )
+    repair_parser.add_argument(
+        "--allow-remote-owner-host",
+        action="store_true",
+        help="Allow owner setup to bind to a non-loopback host for advanced/remote workflows.",
+    )
 
     args = parser.parse_args(argv)
     command = args.command or "run"
     runtime_dir = ensure_runtime_bundle(resolve_runtime_dir())
 
     if command == "run":
-        return command_run(args.host, args.port)
+        strict_owner_mode = args.strict_owner_mode or args.owner_loopback_only
+        return command_run(
+            args.host,
+            args.port,
+            strict_owner_mode=strict_owner_mode,
+            allow_remote_owner_host=args.allow_remote_owner_host,
+        )
     if command == "start":
-        return command_start(runtime_dir, args.host, args.port, args.open)
+        strict_owner_mode = args.strict_owner_mode or args.owner_loopback_only
+        return command_start(
+            runtime_dir,
+            args.host,
+            args.port,
+            args.open,
+            strict_owner_mode=strict_owner_mode,
+            allow_remote_owner_host=args.allow_remote_owner_host,
+        )
     if command == "stop":
         return command_stop(runtime_dir)
     if command == "status":
@@ -7403,7 +7615,15 @@ def main(argv: list[str] | None = None) -> int:
         open_browser(args.host, args.port)
         return 0
     if command == "repair":
-        return command_repair(runtime_dir, args.host, args.port, args.open)
+        strict_owner_mode = args.strict_owner_mode or args.owner_loopback_only
+        return command_repair(
+            runtime_dir,
+            args.host,
+            args.port,
+            args.open,
+            strict_owner_mode=strict_owner_mode,
+            allow_remote_owner_host=args.allow_remote_owner_host,
+        )
     raise SystemExit(f"Unknown command: {command}")
 
 

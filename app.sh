@@ -32,4 +32,4 @@ if ! "$VENV_PYTHON" -c 'import node_agent' >/dev/null 2>&1; then
 fi
 
 echo "Opening the AUTONOMOUSc Edge Node app..."
-"$VENV_PYTHON" -m node_agent.service start --open
+"$VENV_PYTHON" -m node_agent.service start --strict-owner-mode --open

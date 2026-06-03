@@ -239,22 +239,29 @@ edge-node-runtime/
 
 ### Quick Start (Recommended)
 
+Run locally. Open 127.0.0.1:8765 only.
+Owner launchers run the owner flow in strict loopback-only mode (--strict-owner-mode) by default.
+
 ```bash
 cd edge-node-runtime
 
-# Repo-local owner app (single command)
+#### Advanced/Support: repo-local owner app (single command)
 bash app.sh                    # Linux/macOS
 .\app.ps1                      # Windows PowerShell
 AUTONOMOUSc\ Edge\ Node\ App.cmd  # Windows double-click
 
-# OR manual Docker setup
+#### Advanced/Support: manual Docker setup
 docker run --gpus all \
-  -p 8765:8765 \
+-p 127.0.0.1:8765:8765 \
   -v autonomousc-edge:/var/lib/autonomousc \
   anirdarrazi/autonomousc-ai-edge-runtime:latest
 ```
 
-### Local Development Commands
+### Advanced/Support paths
+
+The following flows are for owner support, maintenance, and controlled migration work only. They are explicitly **not** the normal owner Quick Start path.
+
+#### Advanced/Support: local manager mode
 
 ```bash
 cd edge-node-runtime
@@ -264,7 +271,7 @@ bash repair.sh
 python -m pytest
 ```
 
-### Commands Reference
+#### Commands Reference
 
 **Repo-Local Launcher**:
 - `bash app.sh` / `.\app.ps1` - Open owner app
@@ -293,8 +300,7 @@ Single command with fully automatic setup:
 
 ```bash
 docker run --gpus all \
-  -p 8765:8765 \
-  -p 8000:8000 \
+-p 127.0.0.1:8765:8765 \
   -v autonomousc-edge:/var/lib/autonomousc \
   anirdarrazi/autonomousc-ai-edge-runtime:latest
 ```
@@ -319,7 +325,7 @@ Then open `http://127.0.0.1:8765` and click "Quick Start".
 ## Configuration
 
 ### Normal Setup (Recommended)
-- Use browser UI at `http://127.0.0.1:8765`
+- Run locally. Open 127.0.0.1:8765 only.
 - Hardware auto-detection
 - Guided enrollment
 - Model auto-selection
@@ -376,7 +382,7 @@ Then open `http://127.0.0.1:8765` and click "Quick Start".
 - Keep AGENTS.md and CLAUDE.md synchronized for every docs change.
 - Keep command references in command sections only (fenced code blocks and list items).
 - Avoid documenting runtime commands unless the command or script exists.
-- Avoid adding `npm run check:ci` references unless the `check:ci` script is explicitly defined.
+- Avoid adding CI-check command references unless the script is explicitly defined.
 - Before review, run:
   - `node ./scripts/verify-workflow-commands.mjs`
   - `python scripts/verify_agent_claude_sync.py --strict`

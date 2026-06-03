@@ -62,6 +62,7 @@ tests/test_cache_seed.py
 tests/test_config.py
 tests/test_control_plane.py
 tests/test_desktop_launcher.py
+tests/test_docs_contract.py
 tests/test_heat_governor.py
 tests/test_installer.py
 tests/test_live_vast_batchrouter_drill.py

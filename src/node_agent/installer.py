@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import base64
 import io
 import json
@@ -51,10 +52,12 @@ from .local_api_security import (
     LOCAL_SESSION_COOKIE,
     LocalSessionStore,
     browser_access_host,
+    is_loopback_host,
     cookie_value,
     generate_admin_token,
     origin_matches_host,
     request_query_param,
+    require_owner_mode_bind_host,
     require_secure_bind_host,
     serialize_cookie,
     tighten_private_path,
@@ -71,7 +74,13 @@ from .runtime_backend import (
     runtime_backend_label,
     runtime_backend_supports_compose,
 )
-from .runtime_layout import bundled_runtime_dir, ensure_runtime_bundle, resolve_runtime_dir, service_access_host
+from .runtime_layout import (
+    bundled_runtime_dir,
+    ensure_runtime_bundle,
+    resolve_runtime_dir,
+    runtime_compose_file_args,
+    service_access_host,
+)
 from .single_container import (
     DEFAULT_STARTUP_STATUS_ENDPOINT_PATH,
     DEFAULT_STARTUP_STATUS_FILENAME,
@@ -324,6 +333,20 @@ CONTROL_PLANE_TRANSIENT_ERROR_MARKERS = (
 WINDOWS_FIREWALL_RULE_PREFIX = "AUTONOMOUSc Edge Node"
 LOCAL_SERVICE_PORT = 8765
 LOCAL_INFERENCE_PORT = 8000
+LOCAL_UI_PORT_BUSY_MESSAGE = (
+    "Port 8765 is already in use, usually by another AUTONOMOUSc setup/runtime instance on this machine. "
+    "If this machine already has an active approval link, it is still valid. "
+    "Wait for that setup flow to finish, then rerun Quick Start on the same machine."
+)
+OWNER_MODE_HOST_WARNING = (
+    "Startup warning: Owner mode requested with non-loopback host {host}. "
+    "Normal owner flow is local-first on 127.0.0.1:8765. "
+    "Use --allow-remote-owner-host for an advanced remote-owner flow."
+)
+OWNER_MODE_HOST_FALLBACK_NOTE = (
+    "Owner mode is local-first. Non-loopback --host is not allowed without --allow-remote-owner-host, so this run uses "
+    "127.0.0.1:8765."
+)
 
 
 @dataclass(frozen=True)
@@ -5550,7 +5573,8 @@ class GuidedInstaller:
             self.state.error = None
             self.state.error_step = None
             self.state.message = (
-                "Waiting for sign-in and approval so this machine can be registered. "
+                "Quick Start is waiting for approval. If approval or credentials already exist for this machine, "
+                "the claim link is still valid, and you should rerun Quick Start on this machine to retry. "
                 "The approval link in this app refreshes automatically if needed."
             )
             self.state.stage_context = {}
@@ -6187,6 +6211,7 @@ class GuidedInstaller:
     def compose_command(self, args: list[str]) -> list[str]:
         self.sync_runtime_env()
         command = ["docker", "compose"]
+        command.extend(runtime_compose_file_args(self.runtime_dir))
         if self.release_env_path.exists():
             command.extend(["--env-file", str(self.release_env_path)])
         if self.runtime_env_path.exists():
@@ -7252,7 +7277,8 @@ class GuidedInstaller:
                         raise RuntimeError(
                             "Node claim was consumed but did not return credentials. "
                             "Quick Start cannot recover this approval automatically. "
-                            "Start Quick Start again from the setup UI."
+                            "If approval or credentials already exist for this machine, this claim link is still valid: rerun Quick "
+                            "Start on the same machine and retry approval."
                         )
                     if result.status not in {"expired", "consumed"}:
                         next_active_claims.append(active_claim)
@@ -7412,18 +7438,70 @@ def make_handler(installer: GuidedInstaller, admin_token: str) -> type[BaseHTTPR
     return InstallerHandler
 
 
+def _resolve_owner_mode_host(
+    host: str,
+    *,
+    strict_owner_mode: bool,
+    allow_remote_owner_host: bool,
+) -> str:
+    if is_loopback_host(host):
+        require_owner_mode_bind_host(host, strict_owner_mode=strict_owner_mode)
+        return host
+
+    print(OWNER_MODE_HOST_WARNING.format(host=host), flush=True)
+
+    if strict_owner_mode:
+        require_owner_mode_bind_host(host, strict_owner_mode=True)
+
+    if allow_remote_owner_host:
+        return host
+
+    print(OWNER_MODE_HOST_FALLBACK_NOTE, flush=True)
+    return "127.0.0.1"
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Launch the AUTONOMOUSc edge node guided installer.")
-    parser.add_argument("--host", default="127.0.0.1")
+    parser = argparse.ArgumentParser(
+        description="Launch the AUTONOMOUSc edge node guided installer.",
+        allow_abbrev=False,
+    )
+    parser.add_argument("--host", default="127.0.0.1", help="Owner setup bind host (default: 127.0.0.1).")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument(
+        "--strict-owner-mode",
+        action="store_true",
+        help="Require loopback-only binding for the owner setup UI.",
+    )
+    parser.add_argument(
+        "--owner-loopback-only",
+        action="store_true",
+        dest="owner_loopback_only",
+        help="Alias for --strict-owner-mode. Require loopback-only owner setup binding.",
+    )
+    parser.add_argument(
+        "--allow-remote-owner-host",
+        action="store_true",
+        help="Allow owner setup to bind to a non-loopback host for advanced/remote workflows.",
+    )
     args = parser.parse_args(argv)
 
-    require_secure_bind_host(args.host)
+    strict_owner_mode = args.strict_owner_mode or args.owner_loopback_only
+    host = _resolve_owner_mode_host(
+        args.host,
+        strict_owner_mode=strict_owner_mode,
+        allow_remote_owner_host=args.allow_remote_owner_host,
+    )
     installer = GuidedInstaller()
     installer.resume_if_needed()
     admin_token = generate_admin_token()
-    server = ThreadingHTTPServer((args.host, args.port), make_handler(installer, admin_token))
-    base_url = f"http://{browser_access_host(args.host)}:{args.port}"
+    try:
+        server = ThreadingHTTPServer((host, args.port), make_handler(installer, admin_token))
+    except OSError as error:
+        if getattr(error, "errno", None) in {errno.EADDRINUSE, 48, 10048} and args.port == LOCAL_SERVICE_PORT:
+            print(LOCAL_UI_PORT_BUSY_MESSAGE, flush=True)
+            return 1
+        raise
+    base_url = f"http://{browser_access_host(host)}:{args.port}"
     url = f"{base_url}/?token={quote(admin_token)}"
 
     print(f"AUTONOMOUSc guided installer is available at {base_url}")

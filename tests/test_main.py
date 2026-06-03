@@ -179,12 +179,12 @@ def test_run_worker_loop_clears_credentials_after_auth_failure():
     control = FakeControl(has_credentials=True)
     control.auth_fail_on_heartbeat = True
 
-    with pytest.raises(RuntimeError, match="Open the setup UI and run Quick Start"):
+    with pytest.raises(RuntimeError, match="Quick Start"):
         main_module.run_worker_loop(control, object(), attest_on_start=False)
 
     assert control.clear_calls == 1
     assert control.recovery_notes
-    assert "Open the setup UI and run Quick Start" in control.recovery_notes[-1]
+    assert "Quick Start" in control.recovery_notes[-1]
 
 
 def test_recommended_local_reservoir_target_expands_during_degraded_mode():

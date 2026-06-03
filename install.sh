@@ -30,4 +30,4 @@ echo "Installing local node service dependencies..."
 "$VENV_PYTHON" -m pip install -e .
 
 echo "Starting the local node runtime service..."
-"$VENV_PYTHON" -m node_agent.service start --open
+"$VENV_PYTHON" -m node_agent.service start --strict-owner-mode --open

@@ -120,7 +120,7 @@ def base_runner_factory(
             return args
         normalized = ["docker", "compose"]
         index = 2
-        while index + 1 < len(args) and args[index] == "--env-file":
+        while index + 1 < len(args) and args[index] in {"--env-file", "-f"}:
             index += 2
         normalized.extend(args[index:])
         return normalized
@@ -934,6 +934,7 @@ def test_runtime_service_populates_owner_bundle_when_runtime_dir_is_overridden(
     assert (tmp_path / "docker-compose.yml").exists()
     assert (tmp_path / ".env.example").exists()
     assert (tmp_path / "appliance-runtime-manifest.json").exists()
+    assert (tmp_path / "docker-compose.hardening.yml").read_text(encoding="utf-8").count("127.0.0.1:8000:8000") == 1
     assert (tmp_path / "release-manifest.json").exists()
     assert (tmp_path / "vector.toml").exists()
     payload = service.status_payload()
@@ -3547,6 +3548,41 @@ def test_command_run_rejects_remote_bind_even_if_remote_flag_is_requested() -> N
         service_module.require_secure_bind_host("0.0.0.0", True)
 
 
+def test_resolve_owner_mode_host_falls_back_to_loopback_for_non_loopback_host(capsys: pytest.CaptureFixture[str]) -> None:
+    host = service_module._resolve_owner_mode_host(
+        "192.168.0.10",
+        strict_owner_mode=False,
+        allow_remote_owner_host=False,
+    )
+    captured = capsys.readouterr()
+    assert host == "127.0.0.1"
+    assert "Startup warning" in captured.out
+    assert "Owner mode is local-first." in captured.out
+
+
+def test_resolve_owner_mode_host_allows_remote_with_explicit_flag(capsys: pytest.CaptureFixture[str]) -> None:
+    host = service_module._resolve_owner_mode_host(
+        "192.168.0.10",
+        strict_owner_mode=False,
+        allow_remote_owner_host=True,
+    )
+    captured = capsys.readouterr()
+    assert host == "192.168.0.10"
+    assert "non-loopback host" in captured.out
+
+
+def test_command_run_rejects_non_loopback_when_strict_owner_mode_is_requested(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTONOMOUSC_ALLOW_CONTAINER_BIND", "1")
+    with pytest.raises(ValueError, match="Refusing to bind the AUTONOMOUSc owner setup UI to a non-loopback host"):
+        service_module.main(["run", "--host", "0.0.0.0", "--strict-owner-mode"])
+
+
+def test_command_run_rejects_non_loopback_when_owner_loopback_only_alias_is_requested(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTONOMOUSC_ALLOW_CONTAINER_BIND", "1")
+    with pytest.raises(ValueError, match="Refusing to bind the AUTONOMOUSc owner setup UI to a non-loopback host"):
+        service_module.main(["run", "--host", "0.0.0.0", "--owner-loopback-only"])
+
+
 def test_service_cli_rejects_removed_allow_remote_flag() -> None:
     with pytest.raises(SystemExit):
         service_module.main(["run", "--allow-remote"])
@@ -3575,7 +3611,14 @@ def test_command_repair_calls_local_service_endpoint_and_opens_ui(
 ) -> None:
     captured: dict[str, object] = {}
 
-    def fake_command_start(runtime_dir: Path, host: str, port: int, open_ui_flag: bool) -> int:
+    def fake_command_start(
+        runtime_dir: Path,
+        host: str,
+        port: int,
+        open_ui_flag: bool,
+        strict_owner_mode: bool = False,
+        allow_remote_owner_host: bool = False,
+    ) -> int:
         captured["start"] = (runtime_dir, host, port, open_ui_flag)
         return 0
 

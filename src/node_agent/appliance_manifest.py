@@ -16,6 +16,21 @@ PACKAGE_MANIFEST_NAME = "appliance-package-manifest.json"
 PACKAGE_PUBLIC_KEY_NAME = "appliance-package-manifest.pub"
 RUNTIME_MANIFEST_NAME = "appliance-runtime-manifest.json"
 RUNTIME_PUBLIC_KEY_NAME = "appliance-runtime-manifest.pub"
+TEXT_MANIFEST_SUFFIXES = {
+    ".cmd",
+    ".env",
+    ".html",
+    ".json",
+    ".md",
+    ".ps1",
+    ".py",
+    ".sh",
+    ".toml",
+    ".txt",
+    ".yml",
+    ".yaml",
+    ".pub",
+}
 
 DEFAULT_RELEASE_CHANNEL = "stable"
 EARLY_RELEASE_CHANNELS = {"early", "beta", "preview", "canary", "nightly"}
@@ -211,6 +226,34 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _sha256_bytes(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _line_ending_equivalent_payloads(path: Path) -> list[bytes]:
+    if path.suffix.lower() not in TEXT_MANIFEST_SUFFIXES:
+        return []
+
+    payload = path.read_bytes()
+    if b"\n" not in payload and b"\r" not in payload:
+        return []
+
+    lf_payload = payload.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    crlf_payload = lf_payload.replace(b"\n", b"\r\n")
+    variants: list[bytes] = []
+    for variant in (lf_payload, crlf_payload):
+        if variant != payload and variant not in variants:
+            variants.append(variant)
+    return variants
+
+
+def _line_ending_equivalent_matches(path: Path, entry: ApplianceFile) -> bool:
+    return any(
+        len(payload) == entry.size and _sha256_bytes(payload) == entry.sha256
+        for payload in _line_ending_equivalent_payloads(path)
+    )
+
+
 def _verify_files(root: Path, manifest: ApplianceManifest) -> None:
     for relative_path, entry in manifest.files.items():
         target = root / Path(relative_path)
@@ -219,15 +262,18 @@ def _verify_files(root: Path, manifest: ApplianceManifest) -> None:
         if not target.is_file():
             raise ApplianceManifestError(f"Signed appliance file {relative_path} is not a file.")
         actual_size = target.stat().st_size
+        actual_sha256 = _sha256_file(target)
+        if actual_size == entry.size and actual_sha256 == entry.sha256:
+            continue
+        if _line_ending_equivalent_matches(target, entry):
+            continue
         if actual_size != entry.size:
             raise ApplianceManifestError(
                 f"Signed appliance file {relative_path} size mismatch: expected {entry.size}, got {actual_size}."
             )
-        actual_sha256 = _sha256_file(target)
-        if actual_sha256 != entry.sha256:
-            raise ApplianceManifestError(
-                f"Signed appliance file {relative_path} digest mismatch: expected {entry.sha256}, got {actual_sha256}."
-            )
+        raise ApplianceManifestError(
+            f"Signed appliance file {relative_path} digest mismatch: expected {entry.sha256}, got {actual_sha256}."
+        )
 
 
 def verify_package_dir(package_root: Path | None = None) -> ApplianceManifest:
