@@ -195,6 +195,40 @@ def test_wait_for_batch_terminal_retries_transient_read_timeout(
     assert "batchrouter.batch.poll.retry" in progress
 
 
+def test_run_drill_preflights_batchrouter_before_vast_launch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = replace(minimal_config(tmp_path), launch_nodes=1, destroy_node_after_assignment=False)
+    calls: list[str] = []
+
+    class FakeBatchRouter:
+        def __init__(self, *_args, **_kwargs) -> None:
+            calls.append("batchrouter.client")
+
+        def preflight(self) -> dict[str, object]:
+            calls.append("batchrouter.preflight")
+            raise drill.LiveVastBatchRouterDrillError("BatchRouter auth failed")
+
+        def close(self) -> None:
+            calls.append("batchrouter.close")
+
+    def fail_if_vast_launches(*_args, **_kwargs) -> None:
+        calls.append("vast.launch")
+        raise AssertionError("Vast launch should not run after BatchRouter preflight failure")
+
+    monkeypatch.setattr(drill, "BatchRouterClient", FakeBatchRouter)
+    monkeypatch.setattr(drill, "launch_vast_nodes", fail_if_vast_launches)
+
+    report = drill.run_drill(config)
+
+    assert report["status"] == "error"
+    assert calls == ["batchrouter.client", "batchrouter.preflight", "batchrouter.close"]
+    progress = (config.artifact_dir / "progress.jsonl").read_text(encoding="utf-8")
+    assert "batchrouter.auth.preflight.start" in progress
+    assert "vast.launch.start" not in progress
+
+
 def test_build_node_enroll_payload_uses_static_drill_node_shape(tmp_path: Path) -> None:
     config = minimal_config(tmp_path)
     payload = drill.build_node_enroll_payload(config, label="node-label")

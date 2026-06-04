@@ -4,4 +4,25 @@ __pycache__/
 *.egg-info/
 .venv/
 .installer-venv/
+.build-venv/
+.git/
+.github/
+.env
+.env.*
+local-secrets/
 data/
+logs/
+diagnostics/
+test artifacts/
+test-artifacts/
+live-drill-artifacts/
+runtime-state/
+state/
+tmp/
+.tmp/
+coverage/
+*.log
+*.tmp
+*.jsonl
+*.err
+*.out

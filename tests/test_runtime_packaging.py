@@ -96,6 +96,24 @@ def test_gitignore_excludes_live_drill_artifacts() -> None:
     assert "test-artifacts/" in content
 
 
+def test_dockerignore_excludes_local_secret_and_runtime_artifacts() -> None:
+    content = (RUNTIME_ROOT / ".dockerignore").read_text(encoding="utf-8")
+
+    for pattern in (
+        ".env",
+        ".env.*",
+        "local-secrets/",
+        "data/",
+        "logs/",
+        "diagnostics/",
+        "test artifacts/",
+        "test-artifacts/",
+        "live-drill-artifacts/",
+        "*.jsonl",
+    ):
+        assert pattern in content
+
+
 def test_built_wheel_includes_hidden_runtime_env_example(tmp_path: Path) -> None:
     completed = subprocess.run(
         [

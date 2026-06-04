@@ -236,6 +236,12 @@ edge-node-runtime/
 - Python 3.11+ (for development)
 - Bash or PowerShell (for scripts)
 - Modern web browser (for setup UI)
+- Git config: `core.autocrlf` set to `false`
+
+Set this once per clone:
+```bash
+git config core.autocrlf false
+```
 
 ### Quick Start (Recommended)
 

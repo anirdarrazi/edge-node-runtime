@@ -235,6 +235,9 @@ class BatchRouterClient:
     def quote_batch(self, manifest: Mapping[str, Any]) -> dict[str, Any]:
         return self._request_json("POST", "/v1/batches/quote", json_body=manifest)
 
+    def preflight(self) -> dict[str, Any]:
+        return self._request_json("GET", "/v1/route-policies")
+
     def create_batch(self, manifest: Mapping[str, Any], *, idempotency_key: str) -> dict[str, Any]:
         return self._request_json(
             "POST",
@@ -1109,6 +1112,9 @@ def run_drill(config: DrillConfig) -> dict[str, Any]:
     try:
         write_json(config.artifact_dir / "drill-config.redacted.json", {"run_id": run_id, "config": config_report(config)})
         append_event(config, "drill.started", run_id=run_id, batch_size=config.batch_size, launch_nodes=config.launch_nodes)
+        append_event(config, "batchrouter.auth.preflight.start", base_url=config.batchrouter_base_url)
+        batchrouter.preflight()
+        append_event(config, "batchrouter.auth.preflight.ok")
         launch_vast_nodes(config, state, edge)
         ready_nodes = [
             node

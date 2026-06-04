@@ -32,7 +32,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
 
       - name: verify:agent-doc-sync/clean-room
         run: node ./scripts/verify-clean-room.mjs
@@ -71,7 +71,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
 
       - name: verify:docs
         run: node ./scripts/verify-docs-hygiene.mjs
