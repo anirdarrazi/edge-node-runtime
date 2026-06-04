@@ -58,6 +58,7 @@ DEFAULT_MANIFEST_UPLOAD_THRESHOLD_ITEMS = 5_000
 DEFAULT_ASSIGNMENT_TIMEOUT_SECONDS = 900.0
 DEFAULT_COMPLETION_TIMEOUT_SECONDS = 2700.0
 DEFAULT_POLL_SECONDS = 5.0
+DEFAULT_QUOTE_RETRY_TIMEOUT_SECONDS = 180.0
 DEFAULT_VAST_NODES = 2
 DEFAULT_VAST_MAX_PRICE = 0.25
 DEFAULT_NODE_LAUNCH_ATTEMPTS = 3
@@ -82,6 +83,7 @@ class DrillConfig:
     batchrouter_base_url: str = DEFAULT_BATCHROUTER_BASE_URL
     edge_control_cwd: Path = Path(".")
     executions_d1_database: str = DEFAULT_EXECUTIONS_D1
+    cloudflare_account_id: str | None = None
     artifact_dir: Path = Path("test artifacts/live-vast-batchrouter-drill")
     launch_nodes: int = DEFAULT_VAST_NODES
     batch_size: int = DEFAULT_BATCH_SIZE
@@ -93,6 +95,7 @@ class DrillConfig:
     manifest_upload_threshold_items: int = DEFAULT_MANIFEST_UPLOAD_THRESHOLD_ITEMS
     max_price: float = DEFAULT_VAST_MAX_PRICE
     poll_seconds: float = DEFAULT_POLL_SECONDS
+    quote_retry_timeout_seconds: float = DEFAULT_QUOTE_RETRY_TIMEOUT_SECONDS
     assignment_timeout_seconds: float = DEFAULT_ASSIGNMENT_TIMEOUT_SECONDS
     completion_timeout_seconds: float = DEFAULT_COMPLETION_TIMEOUT_SECONDS
     require_accepted_assignment: bool = True
@@ -142,6 +145,8 @@ class DrillConfig:
             raise LiveVastBatchRouterDrillError("manifest_upload_threshold_items cannot be negative.")
         if self.poll_seconds <= 0:
             raise LiveVastBatchRouterDrillError("poll_seconds must be positive.")
+        if self.quote_retry_timeout_seconds < 0:
+            raise LiveVastBatchRouterDrillError("quote_retry_timeout_seconds cannot be negative.")
         if not str(self.vast_api_key or "").strip():
             raise LiveVastBatchRouterDrillError("VAST_API_KEY is required.")
         if not str(self.batchrouter_api_key or "").strip():
@@ -353,11 +358,13 @@ class WranglerD1Client:
         cwd: Path,
         database: str,
         timeout_seconds: float = 60.0,
+        account_id: str | None = None,
         platform_name: str | None = None,
     ) -> None:
         self.cwd = Path(cwd)
         self.database = database
         self.timeout_seconds = timeout_seconds
+        self.account_id = str(account_id or "").strip() or None
         self.platform_name = platform_name or os.name
 
     def query(self, sql: str) -> D1QueryResult:
@@ -376,10 +383,14 @@ class WranglerD1Client:
             normalized_sql,
         ]
         command = command_for_platform(args, platform_name=self.platform_name)
+        env = os.environ.copy()
+        if self.account_id:
+            env["CLOUDFLARE_ACCOUNT_ID"] = self.account_id
         completed = subprocess.run(
             command,
             cwd=self.cwd,
             capture_output=True,
+            env=env,
             text=True,
             timeout=self.timeout_seconds,
             check=False,
@@ -746,6 +757,67 @@ def extract_quote_id(quote_payload: Mapping[str, Any]) -> str:
     raise LiveVastBatchRouterDrillError("BatchRouter quote response did not include quote_id.")
 
 
+def compact_error_message(error: Exception, *, max_length: int = 700) -> str:
+    message = str(error) or error.__class__.__name__
+    if len(message) <= max_length:
+        return message
+    return f"{message[: max(0, max_length - 3)]}..."
+
+
+def is_retryable_quote_capacity_error(error: Exception) -> bool:
+    message = str(error).lower()
+    if "batchrouter post /v1/batches/quote" not in message:
+        return False
+    return any(
+        marker in message
+        for marker in (
+            "provider_capacity_unavailable",
+            "provider_capacity_paused",
+            "provider_capacity_stale_heartbeat",
+            "capacity is paused",
+        )
+    )
+
+
+def quote_batch_with_capacity_retry(
+    batchrouter: BatchRouterClient,
+    config: DrillConfig,
+    manifest: Mapping[str, Any],
+    *,
+    monotonic: Any = time.monotonic,
+    sleep: Any = time.sleep,
+) -> dict[str, Any]:
+    deadline = monotonic() + max(0.0, float(config.quote_retry_timeout_seconds))
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            return batchrouter.quote_batch(manifest)
+        except LiveVastBatchRouterDrillError as error:
+            if not is_retryable_quote_capacity_error(error) or config.quote_retry_timeout_seconds <= 0:
+                raise
+            now = monotonic()
+            if now >= deadline:
+                append_event(
+                    config,
+                    "batchrouter.quote.retry.exhausted",
+                    attempt=attempt,
+                    timeout_seconds=config.quote_retry_timeout_seconds,
+                    error=compact_error_message(error),
+                )
+                raise
+            sleep_seconds = min(float(config.poll_seconds), max(0.0, deadline - now))
+            append_event(
+                config,
+                "batchrouter.quote.retry",
+                attempt=attempt,
+                sleep_seconds=round(sleep_seconds, 3),
+                timeout_seconds=config.quote_retry_timeout_seconds,
+                error=compact_error_message(error),
+            )
+            sleep(sleep_seconds)
+
+
 def ensure_quote_under_cap(quote_payload: Mapping[str, Any], *, max_quote_usd: float) -> None:
     pricing = quote_payload.get("pricing_estimate")
     total = numeric_amount(pricing.get("total") if isinstance(pricing, Mapping) else None)
@@ -1105,6 +1177,7 @@ def run_drill(config: DrillConfig) -> dict[str, Any]:
         cwd=config.edge_control_cwd,
         database=config.executions_d1_database,
         timeout_seconds=config.wrangler_timeout_seconds,
+        account_id=config.cloudflare_account_id,
     )
     status = "error"
     cleanup: dict[str, Any] = {}
@@ -1174,7 +1247,7 @@ def run_drill(config: DrillConfig) -> dict[str, Any]:
             item_count=config.batch_size,
             request_source="input_file" if use_manifest_file else "inline",
         )
-        quote = batchrouter.quote_batch(manifest)
+        quote = quote_batch_with_capacity_retry(batchrouter, config, manifest)
         ensure_quote_under_cap(quote, max_quote_usd=config.max_quote_usd)
         state.quote_id = extract_quote_id(quote)
         write_json(config.artifact_dir / "batchrouter-quote.json", quote)
@@ -1326,6 +1399,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--batchrouter-base-url", default="", help=f"Defaults to {DEFAULT_BATCHROUTER_BASE_URL}.")
     parser.add_argument("--edge-control-cwd", default="", help="Path to the edge-control repo for wrangler D1 queries.")
     parser.add_argument("--executions-d1-database", default=DEFAULT_EXECUTIONS_D1)
+    parser.add_argument(
+        "--cloudflare-account-id",
+        default="",
+        help="Cloudflare account ID used for non-interactive Wrangler D1 queries. Defaults to CLOUDFLARE_ACCOUNT_ID.",
+    )
     parser.add_argument("--artifact-dir", default="")
     parser.add_argument("--launch-nodes", type=int, default=DEFAULT_VAST_NODES)
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
@@ -1345,6 +1423,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--max-price", type=float, default=DEFAULT_VAST_MAX_PRICE)
     parser.add_argument("--poll-seconds", type=float, default=DEFAULT_POLL_SECONDS)
+    parser.add_argument(
+        "--quote-retry-timeout-seconds",
+        type=float,
+        default=DEFAULT_QUOTE_RETRY_TIMEOUT_SECONDS,
+        help=(
+            "How long to retry BatchRouter quote requests when the edge provider reports a "
+            "retryable capacity-heartbeat delay. Use 0 to disable."
+        ),
+    )
     parser.add_argument("--assignment-timeout-seconds", type=float, default=DEFAULT_ASSIGNMENT_TIMEOUT_SECONDS)
     parser.add_argument("--completion-timeout-seconds", type=float, default=DEFAULT_COMPLETION_TIMEOUT_SECONDS)
     parser.add_argument(
@@ -1466,6 +1553,7 @@ def build_config_from_args(args: argparse.Namespace) -> DrillConfig:
         or DEFAULT_BATCHROUTER_BASE_URL,
         edge_control_cwd=edge_control_cwd,
         executions_d1_database=str(args.executions_d1_database or DEFAULT_EXECUTIONS_D1).strip(),
+        cloudflare_account_id=first_nonempty(str(args.cloudflare_account_id or ""), os.getenv("CLOUDFLARE_ACCOUNT_ID")),
         artifact_dir=artifact_dir,
         launch_nodes=max(1 if bool(args.skip_failure_drill) else 2, int(args.launch_nodes)),
         batch_size=max(1, int(args.batch_size)),
@@ -1477,6 +1565,7 @@ def build_config_from_args(args: argparse.Namespace) -> DrillConfig:
         manifest_upload_threshold_items=max(0, int(args.manifest_upload_threshold_items)),
         max_price=max(0.0, float(args.max_price)),
         poll_seconds=max(1.0, float(args.poll_seconds)),
+        quote_retry_timeout_seconds=max(0.0, float(args.quote_retry_timeout_seconds)),
         assignment_timeout_seconds=max(1.0, float(args.assignment_timeout_seconds)),
         completion_timeout_seconds=max(1.0, float(args.completion_timeout_seconds)),
         require_accepted_assignment=not bool(args.allow_assigned_victim),

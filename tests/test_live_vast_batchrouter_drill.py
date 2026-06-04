@@ -195,6 +195,54 @@ def test_wait_for_batch_terminal_retries_transient_read_timeout(
     assert "batchrouter.batch.poll.retry" in progress
 
 
+def test_quote_batch_with_capacity_retry_waits_for_heartbeat(tmp_path: Path) -> None:
+    config = replace(minimal_config(tmp_path), quote_retry_timeout_seconds=10, poll_seconds=2)
+
+    class FakeBatchRouter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def quote_batch(self, manifest: dict[str, object]) -> dict[str, object]:
+            self.calls += 1
+            if self.calls < 3:
+                raise drill.LiveVastBatchRouterDrillError(
+                    "BatchRouter POST /v1/batches/quote returned HTTP 503: "
+                    '{"error":{"code":"provider_capacity_unavailable",'
+                    '"message":"Provider autonomousc capacity is paused."}}'
+                )
+            return {"quote_id": "quote_ready", "pricing_estimate": {"total": 0.02}}
+
+    clock = {"now": 0.0}
+    sleeps: list[float] = []
+
+    def monotonic() -> float:
+        return clock["now"]
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock["now"] += seconds
+
+    batchrouter = FakeBatchRouter()
+
+    quote = drill.quote_batch_with_capacity_retry(
+        batchrouter,  # type: ignore[arg-type]
+        config,
+        {"items": []},
+        monotonic=monotonic,
+        sleep=sleep,
+    )
+
+    assert quote["quote_id"] == "quote_ready"
+    assert batchrouter.calls == 3
+    assert sleeps == [2, 2]
+    events = [
+        json.loads(line)
+        for line in (config.artifact_dir / "progress.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [event["event"] for event in events] == ["batchrouter.quote.retry", "batchrouter.quote.retry"]
+    assert all("provider_capacity_unavailable" in event["error"] for event in events)
+
+
 def test_run_drill_preflights_batchrouter_before_vast_launch(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -293,6 +341,7 @@ def test_wrangler_d1_query_uses_json_remote_command(monkeypatch: pytest.MonkeyPa
     client = drill.WranglerD1Client(
         cwd=tmp_path,
         database="autonomousc-edge-network-executions-db",
+        account_id="acct_123",
         platform_name="posix",
     )
     result = client.assignment_summary("batch_123")
@@ -303,6 +352,7 @@ def test_wrangler_d1_query_uses_json_remote_command(monkeypatch: pytest.MonkeyPa
     assert command[:5] == ["npx", "wrangler", "d1", "execute", "autonomousc-edge-network-executions-db"]
     assert "--remote" in command
     assert "--json" in command
+    assert calls[0]["env"]["CLOUDFLARE_ACCOUNT_ID"] == "acct_123"
     assert "batch_123" in command[-1]
     assert "\n" not in command[-1]
     assert command[-1].endswith(";")
@@ -360,6 +410,10 @@ def test_build_config_parses_offer_controls(monkeypatch: pytest.MonkeyPatch, tmp
             "300",
             "--startup-max-vllm-restarts",
             "1",
+            "--quote-retry-timeout-seconds",
+            "42",
+            "--cloudflare-account-id",
+            "acct_123",
             "--launch-attempts-per-node",
             "4",
         ]
@@ -374,6 +428,8 @@ def test_build_config_parses_offer_controls(monkeypatch: pytest.MonkeyPatch, tmp
     assert config.launch_progress_grace_seconds == 90
     assert config.startup_progress_stale_seconds == 300
     assert config.startup_max_vllm_restarts == 1
+    assert config.quote_retry_timeout_seconds == 42
+    assert config.cloudflare_account_id == "acct_123"
     assert config.launch_attempts_per_node == 4
     assert config.manifest_upload_threshold_items == 5000
 
