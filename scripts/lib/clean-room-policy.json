@@ -1,0 +1,72 @@
+{
+  "base": [
+    "*.log",
+    "*.out",
+    "*.err",
+    "*.err.log",
+    "*.err.txt",
+    "*.stacktrace",
+    "*.coverage.json",
+    "*.tmp",
+    "*.tmp.json",
+    "*.tmp.txt",
+    "*.tmp.log",
+    "*.json.err*",
+    "*.json.out*",
+    "*stress*.json",
+    "*stress*.log",
+    "*stress*.out.log",
+    "*stress*.err.log",
+    "*stress*.err.txt",
+    "test artifacts/",
+    "test-artifacts/",
+    "test-output/",
+    "stress-output/",
+    "stress-outputs/",
+    "runtime-state/",
+    "state/",
+    "live-drill-artifacts/",
+    "diagnostics/",
+    "dist/",
+    "build/",
+    "coverage/",
+    "coverage/**/",
+    "codex-*.json"
+  ],
+  "repos": {
+    "edge-control": [
+      ".wrangler/",
+      ".wrangler",
+      "node_modules/",
+      "node_modules/.cache/",
+      "node_modules/.mf/",
+      "node_modules/.vite/",
+      "coverage/",
+      "state/",
+      "dist/"
+    ],
+    "marketplace-console": [
+      ".wrangler/",
+      "node_modules/",
+      "node_modules/.cache/",
+      "node_modules/.vite/",
+      "node_modules/.npm/",
+      ".vite/",
+      ".npm/",
+      "dist/",
+      "coverage/"
+    ],
+    "edge-node-runtime": [
+      ".build-venv/",
+      ".installer-venv/",
+      "__pycache__/",
+      "*.pyc",
+      ".pytest_cache/",
+      "dist/",
+      "build/",
+      "state/",
+      "diagnostics/",
+      "data/"
+    ]
+  }
+}

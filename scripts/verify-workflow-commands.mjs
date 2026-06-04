@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { runVerifyWorkflowCommands } from '../../scripts/verify-workflow-commands.mjs';
+import { runVerifyWorkflowCommands } from './lib/verify-workflow-commands.mjs';
 
 runVerifyWorkflowCommands({
   repoName: 'edge-node-runtime',

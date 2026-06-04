@@ -1,3 +1,2 @@
 #!/usr/bin/env node
-import '../../scripts/verify-line-endings.mjs';
-
+import './verify-tracked-line-endings.mjs';

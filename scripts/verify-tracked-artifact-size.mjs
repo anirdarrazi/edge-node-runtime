@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { runVerifyTrackedArtifactSize } from '../../scripts/verify-tracked-artifact-size.mjs';
+import { runVerifyTrackedArtifactSize } from './lib/verify-tracked-artifact-size.mjs';
 
 runVerifyTrackedArtifactSize({
   repoName: 'edge-node-runtime',
