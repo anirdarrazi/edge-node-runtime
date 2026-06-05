@@ -38,7 +38,7 @@ jobs:
         run: node ./scripts/verify-clean-room.mjs
 
       - name: verify:agent-doc-sync
-        run: python scripts/verify_agent_claude_sync.py --strict
+        run: python scripts/verify_agent_claude_sync.py --strict --expected-no-npm-run-only
 
       - name: verify:agent-doc-sync/workflow-command-contract
         run: node ./scripts/verify-workflow-commands.mjs
